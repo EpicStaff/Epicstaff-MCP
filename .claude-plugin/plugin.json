@@ -1,0 +1,10 @@
+{
+  "name": "epicstaff-mcp",
+  "description": "EpicStaff MCP — full-cycle flow building and debugging. MCP server + skills for interview, DDD design, build, QA, debug, and EpicChat output.",
+  "version": "2.0.0",
+  "author": {
+    "name": "EpicStaff"
+  },
+  "homepage": "https://github.com/igorpolishchukhys/epicstaff-mcp",
+  "keywords": ["epicstaff", "mcp", "flows", "agents", "ddd"]
+}

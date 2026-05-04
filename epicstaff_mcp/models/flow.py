@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 NodeType = Literal[
-    "llmnode", "crewnode", "pythonnode", "startnode", "endnode",
+    "crewnode", "pythonnode", "startnode", "endnode",
     "subgraphnode", "codeagentnode", "fileextractornode",
     "audiotranscriptionnode", "decisiontablenode",
     "telegramtriggernode", "webhooktriggernode",
@@ -25,10 +25,6 @@ class NodeBase(BaseModel):
 class CrewNode(NodeBase):
     crew_id: int
     stream_config: dict[str, Any] = {}
-
-
-class LLMNode(NodeBase):
-    llm_config: int
 
 
 class PythonNode(NodeBase):
@@ -81,7 +77,6 @@ class Flow(BaseModel):
     created_at: str
     updated_at: str
     crew_node_list: list[dict[str, Any]] = []
-    llm_node_list: list[dict[str, Any]] = []
     python_node_list: list[dict[str, Any]] = []
     start_node_list: list[dict[str, Any]] = []
     end_node_list: list[dict[str, Any]] = []

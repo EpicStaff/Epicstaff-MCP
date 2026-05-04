@@ -119,3 +119,48 @@ async def create_embedding_config(
         payload["model"] = model
     async with get_client() as client:
         return await client.post("/api/embedding-configs/", json=payload)
+
+
+async def get_embedding_config(config_id: int) -> dict[str, Any]:
+    """Get an embedding configuration by ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/embedding-configs/{config_id}/")
+
+
+async def update_embedding_config(
+    config_id: int,
+    custom_name: str | None = None,
+    model: int | None = None,
+) -> dict[str, Any]:
+    """Update one or more fields of an embedding configuration.
+
+    Only provided (non-None) fields are sent in the PATCH request.
+    """
+    payload: dict[str, Any] = {}
+    if custom_name is not None:
+        payload["custom_name"] = custom_name
+    if model is not None:
+        payload["model"] = model
+    async with get_client() as client:
+        return await client.patch(f"/api/embedding-configs/{config_id}/", json=payload)
+
+
+async def delete_embedding_config(config_id: int) -> dict[str, str]:
+    """Delete an embedding configuration by ID."""
+    async with get_client() as client:
+        await client.delete(f"/api/embedding-configs/{config_id}/")
+    return {"message": f"Embedding config {config_id} deleted successfully"}
+
+
+async def list_llm_models(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """List all available LLM models (used when creating or updating LLM configs)."""
+    async with get_client() as client:
+        return await client.get("/api/llm-models/", params={"limit": limit, "offset": offset})
+
+
+async def list_embedding_models(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """List all available embedding models (used when creating or updating embedding configs)."""
+    async with get_client() as client:
+        return await client.get(
+            "/api/embedding-models/", params={"limit": limit, "offset": offset}
+        )

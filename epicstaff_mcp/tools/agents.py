@@ -147,3 +147,47 @@ async def delete_agent(agent_id: int) -> dict[str, str]:
     async with get_client() as client:
         await client.delete(f"/api/agents/{agent_id}/")
     return {"message": f"Agent {agent_id} deleted successfully"}
+
+
+async def copy_agent(agent_id: int, name: str | None = None) -> dict[str, Any]:
+    """Create a copy of an existing agent.
+
+    agent_id: ID of the agent to copy
+    name: optional name for the new agent copy; if omitted the server generates one
+    """
+    payload: dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    async with get_client() as client:
+        return await client.post(f"/api/agents/{agent_id}/copy/", json=payload)
+
+
+async def list_template_agents(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """List all template agents available in EpicStaff."""
+    async with get_client() as client:
+        return await client.get("/api/template-agents/", params={"limit": limit, "offset": offset})
+
+
+async def get_template_agent(template_agent_id: int) -> dict[str, Any]:
+    """Get full details of a template agent by ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/template-agents/{template_agent_id}/")
+
+
+async def list_agent_tags(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """List all agent tags."""
+    async with get_client() as client:
+        return await client.get("/api/agent-tags/", params={"limit": limit, "offset": offset})
+
+
+async def create_agent_tag(name: str) -> dict[str, Any]:
+    """Create a new agent tag."""
+    async with get_client() as client:
+        return await client.post("/api/agent-tags/", json={"name": name})
+
+
+async def delete_agent_tag(tag_id: int) -> dict[str, str]:
+    """Delete an agent tag by ID."""
+    async with get_client() as client:
+        await client.delete(f"/api/agent-tags/{tag_id}/")
+    return {"message": f"Agent tag {tag_id} deleted successfully"}

@@ -1,55 +1,35 @@
-# epicstaff-mcp — Claude Code Setup
+# EpicStaff MCP — Claude Code Plugin
 
-## Install the MCP server
+EpicStaff MCP gives Claude Code tools to manage flows, agents, sessions, knowledge, and more via the EpicStaff REST API.
 
-Run this command once to register the server with Claude Code:
+## Setup
 
-```bash
-claude mcp add epicstaff \
-  -e EPICSTAFF_BASE_URL=http://localhost:8000 \
-  -e EPICSTAFF_API_TOKEN=your-token \
-  -- uvx --from git+https://github.com/EpicStaff/epicstaff-mcp.git epicstaff-mcp
-```
-
-Replace `http://localhost:8000` with your EpicStaff instance URL and `your-token` with your API token.
-
-After running this, restart Claude Code and the `epicstaff` MCP server will be available.
-
-## Verify the install
+Set these environment variables (once, in your shell profile):
 
 ```bash
-claude mcp get epicstaff
+export EPICSTAFF_MCP_PATH=/path/to/epicstaff-mcp   # path to this cloned repo
+export EPICSTAFF_BASE_URL=http://localhost:8000      # EpicStaff backend URL
+export EPICSTAFF_API_TOKEN=                          # optional Bearer token
 ```
 
-## Auth options
+## Skills
 
-**API token** (recommended):
-```bash
--e EPICSTAFF_API_TOKEN=your-token
-```
+| Skill | When to invoke |
+|---|---|
+| `epicstaff-flow` | Building a new flow or modifying an existing one — runs the full interview → plan → build pipeline |
+| `epicstaff` | Anytime you need MCP tool signatures, node type requirements, or critical operational rules |
+| `flow-ddd` | Designing the `variables` namespace before building — DDD domain structure, node contracts |
+| `flow-debugger` | When a session fails, produces wrong output, hangs, or shows broken wiring |
+| `flow-qa` | After a build is complete — pre-submit validation checklist |
+| `epicchat-response` | Formatting output for the EpicChat widget (buttons, tables, navigation actions) |
 
-**Username / password**:
-```bash
--e EPICSTAFF_USERNAME=admin -e EPICSTAFF_PASSWORD=secret
-```
+## Reference Docs
 
-## Remove
-
-```bash
-claude mcp remove epicstaff
-```
-
-## Working in this repo
-
-The `.mcp.json` in this repo configures the server for project-scoped use. Claude Code will prompt you to approve it when you open the project. Set `EPICSTAFF_BASE_URL` (and optionally `EPICSTAFF_API_TOKEN`) in your environment before opening Claude Code, or edit `.mcp.json` directly with your values.
-
-## Environment variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `EPICSTAFF_BASE_URL` | yes | — | EpicStaff instance URL |
-| `EPICSTAFF_API_TOKEN` | no | — | Bearer token |
-| `EPICSTAFF_USERNAME` | no | — | Basic auth username |
-| `EPICSTAFF_PASSWORD` | no | — | Basic auth password |
-| `EPICSTAFF_TIMEOUT` | no | `30.0` | Request timeout (seconds) |
-| `EPICSTAFF_MAX_RETRIES` | no | `3` | Retries on transient errors |
+| Domain | Doc |
+|---|---|
+| Flows & nodes | `docs/node-reference.md` |
+| Sessions | `docs/sessions-reference.md` |
+| Agents, crews, tasks | `docs/agents-crews-tasks-reference.md` |
+| Tools (MCP/Python) | `docs/tools-reference.md` |
+| Knowledge / RAG | `docs/knowledge-reference.md` |
+| LLM & embedding configs | `docs/llm-configs-reference.md` |

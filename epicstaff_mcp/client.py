@@ -72,6 +72,15 @@ class EpicStaffClient:
         if self._http is None:
             raise RuntimeError("Client not started — use async with EpicStaffClient()")
 
+        # httpx derives the Host header from base_url per-request, overriding client-level headers.
+        # Docker service names with underscores (e.g. django_app) fail Django's RFC 1034/1035
+        # hostname validation even when ALLOWED_HOSTS = ["*"]. Inject Host: localhost only when
+        # the hostname contains underscores (Docker-only issue; no-op on real server hostnames).
+        from urllib.parse import urlparse
+        _hostname = urlparse(self._settings.base_url).hostname or ""
+        if "_" in _hostname:
+            kwargs["headers"] = {"Host": "localhost", **kwargs.get("headers", {})}
+
         async for attempt in AsyncRetrying(
             retry=retry_if_exception(_is_retryable),
             stop=stop_after_attempt(self._settings.max_retries),
@@ -88,7 +97,8 @@ class EpicStaffClient:
                 self._raise_for_status(response)
                 if response.status_code == 204 or not response.content:
                     return {}
-                return response.json()  # type: ignore[no-any-return]
+                result = response.json()
+                return result if isinstance(result, dict) else {"results": result}  # type: ignore[no-any-return]
 
         raise RuntimeError("Retry loop exited without returning")  # unreachable
 
@@ -101,8 +111,24 @@ class EpicStaffClient:
     async def patch(self, path: str, **kwargs: Any) -> dict[str, Any]:
         return await self._request("PATCH", path, **kwargs)
 
+    async def put(self, path: str, **kwargs: Any) -> dict[str, Any]:
+        return await self._request("PUT", path, **kwargs)
+
     async def delete(self, path: str, **kwargs: Any) -> dict[str, Any]:
         return await self._request("DELETE", path, **kwargs)
+
+    async def post_multipart(self, path: str, **kwargs: Any) -> dict[str, Any]:
+        """POST with multipart/form-data. Does not set Content-Type — httpx sets it automatically."""
+        if self._http is None:
+            raise RuntimeError("Client not started — use async with EpicStaffClient()")
+        # Temporarily remove the json Content-Type so httpx can set multipart boundary
+        original_ct = self._http.headers.get("content-type")
+        del self._http.headers["content-type"]
+        try:
+            return await self._request("POST", path, **kwargs)
+        finally:
+            if original_ct:
+                self._http.headers["content-type"] = original_ct
 
 
 # Module-level singleton used by tool functions

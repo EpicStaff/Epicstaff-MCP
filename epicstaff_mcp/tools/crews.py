@@ -115,3 +115,35 @@ async def delete_crew(crew_id: int) -> dict[str, str]:
     async with get_client() as client:
         await client.delete(f"/api/crews/{crew_id}/")
     return {"message": f"Crew {crew_id} deleted successfully"}
+
+
+async def copy_crew(crew_id: int, name: str | None = None) -> dict[str, Any]:
+    """Create a copy of an existing crew.
+
+    crew_id: ID of the crew to copy
+    name: optional name for the new crew copy; if omitted the server generates one
+    """
+    payload: dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    async with get_client() as client:
+        return await client.post(f"/api/crews/{crew_id}/copy/", json=payload)
+
+
+async def list_crew_tags(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """List all crew tags."""
+    async with get_client() as client:
+        return await client.get("/api/crew-tags/", params={"limit": limit, "offset": offset})
+
+
+async def create_crew_tag(name: str) -> dict[str, Any]:
+    """Create a new crew tag."""
+    async with get_client() as client:
+        return await client.post("/api/crew-tags/", json={"name": name})
+
+
+async def delete_crew_tag(tag_id: int) -> dict[str, str]:
+    """Delete a crew tag by ID."""
+    async with get_client() as client:
+        await client.delete(f"/api/crew-tags/{tag_id}/")
+    return {"message": f"Crew tag {tag_id} deleted successfully"}

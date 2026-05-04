@@ -152,3 +152,24 @@ async def delete_tool(tool_id: int, tool_type: str = "mcp") -> dict[str, str]:
     async with get_client() as client:
         await client.delete(f"{endpoint}{tool_id}/")
     return {"message": f"{tool_type.upper()} tool {tool_id} deleted successfully"}
+
+
+async def copy_tool(
+    tool_id: int, tool_type: str = "mcp", name: str | None = None
+) -> dict[str, Any]:
+    """Create a copy of an existing tool.
+
+    tool_id: ID of the tool to copy
+    tool_type: 'mcp' (default) or 'python'
+    name: optional name for the new tool copy; if omitted the server generates one
+    """
+    if tool_type not in ("mcp", "python"):
+        raise EpicStaffAPIError(
+            status_code=400, detail="tool_type must be 'mcp' or 'python'"
+        )
+    endpoint = "/api/mcp-tools/" if tool_type == "mcp" else "/api/python-code-tool/"
+    payload: dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    async with get_client() as client:
+        return await client.post(f"{endpoint}{tool_id}/copy/", json=payload)

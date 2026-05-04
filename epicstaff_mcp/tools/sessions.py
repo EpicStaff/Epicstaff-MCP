@@ -1,6 +1,8 @@
 """MCP tools for managing and running EpicStaff sessions."""
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from epicstaff_mcp.client import get_client
@@ -14,6 +16,12 @@ async def list_sessions(flow_id: int, limit: int = 50, offset: int = 0) -> dict[
             "/api/sessions/",
             params={"graph": flow_id, "limit": limit, "offset": offset},
         )
+
+
+async def get_session(session_id: int) -> dict[str, Any]:
+    """Get full details of a session by ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/sessions/{session_id}/")
 
 
 async def run_session(
@@ -43,13 +51,13 @@ async def run_session(
 async def get_session_updates(session_id: int) -> dict[str, Any]:
     """Poll for output messages and status updates of a running session."""
     async with get_client() as client:
-        return await client.post("/api/get-updates/", json={"session_id": session_id})
+        return await client.get(f"/api/sessions/{session_id}/get-updates/")
 
 
 async def stop_session(session_id: int) -> dict[str, Any]:
     """Stop a running session."""
     async with get_client() as client:
-        return await client.post("/api/stop-session/", json={"session_id": session_id})
+        return await client.post(f"/api/sessions/{session_id}/stop/")
 
 
 async def send_message(
@@ -75,3 +83,65 @@ async def send_message(
                 "answer": answer,
             },
         )
+
+
+async def delete_session(session_id: int) -> dict[str, Any]:
+    """Delete a session by its ID."""
+    async with get_client() as client:
+        return await client.delete(f"/api/sessions/{session_id}/")
+
+
+async def get_session_warnings(session_id: int) -> dict[str, Any]:
+    """Get warnings for a specific session."""
+    async with get_client() as client:
+        return await client.get(f"/api/sessions/{session_id}/warnings/")
+
+
+async def list_session_messages(
+    session_id: int, limit: int = 100, offset: int = 0
+) -> dict[str, Any]:
+    """List all messages for a specific session."""
+    async with get_client() as client:
+        return await client.get(
+            "/api/graph-session-messages/",
+            params={"session": session_id, "limit": limit, "offset": offset},
+        )
+
+
+_TERMINAL_STATUSES = {"completed", "failed", "stopped", "error"}
+
+
+async def run_session_and_wait(
+    flow_id: int,
+    variables: dict[str, Any] | None = None,
+    timeout: int = 300,
+    poll_interval: int = 5,
+) -> dict[str, Any]:
+    """Start a session and poll until it completes, fails, or times out.
+
+    Returns the final session state including status and any output variables.
+    """
+    payload: dict[str, Any] = {"graph_id": flow_id}
+    if variables:
+        payload["variables"] = variables
+
+    async with get_client() as client:
+        start_response = await client.post("/api/run-session/", json=payload)
+
+    session_id = start_response.get("id") or start_response.get("session_id")
+
+    start_time = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - start_time
+        if elapsed > timeout:
+            return {"error": "timeout", "session_id": session_id, "elapsed": elapsed}
+
+        async with get_client() as client:
+            update = await client.get(f"/api/sessions/{session_id}/get-updates/")
+
+        status = update.get("status", "")
+        if status in _TERMINAL_STATUSES:
+            update["elapsed_seconds"] = time.monotonic() - start_time
+            return update
+
+        await asyncio.sleep(poll_interval)

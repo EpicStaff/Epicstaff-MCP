@@ -1,0 +1,16 @@
+{
+  "epicstaff": {
+    "type": "stdio",
+    "command": "uv",
+    "args": [
+      "run",
+      "--project",
+      "${EPICSTAFF_MCP_PATH}",
+      "epicstaff-mcp"
+    ],
+    "env": {
+      "EPICSTAFF_BASE_URL": "${EPICSTAFF_BASE_URL}",
+      "EPICSTAFF_API_TOKEN": "${EPICSTAFF_API_TOKEN}"
+    }
+  }
+}

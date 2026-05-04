@@ -40,7 +40,6 @@ FULL_FLOW = {
     "time_to_live": 3600,
     "persistent_variables": False,
     "crew_node_list": [],
-    "llm_node_list": [],
     "python_node_list": [],
     "start_node_list": [],
     "end_node_list": [],
