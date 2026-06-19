@@ -7,10 +7,14 @@ EpicStaff MCP gives Claude Code tools to manage flows, agents, sessions, knowled
 Set these environment variables (once, in your shell profile):
 
 ```bash
-export EPICSTAFF_MCP_PATH=/path/to/epicstaff-mcp   # path to this cloned repo
 export EPICSTAFF_BASE_URL=http://localhost:8000      # EpicStaff backend URL
 export EPICSTAFF_API_TOKEN=                          # optional Bearer token
+export EPICSTAFF_MCP_PATH=/path/to/epicstaff-mcp     # only for manual `claude mcp add` / dev runs
 ```
+
+> When installed as a plugin (`/plugin install`), `EPICSTAFF_MCP_PATH` is **not** needed —
+> the bundled server runs from `${CLAUDE_PLUGIN_ROOT}` automatically. Only set it for the
+> manual `claude mcp add` path or local development.
 
 ## Skills
 

@@ -6,5 +6,6 @@
     "name": "EpicStaff"
   },
   "homepage": "https://github.com/EpicStaff/epicstaff-mcp",
-  "keywords": ["epicstaff", "mcp", "flows", "agents", "ddd"]
+  "keywords": ["epicstaff", "mcp", "flows", "agents", "ddd"],
+  "mcpServers": "./.mcp.json"
 }

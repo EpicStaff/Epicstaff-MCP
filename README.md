@@ -29,7 +29,22 @@ pip install git+https://github.com/EpicStaff/epicstaff-mcp.git
 
 ## Claude Code
 
-Run once to register the server:
+### As a plugin (recommended — tools **and** skills)
+
+Installing as a plugin brings the MCP tools **and** the bundled skills (`/skills` →
+flow building, DDD design, QA, debugging, EpicChat output) online together:
+
+```
+/plugin marketplace add EpicStaff/epicstaff-mcp
+/plugin install epicstaff-mcp@epicstaff
+```
+
+Set `EPICSTAFF_BASE_URL` (and optionally `EPICSTAFF_API_TOKEN`) in your shell profile so
+the bundled MCP server can reach your instance.
+
+### As a bare MCP server (tools only — no skills)
+
+If you only want the tools and not the skills:
 
 ```bash
 claude mcp add epicstaff \
@@ -37,6 +52,9 @@ claude mcp add epicstaff \
   -e EPICSTAFF_API_TOKEN=your-token \
   -- uvx --from git+https://github.com/EpicStaff/epicstaff-mcp.git epicstaff-mcp
 ```
+
+> A bare MCP server never loads a `skills/` directory — that's why the plugin path above is
+> recommended if you want the EpicStaff workflows.
 
 See [CLAUDE.md](CLAUDE.md) for full Claude Code setup instructions.
 
