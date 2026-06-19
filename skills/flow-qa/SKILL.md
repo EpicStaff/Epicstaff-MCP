@@ -1,5 +1,5 @@
 ---
-name: Flow-QA-Checklist
+name: flow-qa
 description: Use when an EpicStaff flow build is complete and needs pre-submit validation before being considered done.
 ---
 
@@ -8,8 +8,7 @@ description: Use when an EpicStaff flow build is complete and needs pre-submit v
 Static + dynamic validation of a built flow. Treat a flow as a program — reachable, well-typed, and side-effect-aware. This skill produces a pass/fail report with actionable findings.
 
 All checks use MCP tools. Companion skills:
-- `epicstaff` — every tool used here.
-- `flow-node-types` — ports, allowed connections, per-type rules.
+- `epicstaff` — every tool used here, plus node types: ports, allowed connections, per-type rules (also `docs/node-reference.md`).
 - `flow-ddd` — variable namespace shape and contracts.
 - `flow-debugger` — next stop if QA surfaces runtime issues.
 
@@ -18,7 +17,7 @@ All checks use MCP tools. Companion skills:
 ## When to Use
 
 **Use this skill when:**
-- A flow has just been built (`flow-build` completed, `test_flow` passed).
+- A flow has just been built (`epicstaff-flow` build completed, test session passed).
 - Before declaring a flow "ready" for the user.
 - After any structural change (add/delete node or edge), before handing back.
 - The user asks "is it ready?", "lint this flow", "review the flow", "QA it".
@@ -119,7 +118,7 @@ For end node `output_map`: every value path must appear in the writers table or 
 
 Tools: `get_flow_connections`, `get_flow_nodes` (for types).
 
-For each edge, look up the source node's output port `role` and the target node's input port `role`. Confirm source's role is in target's `allowedConnections`, and target's role is in source's `allowedConnections`. The canonical rules are in `flow-node-types`.
+For each edge, look up the source node's output port `role` and the target node's input port `role`. Confirm source's role is in target's `allowedConnections`, and target's role is in source's `allowedConnections`. The canonical rules are in the `epicstaff` skill and `docs/node-reference.md`.
 
 Common illegal wiring:
 - Wiring anything INTO a trigger node.
@@ -257,7 +256,7 @@ Anything less is a **FAIL** — report the blockers first, warnings next, nits l
 
 ## Do Not
 
-- Do not patch during QA. Report findings; let the user or `flow-build` / `flow-debugger` apply fixes.
+- Do not patch during QA. Report findings; let the user or `epicstaff-flow` / `flow-debugger` apply fixes.
 - Do not skip checks that "obviously pass" — the point is evidence.
 - Do not invent a pass result. If you couldn't run a check (e.g. can't synthesize trigger input), say so in the report.
 - Do not run long-timeout smoke tests in a production flow without user permission.

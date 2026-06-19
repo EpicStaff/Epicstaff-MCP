@@ -1,5 +1,5 @@
 ---
-name: EpicChat-Response
+name: epicchat-response
 description: Use when formatting output for the EpicChat widget — structuring messages with buttons, tables, prompts, and navigation actions.
 ---
 

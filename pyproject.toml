@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epicstaff-mcp"
-version = "0.2.0"
+version = "2.0.0"
 description = "Modular MCP server for EpicStaff flow management"
 requires-python = ">=3.12"
 dependencies = [

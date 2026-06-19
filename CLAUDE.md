@@ -28,8 +28,5 @@ export EPICSTAFF_API_TOKEN=                          # optional Bearer token
 | Domain | Doc |
 |---|---|
 | Flows & nodes | `docs/node-reference.md` |
-| Sessions | `docs/sessions-reference.md` |
-| Agents, crews, tasks | `docs/agents-crews-tasks-reference.md` |
-| Tools (MCP/Python) | `docs/tools-reference.md` |
-| Knowledge / RAG | `docs/knowledge-reference.md` |
-| LLM & embedding configs | `docs/llm-configs-reference.md` |
+
+> Sessions, agents/crews/tasks, tools, knowledge/RAG, and LLM-config reference material lives in the skills above (invoke `epicstaff` for tool signatures and operational rules), not in standalone docs.

@@ -1,5 +1,5 @@
 ---
-name: Flow-Debugger
+name: flow-debugger
 description: Use when an EpicStaff flow session fails, produces wrong output, never starts, hangs, or shows broken wiring in the UI.
 ---
 
@@ -8,8 +8,7 @@ description: Use when an EpicStaff flow session fails, produces wrong output, ne
 Process-oriented debugging for EpicStaff flows. All steps use MCP tools — never raw HTTP, CLI wrappers, or Django shell.
 
 Companion skills:
-- `epicstaff` — MCP tool reference (all tools used here).
-- `flow-node-types` — ports, allowed connections, per-type semantics.
+- `epicstaff` — MCP tool reference (all tools used here), plus node types: ports, allowed connections, per-type semantics (also `docs/node-reference.md`).
 - `flow-ddd` — shape of `variables`, input/output maps.
 - `flow-qa` — post-fix validation.
 
@@ -26,8 +25,8 @@ Companion skills:
 - The UI shows nodes as black dots, edges missing, or ports misaligned.
 
 **Do NOT use when:**
-- The flow hasn't been built yet — use `flow-build`.
-- The design is wrong — go back to `flow-architecture`.
+- The flow hasn't been built yet — use `epicstaff-flow`.
+- The design is wrong — go back to `epicstaff-flow` (design phase).
 - You only want to verify a healthy flow — use `flow-qa`.
 
 ---
@@ -215,7 +214,7 @@ Once you apply a patch:
 ## What NOT to Do
 
 - Do not patch a node "just in case" without a specific suspect — patches have side effects (libraries wipes, metadata drift).
-- Do not change architecture during a debug session. If the root cause is an architectural flaw, stop debugging and loop back to `flow-architecture`.
+- Do not change architecture during a debug session. If the root cause is an architectural flaw, stop debugging and loop back to `epicstaff-flow` (design phase).
 - Do not run production sessions as debug canaries — use minimal synthetic inputs.
 - Do not guess LLM / model / prompt changes as a fix for a deterministic error (missing variable path, wrong `input_map`). Fix the deterministic cause first.
 - Do not rely on UI visual inspection alone — always back-check with `get_flow_nodes` / `get_flow_connections`. The UI can lag behind DB.

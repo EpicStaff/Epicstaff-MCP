@@ -16,13 +16,13 @@ MCP server for [EpicStaff](https://github.com/EpicStaff/EpicStaff) — control y
 `uvx` pulls and runs the package directly from the private repo:
 
 ```bash
-uvx --from git+https://github.com/EpicStaff/epicstaff-mcp.git epicstaff-mcp
+uvx --from git+https://github.com/igorpolishchukhys/epicstaff-mcp.git epicstaff-mcp
 ```
 
 ### With pip
 
 ```bash
-pip install git+https://github.com/EpicStaff/epicstaff-mcp.git
+pip install git+https://github.com/igorpolishchukhys/epicstaff-mcp.git
 ```
 
 > **Private repo access:** make sure your GitHub credentials or SSH key are configured so `git clone` works for this repo. On macOS, `gh auth login` is the easiest way.
@@ -35,7 +35,7 @@ Run once to register the server:
 claude mcp add epicstaff \
   -e EPICSTAFF_BASE_URL=http://localhost:8000 \
   -e EPICSTAFF_API_TOKEN=your-token \
-  -- uvx --from git+https://github.com/EpicStaff/epicstaff-mcp.git epicstaff-mcp
+  -- uvx --from git+https://github.com/igorpolishchukhys/epicstaff-mcp.git epicstaff-mcp
 ```
 
 See [CLAUDE.md](CLAUDE.md) for full Claude Code setup instructions.
@@ -51,7 +51,7 @@ Add to `claude_desktop_config.json` (`~/Library/Application Support/Claude/claud
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/EpicStaff/epicstaff-mcp.git",
+        "git+https://github.com/igorpolishchukhys/epicstaff-mcp.git",
         "epicstaff-mcp"
       ],
       "env": {
@@ -74,7 +74,7 @@ In `.cursor/mcp.json`:
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/EpicStaff/epicstaff-mcp.git",
+        "git+https://github.com/igorpolishchukhys/epicstaff-mcp.git",
         "epicstaff-mcp"
       ],
       "env": {

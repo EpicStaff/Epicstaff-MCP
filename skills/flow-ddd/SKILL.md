@@ -1,5 +1,5 @@
 ---
-name: Domain-Driven-Flow-Design
+name: flow-ddd
 description: Use when designing the variables namespace for an EpicStaff flow, translating business requirements into node graph contracts, or deciding which node type fits a responsibility.
 ---
 
@@ -8,9 +8,8 @@ description: Use when designing the variables namespace for an EpicStaff flow, t
 A flow is a program whose only shared state is the `variables` dict. Every node reads through `input_map` and writes through `output_variable_path`. Treat `variables` as the domain model — design it before you place the nodes.
 
 This skill complements:
-- `flow-interview` / `flow-architecture` — producing the spec and the abstract graph.
-- `flow-node-types` — what each node type can actually do.
-- `flow-build` — the mechanics of creating the nodes via MCP tools.
+- `epicstaff-flow` — the interview → plan → build pipeline that produces the spec and materializes the graph.
+- `epicstaff` — what each node type can actually do, and the MCP tools that create them (see also `docs/node-reference.md`).
 
 ---
 

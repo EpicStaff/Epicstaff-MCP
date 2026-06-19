@@ -1,5 +1,5 @@
 ---
-name: EpicStaff-Flow-Reference
+name: epicstaff
 description: Use when working with EpicStaff flows, nodes, sessions, or MCP tools — inspecting, building, patching, or debugging. Reference for all epicstaff-mcp tool signatures, node type requirements, port connection rules, and critical operational gotchas.
 ---
 
