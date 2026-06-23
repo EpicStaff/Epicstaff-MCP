@@ -1,0 +1,11 @@
+{
+  "name": "epicstaff-mcp-dev",
+  "description": "EpicStaff MCP (DEV) — live working-tree build for local iteration. Runs the repo's MCP server and skills directly; points at a local backend. Use via `claude --plugin-dir dev-plugin`, then `/reload-plugins` after edits.",
+  "version": "2.0.0-dev",
+  "author": {
+    "name": "EpicStaff"
+  },
+  "homepage": "https://github.com/EpicStaff/epicstaff-mcp",
+  "keywords": ["epicstaff", "mcp", "dev", "flows"],
+  "mcpServers": "./.mcp.json"
+}

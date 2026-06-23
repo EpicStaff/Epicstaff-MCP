@@ -63,6 +63,18 @@ async def test_bearer_auth_header():
 
 
 @respx.mock
+async def test_x_api_key_auth_header():
+    respx.get(f"{BASE}api/agents/").mock(return_value=httpx.Response(200, json={}))
+    settings = make_settings(api_key="epicstaff_key")
+    client = EpicStaffClient(settings)
+    async with client:
+        await client.get("/api/agents/")
+    request = respx.calls.last.request
+    assert request.headers["x-api-key"] == "epicstaff_key"
+    assert "authorization" not in request.headers
+
+
+@respx.mock
 async def test_basic_auth_header():
     import base64
 

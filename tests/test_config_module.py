@@ -18,6 +18,21 @@ def test_api_key_auth_mode(monkeypatch):
     assert s.auth_mode == AuthMode.API_KEY
 
 
+def test_x_api_key_auth_mode(monkeypatch):
+    monkeypatch.setenv("EPICSTAFF_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("EPICSTAFF_API_KEY", "epicstaff_key")
+    s = Settings()
+    assert s.auth_mode == AuthMode.X_API_KEY
+
+
+def test_api_key_and_token_ambiguous_raises(monkeypatch):
+    monkeypatch.setenv("EPICSTAFF_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("EPICSTAFF_API_KEY", "k")
+    monkeypatch.setenv("EPICSTAFF_API_TOKEN", "t")
+    with pytest.raises(ValidationError, match="Ambiguous"):
+        Settings()
+
+
 def test_basic_auth_mode(monkeypatch):
     monkeypatch.setenv("EPICSTAFF_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("EPICSTAFF_USERNAME", "user")

@@ -6,6 +6,7 @@ from typing import Any
 
 from epicstaff_mcp.client import get_client
 from epicstaff_mcp.exceptions import EpicStaffAPIError
+from epicstaff_mcp.tools import _flow_validation as fv
 
 # Maps node_type string to the API endpoint prefix
 NODE_TYPE_TO_ENDPOINT: dict[str, str] = {
@@ -113,7 +114,19 @@ async def add_node(
     if node_name is not None:
         payload["node_name"] = node_name
     async with get_client() as client:
-        return await client.post(f"/api/{endpoint}/", json=payload)
+        result = await client.post(f"/api/{endpoint}/", json=payload)
+    label = node_name or result.get("node_name") or node_type
+    warnings = fv.check_node_config(node_type, config, label)
+    warnings.append(
+        fv._w("node_not_connected", f"Node '{label}' has no edges yet — wire it next.", label)
+    )
+    return fv.envelope(
+        result,
+        what_changed=f"Created {node_type} '{label}'.",
+        warnings=warnings,
+        suggested_next=[f"add_edge({flow_id}, <from_id>, {result.get('id', '<id>')})"]
+        + fv.structural_next_steps(flow_id),
+    )
 
 
 async def update_node(
@@ -170,10 +183,15 @@ async def add_edge(
 ) -> dict[str, Any]:
     """Connect two nodes with a regular (unconditional) edge."""
     async with get_client() as client:
-        return await client.post(
+        result = await client.post(
             "/api/edges/",
             json={"graph": flow_id, "start_node_id": start_node_id, "end_node_id": end_node_id},
         )
+    return fv.envelope(
+        result,
+        what_changed=f"Connected node {start_node_id} -> {end_node_id}.",
+        suggested_next=fv.structural_next_steps(flow_id),
+    )
 
 
 async def delete_edge(
@@ -215,6 +233,7 @@ async def save_flow(
     edge_list: list[dict[str, Any]] | None = None,
     conditional_edge_list: list[dict[str, Any]] | None = None,
     deleted: dict[str, Any] | None = None,
+    allow_incomplete: bool = False,
 ) -> dict[str, Any]:
     """Atomically save an entire flow graph in one request (bulk save).
 
@@ -235,6 +254,14 @@ async def save_flow(
 
     deleted: dict with keys like 'crew_node_ids', 'edge_ids',
              'conditional_edge_ids', etc. containing lists of IDs to delete.
+
+    GATE: after saving, the flow is re-validated (structure + variable paths). If
+    blocker-level problems remain, the envelope reports status="error",
+    gate="blocked" — your signal that the flow is not yet runnable. The save has
+    already persisted (the bulk POST is atomic and cannot be rolled back), so
+    this is a hard *signal*, not a refusal to write. Pass allow_incomplete=True
+    to acknowledge a work-in-progress save: blockers are still listed but
+    gate="override" and status is downgraded to "warning".
     """
     payload: dict[str, Any] = {
         "crew_node_list": crew_node_list or [],
@@ -253,7 +280,37 @@ async def save_flow(
         "deleted": deleted or {},
     }
     async with get_client() as client:
-        return await client.post(f"/api/graphs/{flow_id}/save/", json=payload)
+        result = await client.post(f"/api/graphs/{flow_id}/save/", json=payload)
+
+    # Re-validate the persisted flow and gate on blocker-level problems.
+    structure = await test_flow(flow_id)
+    paths = await validate_flow_paths(flow_id)
+    warnings: list[dict[str, Any]] = [
+        fv._w("structure", issue) for issue in structure.get("issues", [])
+    ]
+    for f in paths.get("findings", []):
+        code = "path_blocker" if f["severity"] == "blocker" else "path_warning"
+        warnings.append(fv._w(code, f["message"], f.get("reader_node")))
+
+    has_blocker = (not structure.get("ok", True)) or paths.get("status") == "error"
+    if has_blocker and not allow_incomplete:
+        gate, status = "blocked", "error"
+    elif has_blocker:
+        gate, status = "override", "warning"
+    else:
+        gate, status = "passed", ("warning" if warnings else "ok")
+
+    return fv.envelope(
+        result,
+        what_changed=f"Saved flow {flow_id} ({structure.get('summary', '')}).",
+        warnings=warnings,
+        suggested_next=(
+            [f"init_flow_metadata({flow_id})"]
+            if gate != "blocked"
+            else [f"test_flow({flow_id})", f"validate_flow_paths({flow_id})"]
+        ),
+        extra={"gate": gate, "status": status},
+    )
 
 
 async def delete_flow(flow_id: int) -> dict[str, str]:
@@ -278,7 +335,12 @@ async def add_conditional_edge(
     if input_map is not None:
         payload["input_map"] = input_map
     async with get_client() as client:
-        return await client.post("/api/conditionaledges/", json=payload)
+        result = await client.post("/api/conditionaledges/", json=payload)
+    return fv.envelope(
+        result,
+        what_changed=f"Added conditional edge from node {source_node_id}.",
+        suggested_next=fv.structural_next_steps(flow_id),
+    )
 
 
 # Graph Tags
@@ -463,6 +525,30 @@ async def _get_cdt_node(
     )
 
 
+def _index_graph(graph: dict[str, Any]) -> dict[str, Any]:
+    """Index a graph response once into the maps every flow reader needs.
+
+    Returns ``id_to_name``, ``id_to_endpoint``, and ``nodes`` (a list of
+    ``{id, name, endpoint, data}``). Centralises the id->name loop that was
+    previously copied across get_flow_connections / init_flow_metadata /
+    test_flow. The id->name mapping is byte-for-byte what those callers built.
+    """
+    id_to_name: dict[int, str] = {}
+    id_to_endpoint: dict[int, str] = {}
+    nodes: list[dict[str, Any]] = []
+    for list_key, endpoint in NODE_LIST_KEYS:
+        for node in graph.get(list_key, []):
+            nid = node.get("id")
+            name = node.get("node_name") or node.get("name", str(nid))
+            if nid is not None:
+                id_to_name[nid] = name
+                id_to_endpoint[nid] = endpoint
+                nodes.append(
+                    {"id": nid, "name": name, "endpoint": endpoint, "data": node}
+                )
+    return {"id_to_name": id_to_name, "id_to_endpoint": id_to_endpoint, "nodes": nodes}
+
+
 # ---------------------------------------------------------------------------
 # New public tool functions
 # ---------------------------------------------------------------------------
@@ -472,13 +558,7 @@ async def get_flow_connections(graph_id: int) -> dict[str, Any]:
     async with get_client() as client:
         graph = await client.get(f"/api/graphs/{graph_id}/")
 
-    id_to_name: dict[int, str] = {}
-    for list_key, _ in NODE_LIST_KEYS:
-        for node in graph.get(list_key, []):
-            nid = node.get("id")
-            name = node.get("node_name") or node.get("name", str(nid))
-            if nid is not None:
-                id_to_name[nid] = name
+    id_to_name = _index_graph(graph)["id_to_name"]
 
     edges = []
     for e in graph.get("edge_list", []):
@@ -529,6 +609,199 @@ async def get_flow_connections(graph_id: int) -> dict[str, Any]:
         "cdt_routing": cdt_routing,
         "dt_routing": dt_routing,
     }
+
+
+# Endpoints that are exempt from the "must be wired with edges" expectation.
+_EDGELESS_ENDPOINTS = frozenset(
+    {
+        "decision-table-node",
+        "classification-decision-table-node",
+        "webhook-trigger-nodes",
+        "telegram-trigger-nodes",
+    }
+)
+_TRIGGER_ENDPOINTS = frozenset({"webhook-trigger-nodes", "telegram-trigger-nodes"})
+_START_ENDPOINTS = frozenset({"startnodes"})
+_END_ENDPOINTS = frozenset({"endnodes"})
+
+
+async def describe_flow(graph_id: int, fmt: str = "text") -> dict[str, Any]:
+    """Human/Claude-readable view of an assembled flow.
+
+    Renders nodes, what each reads/writes, the wiring (edges + CDT/DT routing),
+    and flags orphans (nothing reaches them) and dangling nodes (they go
+    nowhere) — so you can SEE the flow instead of parsing raw node JSON.
+
+    fmt: "text" (default) | "mermaid" | "both". The structured fields
+    (summary, nodes, routing, orphans, dangling) are always returned.
+    """
+    async with get_client() as client:
+        graph = await client.get(f"/api/graphs/{graph_id}/")
+
+    idx = _index_graph(graph)
+    id_to_name: dict[int, str] = idx["id_to_name"]
+    name_to_id = {v: k for k, v in id_to_name.items()}
+    nodes = idx["nodes"]
+
+    # Wiring: regular edges (static), conditional edges (dynamic target),
+    # CDT/DT routing by node name.
+    has_incoming: set[int] = set()
+    has_outgoing: set[int] = set()
+    edge_pairs: list[tuple[int, int]] = []
+    for e in graph.get("edge_list", []):
+        sid, eid = e.get("start_node_id"), e.get("end_node_id")
+        if sid is not None:
+            has_outgoing.add(sid)
+        if eid is not None:
+            has_incoming.add(eid)
+        if sid is not None and eid is not None:
+            edge_pairs.append((sid, eid))
+
+    cond_pairs: list[tuple[int, str]] = []
+    for e in graph.get("conditional_edge_list", []):
+        sid = e.get("source_node_id") or e.get("source_node")
+        if sid is not None:
+            has_outgoing.add(sid)
+            cond_pairs.append((sid, e.get("python_code") or "lambda"))
+
+    routing_edges: list[tuple[int, str, int]] = []  # (src_id, label, dst_id)
+    for list_key in (
+        "classification_decision_table_node_list",
+        "decision_table_node_list",
+    ):
+        for node in graph.get(list_key, []):
+            src_id = node.get("id")
+            if src_id is not None:
+                targets = [
+                    (g.get("group_name") or "", g.get("next_node"))
+                    for g in node.get("condition_groups", [])
+                ]
+                targets.append(("default", node.get("default_next_node")))
+                targets.append(("error", node.get("next_error_node")))
+                for label, target_name in targets:
+                    if not target_name:
+                        continue
+                    has_outgoing.add(src_id)
+                    dst_id = name_to_id.get(target_name)
+                    if dst_id is not None:
+                        has_incoming.add(dst_id)
+                        routing_edges.append((src_id, label, dst_id))
+
+    # Per-node summary + orphan/dangling classification.
+    node_views: list[dict[str, Any]] = []
+    orphans: list[str] = []
+    dangling: list[str] = []
+    for n in nodes:
+        nid, name, endpoint, data = n["id"], n["name"], n["endpoint"], n["data"]
+        reads = sorted((data.get("input_map") or {}).values()) if data.get("input_map") else []
+        writes = data.get("output_variable_path")
+        incoming = [id_to_name.get(s) for s, e in edge_pairs if e == nid]
+        incoming += [id_to_name.get(s) for s, _, d in routing_edges if d == nid]
+        outgoing = [id_to_name.get(e) for s, e in edge_pairs if s == nid]
+        outgoing += [id_to_name.get(d) for s, _, d in routing_edges if s == nid]
+        node_views.append(
+            {
+                "id": nid,
+                "name": name,
+                "type": endpoint,
+                "reads": reads,
+                "writes": writes,
+                "incoming": [x for x in incoming if x],
+                "outgoing": [x for x in outgoing if x],
+            }
+        )
+        # Orphan: nothing flows in, and it isn't a start or trigger entry point.
+        if (
+            nid not in has_incoming
+            and endpoint not in _START_ENDPOINTS
+            and endpoint not in _TRIGGER_ENDPOINTS
+        ):
+            orphans.append(name)
+        # Dangling: nothing flows out, and it isn't an end node.
+        if nid not in has_outgoing and endpoint not in _END_ENDPOINTS:
+            dangling.append(name)
+
+    summary = {
+        "nodes": len(nodes),
+        "edges": len(edge_pairs),
+        "conditional_edges": len(cond_pairs),
+        "cdt_routes": sum(1 for _ in graph.get("classification_decision_table_node_list", [])),
+        "dt_routes": sum(1 for _ in graph.get("decision_table_node_list", [])),
+        "orphans": len(orphans),
+        "dangling": len(dangling),
+    }
+
+    result: dict[str, Any] = {
+        "graph_id": graph_id,
+        "name": graph.get("name"),
+        "summary": summary,
+        "nodes": node_views,
+        "orphans": orphans,
+        "dangling": dangling,
+    }
+
+    if fmt in ("text", "both"):
+        result["text"] = _render_flow_text(result, edge_pairs, routing_edges, id_to_name)
+    if fmt in ("mermaid", "both"):
+        result["mermaid"] = _render_flow_mermaid(node_views, edge_pairs, cond_pairs, routing_edges)
+    return result
+
+
+def _render_flow_text(
+    result: dict[str, Any],
+    edge_pairs: list[tuple[int, int]],
+    routing_edges: list[tuple[int, str, int]],
+    id_to_name: dict[int, str],
+) -> str:
+    lines: list[str] = [f"Flow: {result['name']} (id={result['graph_id']})"]
+    s = result["summary"]
+    lines.append(
+        f"  {s['nodes']} nodes, {s['edges']} edges, "
+        f"{s['conditional_edges']} conditional, {s['orphans']} orphan, "
+        f"{s['dangling']} dangling"
+    )
+    lines.append("Nodes:")
+    for n in result["nodes"]:
+        reads = f" [reads: {', '.join(n['reads'])}]" if n["reads"] else ""
+        writes = f" -> writes: {n['writes']}" if n["writes"] else ""
+        lines.append(f"  - {n['name']} ({n['type']}){reads}{writes}")
+    if edge_pairs:
+        lines.append("Edges:")
+        for s_id, e_id in edge_pairs:
+            lines.append(f"  {id_to_name.get(s_id, s_id)} -> {id_to_name.get(e_id, e_id)}")
+    if routing_edges:
+        lines.append("Routing:")
+        for s_id, label, d_id in routing_edges:
+            lines.append(
+                f"  {id_to_name.get(s_id, s_id)} --[{label}]--> {id_to_name.get(d_id, d_id)}"
+            )
+    if result["orphans"]:
+        lines.append(f"Orphans (nothing reaches them): {', '.join(result['orphans'])}")
+    if result["dangling"]:
+        lines.append(f"Dangling (they go nowhere): {', '.join(result['dangling'])}")
+    return "\n".join(lines)
+
+
+def _render_flow_mermaid(
+    node_views: list[dict[str, Any]],
+    edge_pairs: list[tuple[int, int]],
+    cond_pairs: list[tuple[int, str]],
+    routing_edges: list[tuple[int, str, int]],
+) -> str:
+    def _esc(text: str) -> str:
+        return str(text).replace('"', "'")
+
+    lines = ["flowchart TD"]
+    orphan_dangling = set()
+    for n in node_views:
+        lines.append(f'    n{n["id"]}["{_esc(n["name"])}\\n({n["type"]})"]')
+        if not n["incoming"] and n["type"] not in ("startnodes",):
+            orphan_dangling.add(n["id"])
+    for s_id, e_id in edge_pairs:
+        lines.append(f"    n{s_id} --> n{e_id}")
+    for s_id, label, d_id in routing_edges:
+        lines.append(f'    n{s_id} -- "{_esc(label)}" --> n{d_id}')
+    return "\n".join(lines)
 
 
 async def get_cdt_node(graph_id: int, name_or_id: str | int) -> dict[str, Any]:
@@ -597,7 +870,17 @@ async def patch_python_node(
         if existing_libs is None:
             existing_libs = (node_data.get("python_code") or {}).get("libraries", [])
         payload = {"python_code": {"code": code, "libraries": existing_libs}}
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+        result = await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+    warnings = fv.check_python_node(
+        {"node_name": name_or_id, "python_code": payload["python_code"]}
+    )
+    return fv.envelope(
+        result,
+        what_changed=f"Updated Python node '{name_or_id}' code"
+        + ("" if libraries is not None else " (libraries preserved)") + ".",
+        warnings=warnings,
+        suggested_next=fv.structural_next_steps(graph_id),
+    )
 
 
 async def patch_webhook_node(
@@ -616,7 +899,17 @@ async def patch_webhook_node(
         if existing_libs is None:
             existing_libs = (node_data.get("python_code") or {}).get("libraries", [])
         payload = {"python_code": {"code": code, "libraries": existing_libs}}
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+        result = await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+    warnings = fv.check_python_node(
+        {"node_name": name_or_id, "python_code": payload["python_code"]}
+    )
+    return fv.envelope(
+        result,
+        what_changed=f"Updated webhook node '{name_or_id}' handler"
+        + ("" if libraries is not None else " (libraries preserved)") + ".",
+        warnings=warnings,
+        suggested_next=fv.structural_next_steps(graph_id),
+    )
 
 
 async def patch_code_agent_node(
@@ -649,7 +942,12 @@ async def patch_code_agent_node(
             payload["llm_config"] = llm_config_id
         if agent_mode is not None:
             payload["agent_mode"] = agent_mode
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+        result = await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+    return fv.envelope(
+        result,
+        what_changed=f"Updated code-agent node '{name_or_id}' ({', '.join(payload) or 'no fields'}).",
+        suggested_next=fv.structural_next_steps(graph_id),
+    )
 
 
 async def patch_node_libraries(
@@ -674,7 +972,12 @@ async def patch_node_libraries(
             )
         existing_code = (node_data.get("python_code") or {}).get("code", "")
         payload = {"python_code": {"code": existing_code, "libraries": libraries}}
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+        result = await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+    return fv.envelope(
+        result,
+        what_changed=f"Set libraries on '{name_or_id}' to {libraries}.",
+        suggested_next=fv.structural_next_steps(graph_id),
+    )
 
 
 async def patch_node_metadata(
@@ -691,21 +994,36 @@ async def patch_node_metadata(
             metadata["position"] = position
         if color is not None:
             metadata["color"] = color
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json={"metadata": metadata})
+        result = await client.patch(f"/api/{endpoint}/{node_id}/", json={"metadata": metadata})
+    return fv.envelope(
+        result,
+        what_changed=f"Updated visual metadata on '{name_or_id}'.",
+    )
 
 
 async def patch_start_variables(
     graph_id: int,
-    variables: list[dict],
+    variables: dict[str, Any],
 ) -> dict[str, Any]:
-    """Set the start node's input variables definition."""
+    """Set the start node's input variables namespace.
+
+    `variables` is a nested domain dict (the runtime exposes it as a DotDict and
+    nodes read it via dotted `input_map` paths like `variables.request.city`).
+    The StartNode.variables model field is a JSONField defaulting to {} — pass a
+    dict, not a list.
+    """
     async with get_client() as client:
         graph = await client.get(f"/api/graphs/{graph_id}/")
         start_nodes = graph.get("start_node_list", [])
         if not start_nodes:
             raise ValueError(f"No start node found in graph {graph_id}.")
         node_id = start_nodes[0]["id"]
-        return await client.patch(f"/api/startnodes/{node_id}/", json={"variables": variables})
+        result = await client.patch(f"/api/startnodes/{node_id}/", json={"variables": variables})
+    return fv.envelope(
+        result,
+        what_changed="Set start-node input variables.",
+        suggested_next=[f"validate_flow_paths({graph_id})"],
+    )
 
 
 async def patch_cdt_node(
@@ -736,9 +1054,16 @@ async def patch_cdt_node(
                 for g in condition_groups
             ]
             payload["condition_groups"] = clean_groups
-        return await client.patch(
+        result = await client.patch(
             f"/api/classification-decision-table-node/{cdt_id}/", json=payload
         )
+    warnings = fv.check_cdt({"node_name": name_or_id, **payload})
+    return fv.envelope(
+        result,
+        what_changed=f"Updated CDT node '{name_or_id}' ({', '.join(payload) or 'no fields'}).",
+        warnings=warnings,
+        suggested_next=[f"get_cdt_route_map({graph_id})"] + fv.structural_next_steps(graph_id),
+    )
 
 
 async def patch_dt_node(
@@ -767,7 +1092,15 @@ async def patch_dt_node(
             payload["default_next_node"] = default_next_node
         if next_error_node is not None:
             payload["next_error_node"] = next_error_node
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+        result = await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
+    # Validate the groups actually sent (conditions:[] already injected above).
+    warnings = fv.check_dt_groups(safe_groups, name_or_id)
+    return fv.envelope(
+        result,
+        what_changed=f"Updated DT node '{name_or_id}' routing.",
+        warnings=warnings,
+        suggested_next=[f"get_cdt_route_map({graph_id})"] + fv.structural_next_steps(graph_id),
+    )
 
 
 async def init_flow_metadata(graph_id: int) -> dict[str, Any]:
@@ -792,19 +1125,9 @@ async def init_flow_metadata(graph_id: int) -> dict[str, Any]:
     async with get_client() as client:
         graph = await client.get(f"/api/graphs/{graph_id}/")
 
-        # Build id->name, id->endpoint, and name->node maps
-        id_to_name: dict[int, str] = {}
-        id_to_endpoint: dict[int, str] = {}
-        all_nodes: list[dict[str, Any]] = []
-
-        for list_key, endpoint in NODE_LIST_KEYS:
-            for node in graph.get(list_key, []):
-                nid = node.get("id")
-                name = node.get("node_name") or node.get("name", str(nid))
-                if nid is not None:
-                    id_to_name[nid] = name
-                    id_to_endpoint[nid] = endpoint
-                    all_nodes.append({"id": nid, "name": name, "endpoint": endpoint, "data": node})
+        idx = _index_graph(graph)
+        id_to_name = idx["id_to_name"]
+        all_nodes = idx["nodes"]
 
         # Build adjacency from edge_list
         adjacency: dict[str, list[str]] = {}
@@ -893,15 +1216,9 @@ async def test_flow(graph_id: int) -> dict[str, Any]:
     issues: list[str] = []
 
     # Build id->name map
-    id_to_name: dict[int, str] = {}
-    all_node_ids: set[int] = set()
-    for list_key, _ in NODE_LIST_KEYS:
-        for node in graph.get(list_key, []):
-            nid = node.get("id")
-            name = node.get("node_name") or node.get("name", str(nid))
-            if nid is not None:
-                id_to_name[nid] = name
-                all_node_ids.add(nid)
+    idx = _index_graph(graph)
+    id_to_name = idx["id_to_name"]
+    all_node_ids: set[int] = set(id_to_name)
 
     # Check __start__
     start_nodes = graph.get("start_node_list", [])
@@ -968,6 +1285,148 @@ async def test_flow(graph_id: int) -> dict[str, Any]:
     ok = len(issues) == 0
     summary = "Flow is valid." if ok else f"{len(issues)} issue(s) found."
     return {"ok": ok, "issues": issues, "summary": summary}
+
+
+def _normalize_path(path: str) -> str:
+    """Strip a leading JSONPath ``$.`` so 'variables.x' and '$.variables.x' match."""
+    p = str(path).strip()
+    if p.startswith("$."):
+        p = p[2:]
+    elif p.startswith("$"):
+        p = p[1:]
+    return p
+
+
+def _flatten_declared(variables: Any, prefix: str = "variables") -> set[str]:
+    """Flatten the start node's variables into dotted paths under ``variables``.
+
+    Handles both shapes seen in the wild: a list of ``{name, ...}`` schema items
+    and a nested domain dict (see open question O1). Includes every parent path
+    so a reader of ``variables.jira`` is satisfied by a declared
+    ``variables.jira.base_url``. The bare ``variables`` root is intentionally
+    NOT a declared path — declaring nothing must not satisfy arbitrary reads.
+    """
+    paths: set[str] = set()
+    if isinstance(variables, list):
+        for item in variables:
+            if isinstance(item, dict) and item.get("name"):
+                paths.add(f"{prefix}.{item['name']}")
+    elif isinstance(variables, dict):
+        for key, val in variables.items():
+            child = f"{prefix}.{key}"
+            paths.add(child)
+            paths |= _flatten_declared(val, child)
+    return paths
+
+
+def _main_params(code: str) -> list[str]:
+    """Parameter names of the ``def main(...)`` entrypoint, for implicit maps."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main":
+            return [a.arg for a in node.args.args if a.arg not in ("self", "state")]
+    return []
+
+
+def _satisfied(reader: str, available: set[str]) -> bool:
+    """A reader path is satisfied if it, a parent, or a child is available."""
+    return any(
+        reader == p or reader.startswith(p + ".") or p.startswith(reader + ".")
+        for p in available
+    )
+
+
+async def validate_flow_paths(graph_id: int) -> dict[str, Any]:
+    """Statically validate input_map / output_map paths against the declared
+    start variables plus upstream output_variable_path writers — catching
+    undeclared-variable failures before a run.
+
+    Returns {graph_id, status, declared_paths, writers, findings}. A reader fed
+    via input_map that resolves nowhere is a blocker (runtime AttributeError);
+    one referenced only by the end node's output_map is a warning (silently
+    resolves to "not found").
+    """
+    async with get_client() as client:
+        graph = await client.get(f"/api/graphs/{graph_id}/")
+
+    idx = _index_graph(graph)
+
+    declared: set[str] = set()
+    for sn in graph.get("start_node_list", []):
+        declared |= _flatten_declared(sn.get("variables"))
+
+    # Writers: every output_variable_path across all nodes.
+    writers: dict[str, list[str]] = {}
+    for n in idx["nodes"]:
+        wpath = n["data"].get("output_variable_path")
+        if wpath:
+            writers.setdefault(_normalize_path(wpath), []).append(n["name"])
+
+    available = declared | set(writers)
+    findings: list[dict[str, Any]] = []
+
+    for w_path, w_nodes in writers.items():
+        if len(w_nodes) > 1:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "path": w_path,
+                    "reader_node": None,
+                    "message": f"Multiple writers for '{w_path}': {w_nodes}. "
+                    "Give each path exactly one writer.",
+                    "fix": "Route writes through a single node or split the path.",
+                }
+            )
+
+    # Readers via input_map (blockers) + implicit python main params.
+    for n in idx["nodes"]:
+        data = n["data"]
+        input_map = data.get("input_map") or {}
+        reader_paths = [_normalize_path(v) for v in input_map.values()]
+        if not input_map and n["endpoint"] == "pythonnodes":
+            code = (data.get("python_code") or {}).get("code", "") or ""
+            reader_paths = [f"variables.{p}" for p in _main_params(code)]
+        for rp in reader_paths:
+            if rp.startswith("variables") and not _satisfied(rp, available):
+                findings.append(
+                    {
+                        "severity": "blocker",
+                        "path": rp,
+                        "reader_node": n["name"],
+                        "message": f"Node '{n['name']}' reads '{rp}', which is neither "
+                        "declared in start variables nor written upstream.",
+                        "fix": f"Declare '{rp}' in the start node or write it before this node.",
+                    }
+                )
+
+    # Readers via end node output_map (warnings).
+    for en in graph.get("end_node_list", []):
+        for key, src in (en.get("output_map") or {}).items():
+            rp = _normalize_path(src)
+            if rp.startswith("variables") and not _satisfied(rp, available):
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "path": rp,
+                        "reader_node": en.get("node_name"),
+                        "message": f"End node output_map['{key}'] references '{rp}', "
+                        "which is never written — it will resolve to \"not found\".",
+                        "fix": f"Ensure some node writes '{rp}'.",
+                    }
+                )
+
+    has_blocker = any(f["severity"] == "blocker" for f in findings)
+    status = "error" if has_blocker else ("warning" if findings else "ok")
+    return {
+        "graph_id": graph_id,
+        "status": status,
+        "declared_paths": sorted(declared),
+        "writers": writers,
+        "findings": findings,
+    }
 
 
 async def export_flow(flow_id: int) -> dict[str, Any]:

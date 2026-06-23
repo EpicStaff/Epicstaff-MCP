@@ -15,6 +15,17 @@ dependencies = [
     "pydantic-settings>=2.0.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "respx>=0.21.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [project.scripts]
 epicstaff-mcp = "epicstaff_mcp.servers.combined_server:main"
 epicstaff-mcp-flows = "epicstaff_mcp.servers.flows_server:main"

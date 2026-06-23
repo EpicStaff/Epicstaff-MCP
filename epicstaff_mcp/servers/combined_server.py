@@ -14,6 +14,7 @@ from epicstaff_mcp.tools import (
     organizations,
     python_code,
     realtime,
+    session_debug,
     sessions,
     tasks,
     tools,
@@ -75,6 +76,23 @@ mcp.tool(flows.delete_graph_file)
 mcp.tool(flows.export_flow)
 mcp.tool(flows.bulk_export_flows)
 mcp.tool(flows.import_flow)
+# Flow inspection, validation & surgical patching
+mcp.tool(flows.get_flow_connections)
+mcp.tool(flows.describe_flow)
+mcp.tool(flows.get_cdt_node)
+mcp.tool(flows.get_cdt_prompts)
+mcp.tool(flows.get_cdt_route_map)
+mcp.tool(flows.patch_python_node)
+mcp.tool(flows.patch_webhook_node)
+mcp.tool(flows.patch_code_agent_node)
+mcp.tool(flows.patch_node_libraries)
+mcp.tool(flows.patch_node_metadata)
+mcp.tool(flows.patch_start_variables)
+mcp.tool(flows.patch_cdt_node)
+mcp.tool(flows.patch_dt_node)
+mcp.tool(flows.init_flow_metadata)
+mcp.tool(flows.test_flow)
+mcp.tool(flows.validate_flow_paths)
 
 # Sessions
 mcp.tool(sessions.list_sessions)
@@ -86,6 +104,14 @@ mcp.tool(sessions.send_message)
 mcp.tool(sessions.delete_session)
 mcp.tool(sessions.get_session_warnings)
 mcp.tool(sessions.list_session_messages)
+mcp.tool(sessions.run_session_and_wait)
+
+# Session Debug
+mcp.tool(session_debug.inspect_session)
+mcp.tool(session_debug.get_session_timings)
+mcp.tool(session_debug.get_session_trace)
+mcp.tool(session_debug.get_session_crew_input)
+mcp.tool(session_debug.get_flow_persistent_vars)
 
 # Tools
 mcp.tool(tools.list_tools)

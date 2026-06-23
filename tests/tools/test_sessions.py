@@ -53,7 +53,8 @@ async def test_run_session_without_id_raises():
 
 @respx.mock
 async def test_get_session_updates():
-    respx.post(f"{BASE_URL}api/get-updates/").mock(
+    # Real endpoint (per backend urls.py): GET /api/sessions/<id>/get-updates/
+    respx.get(f"{BASE_URL}api/sessions/10/get-updates/").mock(
         return_value=httpx.Response(200, json={"messages": [], "status": "run"})
     )
     result = await get_session_updates(session_id=10)
@@ -62,7 +63,8 @@ async def test_get_session_updates():
 
 @respx.mock
 async def test_stop_session():
-    respx.post(f"{BASE_URL}api/stop-session/").mock(
+    # Real endpoint (per backend urls.py): POST /api/sessions/<id>/stop/
+    respx.post(f"{BASE_URL}api/sessions/10/stop/").mock(
         return_value=httpx.Response(200, json={"status": "stopped"})
     )
     result = await stop_session(session_id=10)

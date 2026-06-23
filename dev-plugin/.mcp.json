@@ -1,15 +1,15 @@
 {
-  "epicstaff": {
+  "epicstaff-dev": {
     "type": "stdio",
     "command": "uv",
     "args": [
       "run",
       "--project",
-      "${CLAUDE_PLUGIN_ROOT}",
+      "${CLAUDE_PLUGIN_ROOT}/..",
       "epicstaff-mcp"
     ],
     "env": {
-      "EPICSTAFF_BASE_URL": "${EPICSTAFF_BASE_URL}",
+      "EPICSTAFF_BASE_URL": "http://localhost:8000",
       "EPICSTAFF_API_KEY": "${EPICSTAFF_API_KEY}",
       "EPICSTAFF_API_TOKEN": "${EPICSTAFF_API_TOKEN}"
     }

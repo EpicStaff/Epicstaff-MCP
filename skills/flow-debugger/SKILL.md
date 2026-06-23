@@ -12,6 +12,12 @@ Companion skills:
 - `flow-ddd` — shape of `variables`, input/output maps.
 - `flow-qa` — post-fix validation.
 
+> This skill leans on the inspection/patch/session-debug tools (`get_cdt_route_map`,
+> `patch_*`, `inspect_session`, `get_session_trace`, `run_session_and_wait`,
+> `describe_flow`). They're registered as of the v2 server reconciliation; an
+> "unknown tool" error means the installed server predates it. When a flow is
+> *incomplete* (not just buggy), return to `flow-pipeline`, not here.
+
 ---
 
 ## When to Use
@@ -75,7 +81,7 @@ What to look for:
 ### 3. Graph connectivity
 ```
 get_flow_nodes(flow_id)
-get_flow_connections(flow_id)
+get_flow_connections(graph_id)
 ```
 Check:
 - Every node from the architecture is present.
@@ -85,10 +91,10 @@ Check:
 
 ### 4. CDT route map (only if CDT nodes are involved)
 ```
-get_cdt_route_map(flow_id)
+get_cdt_route_map(graph_id)
 ```
 Red flags:
-- Any group shows "NOT FOUND in metadata" — metadata out of sync, run `init_flow_metadata(flow_id)`.
+- Any group shows "NOT FOUND in metadata" — metadata out of sync, run `init_flow_metadata(graph_id)`.
 - `default_next_node` unset and no groups matched — silent fall-through to end.
 - Multiple groups route to the same target with overlapping conditions — first match wins.
 
@@ -124,11 +130,11 @@ Map the exact error to its likely root cause. Apply the fix, then re-run.
 
 | Error / symptom | Likely root cause | Fix |
 |---|---|---|
-| "No node connected to start node" | `__start__` is not wired to any downstream node. | `add_edge(flow_id, "__start__", <first-node>)` then `init_flow_metadata`. |
+| "No node connected to start node" | `__start__` is not wired to any downstream node. | Resolve ids via `get_flow_nodes`, then `add_edge(flow_id, start_id, first_node_id)` (integer ids, not names), then `init_flow_metadata`. |
 | "name 'main' is not defined" | Python/webhook node code has no `def main(...)` entrypoint. | `patch_python_node` (or `patch_webhook_node`) with fixed code. Always pass `libraries`. |
 | `AttributeError: 'DotDict' object has no attribute '<path>'` | An `input_map` references `variables.<path>` that is not set in start variables and not written by any upstream node. | Declare the path in start variables (`patch_start_variables`) or add an upstream writer. |
 | `ModuleNotFoundError` in a python/webhook/code-agent node | `libraries` is empty or was wiped by a prior `patch_python_node` without `libraries`. | `patch_node_libraries` (or full patch with `libraries` included). |
-| Node shows as black dot in UI, edges missing | Metadata out of sync with DB. | `init_flow_metadata(flow_id)`. |
+| Node shows as black dot in UI, edges missing | Metadata out of sync with DB. | `init_flow_metadata(graph_id)`. |
 | `"Found edge starting at unknown node"` | Node was renamed; its edges still reference the old ID (or metadata still holds the old name). | Metadata refresh: `init_flow_metadata`. If truly stale, delete and re-add the edge. |
 | CDT "NOT FOUND in metadata" for a group target | Metadata-routing can't resolve the target `node_name`. | Confirm the target exists, then `init_flow_metadata`. |
 | Decision Table silently routes to default for every input | `condition_groups[*].next_node` never set, or `conditions: []` missing on a group → viewset silently rolled back the patch. | Re-patch with `patch_dt_node`, include `"conditions": []` on every group. |
@@ -151,7 +157,7 @@ Map the exact error to its likely root cause. Apply the fix, then re-run.
 3. Read the error's `stderr` or exception message.
 4. Match it to the Error Fingerprints table. If not listed, go to step 5.
 5. Read the node's code and config via `get_flow_nodes`.
-6. Form a specific suspect. Fix. Run `test_flow(flow_id)`, then `run_session_and_wait` with the same inputs that failed.
+6. Form a specific suspect. Fix. Run `test_flow(graph_id)`, then `run_session_and_wait` with the same inputs that failed.
 
 ### Session finished but output is wrong or empty
 1. `inspect_session(session_id)` — examine each node's input/output. Find the earliest node whose output is not what downstream needs.
@@ -161,15 +167,15 @@ Map the exact error to its likely root cause. Apply the fix, then re-run.
 5. Fix and verify.
 
 ### Session never starts / `run_session` fails immediately
-1. `get_flow_connections(flow_id)` — confirm `__start__` has at least one outgoing edge.
+1. `get_flow_connections(graph_id)` — confirm `__start__` has at least one outgoing edge.
 2. If there's a trigger node: confirm `__start__` is still wired independently into the first real node (not into the trigger).
-3. `test_flow(flow_id)` — surfaces structural errors.
-4. `init_flow_metadata(flow_id)` — in case prior changes didn't sync.
+3. `test_flow(graph_id)` — surfaces structural errors.
+4. `init_flow_metadata(graph_id)` — in case prior changes didn't sync.
 
 ### Node did not execute
 1. `get_session_trace(session_id)` — which nodes ran? What was the last-reached node?
-2. From the last-reached node: check `get_flow_connections(flow_id)` for its outgoing edge(s).
-3. If the last-reached is a CDT: `get_cdt_route_map(flow_id)` — did the chosen group's `next_node` resolve?
+2. From the last-reached node: check `get_flow_connections(graph_id)` for its outgoing edge(s).
+3. If the last-reached is a CDT: `get_cdt_route_map(graph_id)` — did the chosen group's `next_node` resolve?
 4. If the last-reached is a conditional `edge`: read its code, verify return is a valid target name.
 5. If the last-reached is a `project` (crew): check crew configuration — tasks, agents, tool_ids all intact.
 
@@ -181,7 +187,7 @@ Map the exact error to its likely root cause. Apply the fix, then re-run.
 5. For a crew node: a misconfigured task can loop inside CrewAI. Check `get_session_crew_input` and the crew's task definitions.
 
 ### UI shows nodes as black dots / broken wiring
-Single fix: `init_flow_metadata(flow_id)`. If that doesn't resolve, the metadata and DB are badly out of sync — re-verify with `get_flow_nodes` and `get_flow_connections` and re-apply any recent structural changes.
+Single fix: `init_flow_metadata(graph_id)`. If that doesn't resolve, the metadata and DB are badly out of sync — re-verify with `get_flow_nodes` and `get_flow_connections` and re-apply any recent structural changes.
 
 ---
 
@@ -194,14 +200,14 @@ Every patch tool has constraints. Follow them exactly.
 - `patch_dt_node` — every group object needs `"conditions": []` even if the group is complex with zero conditions. Missing key → silent rollback.
 - `update_agent`'s `tool_ids` — destructive replace. Always include every existing tool ID plus new ones.
 - Renaming a node: edges use integer IDs under the hood, so they follow the rename automatically — but metadata still holds the old name until you re-run `init_flow_metadata`. If the rename MCP tool is unavailable, delete + re-create the node (preserving code, libraries, input_map, output_variable_path) and re-wire its edges.
-- Any structural change (add/delete node or edge) MUST be followed by `init_flow_metadata(flow_id)` before running the next session.
+- Any structural change (add/delete node or edge) MUST be followed by `init_flow_metadata(graph_id)` before running the next session.
 
 ---
 
 ## Verification After a Fix
 
 Once you apply a patch:
-1. `test_flow(flow_id)` — structural check.
+1. `test_flow(graph_id)` — structural check.
 2. If the patched node was python/webhook/code-agent: run the simplest possible session that exercises only that path:
    ```
    run_session_and_wait(flow_id, variables=<minimal inputs>, timeout=60)

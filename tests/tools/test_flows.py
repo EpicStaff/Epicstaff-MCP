@@ -14,12 +14,16 @@ from epicstaff_mcp.tools.flows import (
     create_flow,
     delete_edge,
     delete_node,
+    describe_flow,
     get_flow,
+    get_flow_connections,
     get_flow_nodes,
     list_edges,
     list_flows,
+    save_flow,
     update_flow_metadata,
     update_node,
+    validate_flow_paths,
 )
 from tests.conftest import BASE_URL
 
@@ -127,7 +131,10 @@ async def test_add_node_crewnode():
         return_value=httpx.Response(201, json=CREW_NODE)
     )
     result = await add_node(flow_id=1, node_type="crewnode", config={"crew_id": 2})
-    assert result["id"] == 10
+    # Write tools now return a semantic envelope; raw API echo lives under "result".
+    assert result["result"]["id"] == 10
+    assert result["status"] in ("ok", "warning")
+    assert result["suggested_next"]
 
 
 @respx.mock
@@ -184,7 +191,8 @@ async def test_list_edges():
 async def test_add_edge():
     respx.post(f"{BASE_URL}api/edges/").mock(return_value=httpx.Response(201, json=EDGE))
     result = await add_edge(flow_id=1, start_node_id=10, end_node_id=11)
-    assert result["id"] == 20
+    assert result["result"]["id"] == 20
+    assert result["status"] == "ok"
 
 
 @respx.mock
@@ -199,3 +207,119 @@ async def test_delete_conditional_edge():
     respx.delete(f"{BASE_URL}api/conditionaledges/5/").mock(return_value=httpx.Response(204))
     result = await delete_edge(flow_id=1, edge_id=5, conditional=True)
     assert "deleted" in result["message"]
+
+
+# --- Fixtures for the new inspection / validation tools --------------------
+
+WIRED_FLOW = {
+    **FULL_FLOW,
+    "start_node_list": [{"id": 1, "node_name": "__start__", "variables": [{"name": "city"}]}],
+    "end_node_list": [{"id": 3, "node_name": "__end__", "output_map": {}}],
+    "python_node_list": [
+        {
+            "id": 2,
+            "node_name": "Fetch Weather",
+            "python_code": {"code": "def main(city):\n    return {}", "libraries": []},
+            "input_map": {"city": "variables.city"},
+            "output_variable_path": "variables.weather",
+        }
+    ],
+    "edge_list": [
+        {"id": 20, "start_node_id": 1, "end_node_id": 2},
+        {"id": 21, "start_node_id": 2, "end_node_id": 3},
+    ],
+}
+
+ORPHAN_FLOW = {
+    **FULL_FLOW,
+    "start_node_list": [{"id": 1, "node_name": "__start__", "variables": []}],
+    "end_node_list": [{"id": 3, "node_name": "__end__", "output_map": {}}],
+    "python_node_list": [
+        {"id": 2, "node_name": "Lonely Node", "python_code": {"code": "def main():\n    pass"}}
+    ],
+    "edge_list": [{"id": 20, "start_node_id": 1, "end_node_id": 3}],
+}
+
+
+@respx.mock
+async def test_get_flow_connections_shape_unchanged():
+    """Pin the public shape so the _index_graph refactor stays byte-compatible."""
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(return_value=httpx.Response(200, json=WIRED_FLOW))
+    result = await get_flow_connections(graph_id=1)
+    assert set(result) == {"edges", "conditional_edges", "cdt_routing", "dt_routing"}
+    assert result["edges"][0] == {"id": 20, "from": "__start__", "to": "Fetch Weather"}
+
+
+@respx.mock
+async def test_describe_flow_text_and_orphans():
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(return_value=httpx.Response(200, json=ORPHAN_FLOW))
+    result = await describe_flow(graph_id=1, fmt="both")
+    assert result["summary"]["orphans"] == 1
+    assert "Lonely Node" in result["orphans"]
+    assert "Flow:" in result["text"]
+    assert "flowchart TD" in result["mermaid"]
+
+
+@respx.mock
+async def test_describe_flow_wired_no_orphans():
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(return_value=httpx.Response(200, json=WIRED_FLOW))
+    result = await describe_flow(graph_id=1)
+    assert result["summary"]["orphans"] == 0
+    assert result["summary"]["dangling"] == 0
+
+
+@respx.mock
+async def test_validate_flow_paths_undeclared_is_blocker():
+    flow = {
+        **FULL_FLOW,
+        "start_node_list": [{"id": 1, "node_name": "__start__", "variables": [{"name": "other"}]}],
+        "python_node_list": [
+            {
+                "id": 2,
+                "node_name": "Reader",
+                "python_code": {"code": "def main():\n    pass"},
+                "input_map": {"c": "variables.request.city"},
+            }
+        ],
+    }
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(return_value=httpx.Response(200, json=flow))
+    result = await validate_flow_paths(graph_id=1)
+    assert result["status"] == "error"
+    assert any(f["severity"] == "blocker" for f in result["findings"])
+
+
+@respx.mock
+async def test_validate_flow_paths_declared_ok():
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(return_value=httpx.Response(200, json=WIRED_FLOW))
+    result = await validate_flow_paths(graph_id=1)
+    assert result["status"] == "ok"
+
+
+@respx.mock
+async def test_save_flow_gate_blocks_incomplete():
+    # No end node + disconnected => test_flow fails => gate blocks.
+    incomplete = {**FULL_FLOW, "start_node_list": [], "end_node_list": []}
+    respx.post(f"{BASE_URL}api/graphs/1/save/").mock(
+        return_value=httpx.Response(200, json={"id": 1})
+    )
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=incomplete)
+    )
+    blocked = await save_flow(flow_id=1)
+    assert blocked["gate"] == "blocked"
+    assert blocked["status"] == "error"
+
+    override = await save_flow(flow_id=1, allow_incomplete=True)
+    assert override["gate"] == "override"
+    assert override["status"] == "warning"
+
+
+@respx.mock
+async def test_save_flow_gate_passes_when_valid():
+    respx.post(f"{BASE_URL}api/graphs/1/save/").mock(
+        return_value=httpx.Response(200, json={"id": 1})
+    )
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(return_value=httpx.Response(200, json=WIRED_FLOW))
+    result = await save_flow(flow_id=1)
+    assert result["gate"] == "passed"
+    assert result["status"] in ("ok", "warning")

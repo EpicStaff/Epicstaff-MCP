@@ -126,14 +126,17 @@ Heuristics that matter:
 
 ## Contracts — The Shape of Data Between Nodes
 
-Before building, write out the contract for each edge:
+Before building, write out the contract for each edge. The **Covers** column
+ties each node back to the interview's edge cases / success criteria — every one
+must appear at least once across the table, or the design is incomplete (this is
+gate G2 of `flow-pipeline`):
 
-| From node | Writes | Shape | Read by |
-|---|---|---|---|
-| `Weather Request` (webhook) | `variables.request.city: str` | non-empty string, else 400 | `Fetch Weather` |
-| `Fetch Weather` | `variables.weather.raw` | `{temperature: float, conditions: str, humidity: int, wind_speed: float}` | `Format Report` |
-| `Format Report` | `variables.weather.report_text: str` | multi-line string | `Friendly Reporter` |
-| `Friendly Reporter` (code-agent) | `variables.weather.narration: {message: str, ...}` | `output_schema` required | `__end_node__` |
+| From node | Writes | Shape | Read by | Covers (intent items) |
+|---|---|---|---|---|
+| `Weather Request` (webhook) | `variables.request.city: str` | non-empty string, else 400 | `Fetch Weather` | "rejects empty city" |
+| `Fetch Weather` | `variables.weather.raw` | `{temperature: float, conditions: str, humidity: int, wind_speed: float}` | `Format Report` | "shows current temp" |
+| `Format Report` | `variables.weather.report_text: str` | multi-line string | `Friendly Reporter` | — |
+| `Friendly Reporter` (code-agent) | `variables.weather.narration: {message: str, ...}` | `output_schema` required | `__end_node__` | "friendly summary" |
 
 If you can't fill this table from the spec, the spec is ambiguous — flag it as an open question, don't guess.
 
@@ -240,5 +243,13 @@ Before creating any nodes, you should be able to answer:
 7. Is there a trigger? If yes, is `__start__` also connected to the first real node?
 8. For each agent-style node: what tools does it need? What's its `output_schema`?
 9. Does the flow need cross-session state? If yes: which paths persist, at which scope (`organization` or `user`)? Are they all under `variables.context`?
+10. Does every interview **edge case** map to a node/branch, and every **success criterion** map to a node and/or an end-node `output_map` key? (An unmapped item is a gate-G2 failure.)
 
 When every question has a concrete answer grounded in the spec, you're ready to build.
+
+> **Start-variable shape — confirmed: nested domain dict.** Backend check:
+> `StartNode.variables` is a `JSONField(default=dict)`, and the runtime exposes
+> it as a `DotDict` read via dotted `input_map` paths. The domain-dict model this
+> skill teaches is correct; `patch_start_variables` takes a dict. (The
+> `[{name, type, default}]` list shape belongs to a different model,
+> `PythonCodeTool.variables`.)

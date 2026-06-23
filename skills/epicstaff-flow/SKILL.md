@@ -12,6 +12,11 @@ Companion skills (load when you hit the topic they cover):
 - `flow-ddd` — DDD variable design principles (`variables` namespace, `input_map`, `output_variable_path`)
 - `flow-qa` — pre-submit validation after build
 
+> This skill is normally driven by `flow-pipeline`, the gated orchestrator that
+> runs interview → DDD → build → QA → intent-check and blocks progress when a
+> gate fails. When invoked standalone, still honor those gates (especially the
+> structured Interview Summary below and the intent-check in Done Criteria).
+
 ---
 
 ## Pipeline Overview
@@ -44,7 +49,26 @@ Conduct a business requirements interview. Goal: understand what the flow does, 
 - Do NOT ask about tech stack, APIs, databases, or architecture
 - Cover: what it does, who/what triggers it, what data comes in, what comes out, edge cases, success criteria
 
-**End of interview:** Summarize what you've captured and ask: *"Does this capture everything correctly? Anything to add or change?"* Wait for confirmation before proceeding.
+**End of interview:** Produce a structured **Interview Summary** — not free prose — so the build and the final intent-check can be measured against it:
+
+```
+Interview Summary
+- Does: <one line>
+- Trigger: <manual | webhook | telegram | schedule | ...>
+- Inputs: <what data comes in>
+- Outputs: <what the flow produces>
+- Edge cases:
+  - <each edge case as its own bullet>
+- Success criteria:
+  - <each measurable "done right" criterion as its own bullet>
+```
+
+Edge cases and success criteria MUST be explicit, named bullet lists — they are
+carried forward into node/branch design (Phase 2) and re-checked against the
+built flow at the end. Then ask: *"Does this capture everything correctly?
+Anything to add or change?"* Wait for explicit confirmation before proceeding.
+This is **gate G1**: do not enter Phase 2 until all six fields are filled and the
+user confirms.
 
 ---
 
@@ -56,11 +80,13 @@ After the interview is confirmed, ask the user ONE question:
 
 ### Plan path (technical users)
 
-Generate a DDD contract table for review:
+Generate a DDD contract table for review. The **Covers** column ties each node
+back to the interview's edge cases / success criteria — every edge case and
+criterion must appear at least once, or the plan isn't complete (gate G2):
 
-| Node | Type | Reads from variables | Writes to variables | Code sketch |
-|---|---|---|---|---|
-| ... | pythonnode / codeagentnode / ... | `variables.domain.key` | `variables.domain.result` | `def main(key): return {...}` |
+| Node | Type | Reads from variables | Writes to variables | Covers (intent items) | Code sketch |
+|---|---|---|---|---|---|
+| ... | pythonnode / codeagentnode / ... | `variables.domain.key` | `variables.domain.result` | "rejects empty city" / "friendly summary" | `def main(key): return {...}` |
 
 Also output the full `variables` namespace dict (what goes in the start node):
 ```python
@@ -113,22 +139,23 @@ create_flow(name="<name>", description="<description>")
 Record the returned `flow_id`. Use it for every subsequent call.
 
 ### Step 4 — Create every node (code + libraries at creation time)
-For each node, call `add_node` with code and libraries included at creation — never create then patch.
+For each node, call `add_node` with code and libraries included at creation — never create then patch. Node-specific fields are nested under `config`:
 
 ```
-add_node(flow_id, node_type="<type>", node_name="<name>",
-         code=<str>, libraries=<list[str]>,
-         input_map=<dict>, output_variable_path="variables.<domain>[.<sub>]",
-         x=<int>, y=<int>, ...)
+add_node(flow_id, node_type="<type>", node_name="<name>", config={
+    "python_code": {"code": <str>, "entrypoint": "main", "libraries": <list[str]>},
+    "input_map": <dict>,
+    "output_variable_path": "variables.<domain>[.<sub>]",
+})
 ```
 
-MCP `node_type` values and required fields:
+MCP `node_type` values and required `config` fields:
 
-| node_type | Required fields |
+| node_type | Required `config` fields |
 |---|---|
-| `pythonnode` | `code`, `libraries`, `input_map`, `output_variable_path` |
-| `webhooktriggernode` | `code`, `libraries`, `webhook_path` (no `input_map`/`output_variable_path` — runtime forces `__all__`/`variables`) |
-| `codeagentnode` | `system_prompt`, `stream_handler_code`, `libraries`, `llm_config_id`, `agent_mode` (`build`/`plan`), `input_map`, `output_variable_path`, optionally `output_schema` |
+| `pythonnode` | `python_code.{code,entrypoint,libraries}`, `input_map`, `output_variable_path` |
+| `webhooktriggernode` | `python_code.{code,libraries}`, `webhook_path` (no `input_map`/`output_variable_path` — runtime forces `__all__`/`variables`) |
+| `codeagentnode` | `system_prompt`, `stream_handler_code`, `libraries`, `llm_config_id`, `agent_mode` (defaults to `"build"`), `input_map`, `output_variable_path`, optionally `output_schema` |
 | `crewnode` | `crew_id`, `input_map`, `output_variable_path` (crew must exist — create via `create_crew`/`create_agent`/`create_task` first) |
 | `subgraphnode` | `subgraph_id`, `input_map`, `output_variable_path` |
 | `decisiontablenode` | `condition_groups`, `default_next_node`, `next_error_node` (each group needs `"conditions": []` — missing key causes silent rollback) |
@@ -137,23 +164,26 @@ MCP `node_type` values and required fields:
 | `endnode` | `output_map` mapping response keys to `variables.<path>` |
 | `telegramtriggernode` | `telegram_bot_api_key`, `fields[]` |
 
-Node placement: X increases left to right (~400–500px per step), Y increases top to bottom (~60px between stacked nodes). Trigger nodes go far left, offset in Y to avoid overlap with `__start__`.
+Don't hand-set X/Y at creation — `init_flow_metadata` (Step 7) auto-lays out
+every node. Adjust individual positions afterward with `patch_node_metadata` if
+needed.
 
 ### Step 5 — Wire edges
-Call `add_edge(flow_id, start_node_name, end_node_name)` for every non-CDT edge.
+Edges use **integer node IDs**, not names. Resolve them first, then wire:
+
+```
+nodes = get_flow_nodes(flow_id)          # map node_name -> id
+add_edge(flow_id, nodes["__start__"], nodes["Process Request"])
+```
 
 - Always connect `__start__` to at least one downstream node — without it, `run_session` fails.
-- For trigger nodes (webhook/telegram), wire BOTH `__start__` and the trigger into the same first real node:
-  ```
-  add_edge(flow_id, "__start__", "Process Request")
-  add_edge(flow_id, "My Trigger", "Process Request")
-  ```
+- For trigger nodes (webhook/telegram), wire BOTH `__start__` and the trigger into the same first real node (resolve all three ids, then two `add_edge` calls into the same target id).
 - NEVER use `add_edge` from a CDT node's outputs — CDT routing is metadata only (Step 6).
 
 ### Step 6 — Wire CDT routing (if CDT nodes exist)
 For each `decisiontablenode`, call:
 ```
-patch_dt_node(flow_id, name_or_id="<cdt name>",
+patch_dt_node(graph_id, name_or_id="<cdt name>",
               condition_groups=[
                 {"group_name": "...", "group_type": "simple" | "complex",
                  "expression": <str or null>, "conditions": [],
@@ -166,7 +196,7 @@ Every group object MUST include `"conditions": []` — the viewset calls `pop("c
 
 ### Step 7 — `init_flow_metadata` (mandatory)
 ```
-init_flow_metadata(flow_id)
+init_flow_metadata(graph_id)
 ```
 One call after all structural changes. Without it:
 - New nodes render as black dots in the UI
@@ -175,15 +205,19 @@ One call after all structural changes. Without it:
 
 ### Step 8 — Set start variables
 ```
-patch_start_variables(flow_id, variables=<full DDD dict from Step 1>)
+patch_start_variables(graph_id, variables=<full DDD dict from Step 1>)
 ```
 Every path any downstream `input_map` reads must be present, even as `null`.
+`variables` is a nested domain **dict** (confirmed against the backend).
 
 ### Step 9 — Structural check
 ```
-test_flow(flow_id)
+test_flow(graph_id)            # gate G3: proceed only if .ok is true
+validate_flow_paths(graph_id)  # confirm no input_map path resolves nowhere
+describe_flow(graph_id)        # read back the assembled flow; confirm no orphans/dangling
 ```
-Confirm connectivity and required fields. Fix any issues before declaring done. Then hand off to `flow-qa` for the final validation pass.
+Fix any issues before declaring done. Then hand off to `flow-qa` for the final
+validation pass, and to `flow-intent-check` for the loop-back to original intent.
 
 ---
 
@@ -207,7 +241,7 @@ If you catch yourself doing any of the following, stop immediately:
 
 - **One `init_flow_metadata` at the end** — it's idempotent; one call covers all prior structural changes.
 - **Never write raw HTTP / CLI / curl** — only MCP tools via the `epicstaff` skill.
-- **Never hardcode numeric node IDs** — IDs change on every UI save; always look up by `node_name`.
+- **Never *persist* numeric node IDs** — IDs change on every UI save. Patch/inspect tools accept `name_or_id`; but `add_edge`/`delete_node`/`delete_edge` need numeric ids, so resolve names → ids via `get_flow_nodes` immediately before each such call.
 - **Every `patch_python_node` or `patch_webhook_node` must include `libraries`** — omit and libraries are wiped.
 - **CDT `prompts` must be a dict, not a list** — runtime calls `.items()`.
 - **Non-CDT `ports` field must be `null`, not `[]`** — empty array suppresses port auto-generation.
@@ -226,11 +260,12 @@ If you catch yourself doing any of the following, stop immediately:
 ## Done Criteria
 
 The build is done when:
-1. `test_flow(flow_id)` passes
+1. `test_flow(graph_id)` passes (`.ok` is true)
 2. Every node exists with code + libraries + `input_map` + `output_variable_path` set
 3. Every edge from the plan exists
 4. CDT routing targets all resolve
-5. Start variables contain every path referenced by any `input_map`
+5. Start variables contain every path referenced by any `input_map` (`validate_flow_paths` clean)
 6. `init_flow_metadata` has been run after the last structural change
+7. **Intent-check passed** — `flow-intent-check` reconciled the built flow against the Interview Summary's edge cases + success criteria, and the user confirmed it matches
 
 Then hand off to `flow-qa` for the final validation pass.

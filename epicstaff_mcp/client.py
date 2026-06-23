@@ -29,6 +29,10 @@ class EpicStaffClient:
 
     def _build_auth_headers(self) -> dict[str, str]:
         s = self._settings
+        if s.auth_mode == AuthMode.X_API_KEY:
+            # EpicStaff API keys authenticate via X-Api-Key (Bearer is reserved
+            # for JWTs on the backend's JwtOrApiKeyAuthentication).
+            return {"X-Api-Key": s.api_key or ""}
         if s.auth_mode == AuthMode.API_KEY:
             return {"Authorization": f"Bearer {s.api_token}"}
         if s.auth_mode == AuthMode.BASIC:

@@ -12,6 +12,13 @@ All checks use MCP tools. Companion skills:
 - `flow-ddd` — variable namespace shape and contracts.
 - `flow-debugger` — next stop if QA surfaces runtime issues.
 
+> This is **gate G4** of `flow-pipeline`. A FAIL here blocks the loop-back stage
+> (`flow-intent-check`). Note: QA checks the flow is a *correct program*;
+> intent-check separately asks whether it's the *right* program. Both must pass.
+> The data-flow checks below now have a tool: `validate_flow_paths(graph_id)`
+> automates the writers/readers cross-reference, and `describe_flow(graph_id)`
+> surfaces orphans/dangling directly.
+
 ---
 
 ## When to Use
@@ -96,11 +103,11 @@ Tools: `get_flow_nodes`, `get_flow_connections`, `test_flow`, `get_cdt_route_map
 - When a trigger exists, `__start__` is also wired into the first real node (dual entry).
 - CDT routes: every `next_node`, `default_next_node`, `next_error_node` resolves to a real node name.
 
-If any of these fail, the fix is almost always a missing edge or stale metadata. `init_flow_metadata(flow_id)` after structural fixes.
+If any of these fail, the fix is almost always a missing edge or stale metadata. `init_flow_metadata(graph_id)` after structural fixes.
 
 ### 2. Data-flow continuity
 
-Tools: `get_flow_nodes` (read each node's `input_map`, `output_variable_path`), start variables from the start node in `get_flow_nodes`, `get_cdt_node(flow_id, name_or_id)` for each CDT node's full group/condition detail.
+Tools: `validate_flow_paths(graph_id)` (automated writers/readers check), `get_flow_nodes` (read each node's `input_map`, `output_variable_path`), start variables from the start node in `get_flow_nodes`, `get_cdt_node(graph_id, name_or_id)` for each CDT node's full group/condition detail.
 
 Build two tables:
 
@@ -133,7 +140,7 @@ For each node type, verify the per-type invariants.
 - **end**: `output_map` non-empty; every referenced path is written upstream (or acknowledged as default `"not found"`).
 - **python**: code contains `def main(...)`; every import satisfies one of (a) stdlib, (b) appears in `libraries`; `input_map` keys map to kwargs of `main` or are explicit paths; `output_variable_path` set if output is used downstream.
 - **webhook-trigger**: `python_code.code` contains `def main(trigger_payload=None)`; `libraries` present; `webhook_path` unique; bad-input branches return `{"error": ..., "status": 400}`.
-- **code-agent**: `llm_config_id` set; `agent_mode` is `"build"` or `"plan"`; `system_prompt` not empty (unless intentionally); `libraries` present if `stream_handler_code` imports non-stdlib; `output_schema` either unset or a valid JSON Schema.
+- **code-agent**: `llm_config_id` set; `agent_mode` set (defaults to `"build"`, the operative executor value); `system_prompt` not empty (unless intentionally); `libraries` present if `stream_handler_code` imports non-stdlib; `output_schema` either unset or a valid JSON Schema.
 - **project** (crew): crew exists; crew has agents; every agent has `llm_config` and intact `tool_ids`; every task has an `agent_id` and is attached to the crew.
 - **edge** (conditional edge): code returns a string (assert in code), and that string is always a live node's name.
 - **table** (CDT): every group has `group_name` unique within the node; `group_type` is `simple` or `complex`; `simple` groups have `conditions[]` entries whose `condition` field is a boolean expression; `complex` groups have non-null `expression`; `next_node` set for every group; `default_next_node` set; `next_error_node` set; manipulation (if present) mutates `variables` via `kwargs["variables"]`.
@@ -182,11 +189,11 @@ Skip this step only if the flow requires external triggers (Telegram, a real inb
 
 Do the checks in order. Stop and write up findings if a blocker surfaces early; a downstream check may depend on an earlier check being clean.
 
-1. `test_flow(flow_id)` — fast smoke.
+1. `test_flow(graph_id)` — fast smoke.
 2. `get_flow_nodes(flow_id)` — node inventory, types, code, libraries, maps.
-3. `get_flow_connections(flow_id)` — edges and CDT routing.
-4. `get_cdt_route_map(flow_id)` — only if any CDT nodes exist.
-5. For each CDT node found in step 2: `get_cdt_node(flow_id, name_or_id)` — full group/condition detail for per-node correctness (step 7).
+3. `get_flow_connections(graph_id)` — edges and CDT routing (or `describe_flow(graph_id)` for a readable view with orphans/dangling).
+4. `get_cdt_route_map(graph_id)` — only if any CDT nodes exist.
+5. For each CDT node found in step 2: `get_cdt_node(graph_id, name_or_id)` — full group/condition detail for per-node correctness (step 7).
 6. Cross-reference: build the writers / readers tables from the node inventory.
 7. Port legality pass over each edge.
 8. Per-node correctness pass (uses CDT detail from step 5).

@@ -31,20 +31,34 @@ Additional node kinds returned in the graph response (read-only / internal):
 
 ## Node Config Fields
 
+> **Node position/color** lives in each node's `metadata` field
+> (`JSONField(default=dict)` on the base node model), so it *can* be set at
+> create time. In practice, let `init_flow_metadata` auto-lay-out the graph after
+> wiring, then adjust individual nodes with `patch_node_metadata` — that's simpler
+> than computing coordinates by hand.
+
 ### `startnode`
 
 ```json
 {
   "graph": 42,
   "node_name": "__start__",
-  "variables": [
-    {"name": "query", "type": "str", "default": ""},
-    {"name": "user_id", "type": "int", "default": 0}
-  ]
+  "variables": {
+    "request": {"query": "", "user_id": 0}
+  }
 }
 ```
 
-`variables` defines the schema for session inputs. Each entry must have `name` and `type`.
+`variables` is the session input namespace — a nested domain dict. Nodes read it
+via dotted `input_map` paths (e.g. `variables.request.query`).
+
+> **CORRECTION — `variables` is a nested domain dict, not the list shown above.**
+> Confirmed against the backend: `StartNode.variables` is a
+> `JSONField(default=dict)`, and the runtime reads it as a `DotDict` via dotted
+> `input_map` paths (`variables.request.city`). Use a dict like
+> `{"request": {"city": null}}` (the shape `flow-ddd` teaches). The list example
+> above is stale — that `[{name, type, default}]` shape belongs to
+> `PythonCodeTool.variables`, a different model.
 
 ### `endnode`
 
@@ -94,6 +108,12 @@ Additional node kinds returned in the graph response (read-only / internal):
 
 `python_code.code` must define the entrypoint function. `libraries` lists pip packages to install.
 
+> **Confirmed:** the executor honors `python_code.entrypoint`
+> (`run_python_code_service` invokes it), and it **defaults to `"main"`**. So
+> `def main(...)` works without setting `entrypoint`; set `entrypoint` only if you
+> name the function differently. (`libraries` is stored as a space-separated
+> string on the model but the API serializer accepts/returns a list.)
+
 ### `codeagentnode`
 
 ```json
@@ -102,7 +122,7 @@ Additional node kinds returned in the graph response (read-only / internal):
   "node_name": "SummaryAgent",
   "llm_config": 3,
   "system_prompt": "You are a summarisation assistant.",
-  "agent_mode": "completion",
+  "agent_mode": "build",
   "python_code": {
     "code": "",
     "libraries": []
@@ -114,6 +134,12 @@ Additional node kinds returned in the graph response (read-only / internal):
 ```
 
 `llm_config` is the ID of an LLM config record. `agent_mode` is typically `"completion"` or `"streaming"`.
+
+> **CORRECTION — `agent_mode` defaults to `"build"`.** Confirmed against the
+> backend: it's a free `CharField(max_length=10, default="build")` with no
+> enforced choices, and `"build"` is the value the code-agent executor keys on.
+> The `"completion"`/`"streaming"` values shown above are stale — not used by the
+> executor.
 
 ### `subgraphnode`
 
@@ -178,6 +204,10 @@ Each `condition_groups` item **must** include `"conditions": []`. The DT node is
 ---
 
 ## Edges
+
+> Edges reference nodes by **integer node id** (`start_node_id`/`end_node_id`),
+> not by name. The `add_edge` / `delete_node` / `delete_edge` MCP tools take
+> numeric ids too — resolve names → ids via `get_flow_nodes` first.
 
 ### Regular edge
 

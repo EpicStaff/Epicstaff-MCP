@@ -10,3 +10,10 @@ build/
 .venv/
 venv/
 .uv/
+
+# Local dev plugin secret (run-dev.sh)
+.dev-secrets
+
+# Python bytecode
+__pycache__/
+*.pyc
