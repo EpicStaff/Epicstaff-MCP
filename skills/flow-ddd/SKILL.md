@@ -121,6 +121,7 @@ Heuristics that matter:
 - **Reach for `project` (crew) only when multiple roles collaborate.** A single-agent crew is almost always worse than a plain `code-agent` node.
 - **Use CDT when branching is a business rule expressed as predicates over variables.** Use conditional `edge` when branching is a short Python expression that returns a node name.
 - **Use `subgraph` when the sub-workflow is genuinely reusable and has its own lifecycle.** Copy-pasting nodes is worse than a subgraph, but a subgraph you only call once is pure indirection.
+  - **Subgraph I/O contract (non-obvious — confirmed in the executor + at runtime):** each `input_map` *key* becomes a **top-level** variable in the child, merged over the child's own start variables (`child_vars = child_start_vars | mapped_input`). To feed a child that reads `variables.request.city`, map `{"request": "variables.request"}` so the key `request` lands as `variables.request` in the child. The `output_variable_path` then captures the **entire child `variables` namespace** (not just the child's end `output_map`), so the parent reads `variables.<out>.<child_field>` (e.g. `variables.s1.result.upper`). Nesting is unbounded; each nested subflow runs as its own session.
 
 ---
 
@@ -160,6 +161,9 @@ Multiple success/error paths converge on `__end_node__`, whose `output_map` pick
 
 ### Enrichment pipeline
 `request` → `fetch_raw` → `normalize` → `classify` → `respond`. Each node writes to its own subpath (`variables.raw`, `variables.normalized`, `variables.classification`). Downstream nodes read only what they need.
+
+### Access-controlled RAG
+Knowledge retrieval is bound to one collection per crew agent, and there is **no query-time role/metadata filtering** — so you can't keep mixed-permission docs in one collection and filter by who's asking. Instead: **one collection per audience**, bind one crew agent to each, and route the request only to the agent(s) the user is permitted to use (e.g. a CDT on `variables.context.user_params` role). You never query a forbidden collection because no permitted path leads to its agent. (See `epicstaff` → Knowledge & RAG.)
 
 ### Decision-Table routing with manipulation
 When a branch also needs to tweak `variables` before routing, put the tweak in the group's `manipulation` — not in a follow-up `python` node. Keeps the routing atomic.
