@@ -149,7 +149,7 @@ def check_dt_groups(
                     node_name,
                 )
             )
-    if groups and not any(g.get("next_node") for g in groups):
+    if groups and not any(g.get("next_node_id") or g.get("next_node") for g in groups):
         out.append(
             _w(
                 "dt_no_route",
@@ -174,11 +174,44 @@ def check_cdt(node: Warning_) -> list[Warning_]:
             )
         )
     groups = node.get("condition_groups") or []
-    if groups and not any(g.get("next_node") for g in groups):
+    if groups and not any(g.get("next_node_id") or g.get("next_node") for g in groups):
         out.append(
             _w(
                 "cdt_no_route",
                 f"CDT node '{name}' has no condition group with a next_node.",
+                name,
+            )
+        )
+    return out
+
+
+def check_code_agent(node: Warning_) -> list[Warning_]:
+    """Code-agent nodes need a runtime message and an LLM to run.
+
+    The executor reads the user message from a ``prompt`` or ``action`` key in
+    ``input_map`` (the ``system_prompt`` is only the system role), and fails at
+    run time with "requires a 'prompt' or 'action' in input_map" without it.
+    The LLM lives on ``llm_config`` (``add_node`` accepts the ``llm_config_id``
+    alias); missing it leaves the node unrunnable.
+    """
+    out: list[Warning_] = []
+    name = node.get("node_name")
+    input_map = node.get("input_map") or {}
+    if not any(k in input_map for k in ("prompt", "action")):
+        out.append(
+            _w(
+                "codeagent_no_prompt",
+                f"Code-agent node '{name}' input_map needs a 'prompt' or 'action' "
+                f"key (the runtime message) — without it the node errors at run time.",
+                name,
+            )
+        )
+    if not (node.get("llm_config") or node.get("llm_config_id")):
+        out.append(
+            _w(
+                "codeagent_no_llm",
+                f"Code-agent node '{name}' has no llm_config; pass llm_config_id "
+                f"so it can run.",
                 name,
             )
         )
@@ -214,6 +247,8 @@ def check_node_config(
         warnings += check_python_node(node)
     elif nt == "decisiontablenode":
         warnings += check_dt_groups(node.get("condition_groups"), node_name)
+    elif nt == "codeagentnode":
+        warnings += check_code_agent(node)
     warnings += check_ports(node)
     return warnings
 

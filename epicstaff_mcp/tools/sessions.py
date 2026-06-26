@@ -9,19 +9,44 @@ from epicstaff_mcp.client import get_client
 from epicstaff_mcp.exceptions import EpicStaffAPIError
 
 
-async def list_sessions(flow_id: int, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    """List sessions for a specific flow."""
+async def list_sessions(
+    flow_id: int, limit: int = 50, offset: int = 0, include_graph_schema: bool = False
+) -> dict[str, Any]:
+    """List sessions for a specific flow.
+
+    Each raw session embeds the full ``graph_schema`` (every node definition),
+    so the list balloons past the MCP token cap (50KB+ even at limit=1). That
+    field is dropped per session by default; pass ``include_graph_schema=True``
+    to keep it. For per-node run data use ``inspect_session``.
+    """
     async with get_client() as client:
-        return await client.get(
+        resp = await client.get(
             "/api/sessions/",
             params={"graph": flow_id, "limit": limit, "offset": offset},
         )
+    if not include_graph_schema and isinstance(resp, dict):
+        for s in resp.get("results", []):
+            if isinstance(s, dict):
+                s.pop("graph_schema", None)
+    return resp
 
 
-async def get_session(session_id: int) -> dict[str, Any]:
-    """Get full details of a session by ID."""
+async def get_session(
+    session_id: int, include_graph_schema: bool = False
+) -> dict[str, Any]:
+    """Get full details of a session by ID.
+
+    The raw session embeds the entire ``graph_schema`` (every node definition),
+    which can exceed the MCP token cap on large flows. By default that field is
+    dropped; pass ``include_graph_schema=True`` if you actually need it. For
+    per-node run data use ``inspect_session``; for message history use
+    ``get_session_trace``.
+    """
     async with get_client() as client:
-        return await client.get(f"/api/sessions/{session_id}/")
+        session = await client.get(f"/api/sessions/{session_id}/")
+    if not include_graph_schema and isinstance(session, dict):
+        session.pop("graph_schema", None)
+    return session
 
 
 async def run_session(
@@ -108,18 +133,27 @@ async def list_session_messages(
         )
 
 
-_TERMINAL_STATUSES = {"completed", "failed", "stopped", "error"}
+# Backend SessionStatus enum: pending / run / wait_for_user / error / end /
+# stop / expired. A finished run reports "end" (NOT "completed"). "wait_for_user"
+# is a pause that cannot self-progress, so we return on it too rather than poll
+# until timeout.
+_TERMINAL_STATUSES = {"end", "error", "stop", "expired"}
+_HALT_STATUSES = _TERMINAL_STATUSES | {"wait_for_user"}
 
 
 async def run_session_and_wait(
     flow_id: int,
     variables: dict[str, Any] | None = None,
-    timeout: int = 300,
+    timeout: int = 600,
     poll_interval: int = 5,
 ) -> dict[str, Any]:
-    """Start a session and poll until it completes, fails, or times out.
+    """Start a session and poll until it completes, halts, or times out.
 
-    Returns the final session state including status and any output variables.
+    Returns the final session state: ``status``, ``session_id``,
+    ``elapsed_seconds``, and ``variables`` (the final variables namespace, so
+    callers get the run output without a second round-trip). A successful run
+    ends with status ``"end"``. On a real timeout the latest state is returned
+    with ``"incomplete": true`` (not a bare error) so partial progress is visible.
     """
     payload: dict[str, Any] = {"graph_id": flow_id}
     if variables:
@@ -131,17 +165,38 @@ async def run_session_and_wait(
     session_id = start_response.get("id") or start_response.get("session_id")
 
     start_time = time.monotonic()
+    update: dict[str, Any] = {}
     while True:
         elapsed = time.monotonic() - start_time
         if elapsed > timeout:
-            return {"error": "timeout", "session_id": session_id, "elapsed": elapsed}
+            update["incomplete"] = True
+            update.setdefault("session_id", session_id)
+            update["elapsed_seconds"] = elapsed
+            return update
 
         async with get_client() as client:
             update = await client.get(f"/api/sessions/{session_id}/get-updates/")
 
         status = update.get("status", "")
-        if status in _TERMINAL_STATUSES:
+        if status in _HALT_STATUSES:
             update["elapsed_seconds"] = time.monotonic() - start_time
+            # The get-updates payload does not echo the session id; attach it so
+            # callers can follow up with inspect_session / get_session_trace etc.
+            update.setdefault("session_id", session_id)
+            # get-updates omits the final variables. Fetch them once so the
+            # caller gets the run output directly. status_data.variables holds the
+            # final computed namespace; fall back to the (input) variables field.
+            try:
+                async with get_client() as client:
+                    session = await client.get(f"/api/sessions/{session_id}/")
+                if isinstance(session, dict):
+                    status_data = session.get("status_data") or {}
+                    final_vars = status_data.get("variables")
+                    if final_vars is None:
+                        final_vars = session.get("variables")
+                    update.setdefault("variables", final_vars)
+            except Exception:
+                pass  # best-effort enrichment; never fail the wait on this
             return update
 
         await asyncio.sleep(poll_interval)

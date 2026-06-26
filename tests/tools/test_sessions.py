@@ -10,6 +10,7 @@ from epicstaff_mcp.tools.sessions import (
     get_session_updates,
     list_sessions,
     run_session,
+    run_session_and_wait,
     send_message,
     stop_session,
 )
@@ -35,6 +36,48 @@ async def test_list_sessions():
     )
     result = await list_sessions(flow_id=1)
     assert result["count"] == 1
+
+
+@respx.mock
+async def test_list_sessions_strips_graph_schema():
+    # Each raw session embeds a huge graph_schema; list_sessions must drop it.
+    heavy = {**SESSION_PAYLOAD, "graph_schema": {"nodes": ["...50KB..."]}}
+    respx.get(f"{BASE_URL}api/sessions/").mock(
+        return_value=httpx.Response(200, json={"count": 1, "results": [heavy]})
+    )
+    result = await list_sessions(flow_id=1)
+    assert "graph_schema" not in result["results"][0]
+
+
+@respx.mock
+async def test_list_sessions_keeps_graph_schema_when_requested():
+    heavy = {**SESSION_PAYLOAD, "graph_schema": {"nodes": []}}
+    respx.get(f"{BASE_URL}api/sessions/").mock(
+        return_value=httpx.Response(200, json={"count": 1, "results": [heavy]})
+    )
+    result = await list_sessions(flow_id=1, include_graph_schema=True)
+    assert "graph_schema" in result["results"][0]
+
+
+@respx.mock
+async def test_run_session_and_wait_attaches_final_variables():
+    respx.post(f"{BASE_URL}api/run-session/").mock(
+        return_value=httpx.Response(201, json={"id": 10})
+    )
+    respx.get(f"{BASE_URL}api/sessions/10/get-updates/").mock(
+        return_value=httpx.Response(200, json={"status": "end"})
+    )
+    # get-updates omits variables; run_session_and_wait fetches the session and
+    # surfaces status_data.variables (the final computed namespace).
+    respx.get(f"{BASE_URL}api/sessions/10/").mock(
+        return_value=httpx.Response(
+            200, json={"status_data": {"variables": {"result": {"upper": "HI"}}}}
+        )
+    )
+    result = await run_session_and_wait(flow_id=1, timeout=30, poll_interval=0)
+    assert result["status"] == "end"
+    assert result["session_id"] == 10
+    assert result["variables"] == {"result": {"upper": "HI"}}
 
 
 @respx.mock

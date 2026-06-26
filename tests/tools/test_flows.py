@@ -15,6 +15,7 @@ from epicstaff_mcp.tools.flows import (
     delete_edge,
     delete_node,
     describe_flow,
+    get_cdt_route_map,
     get_flow,
     get_flow_connections,
     get_flow_nodes,
@@ -105,6 +106,11 @@ async def test_create_flow():
 @respx.mock
 async def test_update_flow_metadata():
     updated = {**FLOW_LIGHT, "name": "Renamed Flow"}
+    # update_flow_metadata first GETs the graph to read save_version (required
+    # for the optimistic-concurrency PATCH), then PATCHes.
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json={**FLOW_LIGHT, "save_version": 3})
+    )
     respx.patch(f"{BASE_URL}api/graphs/1/").mock(
         return_value=httpx.Response(200, json=updated)
     )
@@ -167,10 +173,130 @@ async def test_update_node():
 
 @respx.mock
 async def test_delete_node():
+    # delete_node now lists edges first to cascade-remove any that reference the
+    # node; mock both edge endpoints (empty) plus the node delete.
+    respx.get(f"{BASE_URL}api/edges/").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.get(f"{BASE_URL}api/conditionaledges/").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
     respx.delete(f"{BASE_URL}api/crewnodes/10/").mock(return_value=httpx.Response(204))
     result = await delete_node(flow_id=1, node_id=10, node_type="crewnode")
     assert "deleted" in result["message"]
     assert "10" in result["message"]
+    assert result["removed_edges"] == []
+
+
+@respx.mock
+async def test_delete_node_cascades_referencing_edges():
+    # Two edges touch node 10 (as start and as end) plus one unrelated edge;
+    # delete_node must delete only the two and then the node.
+    edges = [
+        {"id": 100, "start_node_id": 10, "end_node_id": 20, "graph": 1},
+        {"id": 101, "start_node_id": 5, "end_node_id": 10, "graph": 1},
+        {"id": 102, "start_node_id": 5, "end_node_id": 20, "graph": 1},
+    ]
+    respx.get(f"{BASE_URL}api/edges/").mock(
+        return_value=httpx.Response(200, json={"results": edges})
+    )
+    respx.get(f"{BASE_URL}api/conditionaledges/").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": 200, "source_node": 10, "graph": 1}]},
+        )
+    )
+    del100 = respx.delete(f"{BASE_URL}api/edges/100/").mock(return_value=httpx.Response(204))
+    del101 = respx.delete(f"{BASE_URL}api/edges/101/").mock(return_value=httpx.Response(204))
+    del200 = respx.delete(f"{BASE_URL}api/conditionaledges/200/").mock(
+        return_value=httpx.Response(204)
+    )
+    node_del = respx.delete(f"{BASE_URL}api/pythonnodes/10/").mock(
+        return_value=httpx.Response(204)
+    )
+    result = await delete_node(flow_id=1, node_id=10, node_type="pythonnode")
+    assert del100.called and del101.called and del200.called and node_del.called
+    assert set(result["removed_edges"]) == {100, 101, 200}
+
+
+@respx.mock
+async def test_add_node_codeagent_maps_llm_config_id():
+    route = respx.post(f"{BASE_URL}api/code-agent-nodes/").mock(
+        return_value=httpx.Response(201, json={"id": 10, "node_name": "CA"})
+    )
+    await add_node(
+        flow_id=1,
+        node_type="codeagentnode",
+        config={"llm_config_id": 8, "input_map": {"prompt": "variables.q"}},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["llm_config"] == 8  # mapped from llm_config_id
+    assert "llm_config_id" not in body
+
+
+@respx.mock
+async def test_add_node_webhook_injects_metadata():
+    route = respx.post(f"{BASE_URL}api/webhook-trigger-nodes/").mock(
+        return_value=httpx.Response(201, json={"id": 10, "node_name": "WH"})
+    )
+    await add_node(
+        flow_id=1,
+        node_type="webhooktriggernode",
+        config={"webhook_trigger": {"path": "/x"},
+                "python_code": {"code": "def main(b):\n    return {}", "entrypoint": "main", "libraries": []}},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["metadata"] == {}  # injected default
+
+
+@respx.mock
+async def test_add_node_telegram_defaults_field_parent_and_metadata():
+    route = respx.post(f"{BASE_URL}api/telegram-trigger-nodes/").mock(
+        return_value=httpx.Response(201, json={"id": 33, "node_name": "TG"})
+    )
+    await add_node(
+        flow_id=1,
+        node_type="telegramtriggernode",
+        config={
+            "telegram_bot_api_key": "tok",
+            "fields": [{"field_name": "text", "variable_path": "variables.request.q"}],
+        },
+    )
+    body = json.loads(route.calls.last.request.content)
+    # Fields stay inline; each gets a default `parent` (the Telegram update type).
+    assert body["fields"][0]["parent"] == "message"
+    assert body["fields"][0]["field_name"] == "text"
+    assert body["metadata"] == {}  # injected default
+
+
+@respx.mock
+async def test_get_cdt_route_map_reads_node_id_and_resolves_names():
+    graph = {
+        "decision_table_node_list": [
+            {
+                "id": 419,
+                "node_name": "Route",
+                "default_next_node_id": 417,
+                "next_error_node_id": None,
+                "condition_groups": [
+                    {"group_name": "positive", "next_node_id": 416},
+                ],
+            }
+        ],
+        "classification_decision_table_node_list": [],
+        "python_node_list": [
+            {"id": 416, "node_name": "Celebrate"},
+            {"id": 417, "node_name": "Mitigate"},
+        ],
+    }
+    respx.get(f"{BASE_URL}api/graphs/116/").mock(
+        return_value=httpx.Response(200, json=graph)
+    )
+    result = await get_cdt_route_map(graph_id=116)
+    dt = result["routing"][0]
+    assert dt["routing"]["positive"] == {"node_id": 416, "node_name": "Celebrate"}
+    assert dt["default"] == {"node_id": 417, "node_name": "Mitigate"}
+    assert dt["error"] is None
 
 
 @respx.mock

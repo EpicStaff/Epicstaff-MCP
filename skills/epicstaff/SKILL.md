@@ -33,7 +33,7 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 |---|---|
 | `list_flows` | List all flows |
 | `get_flow(flow_id)` | Full flow with all nodes and edges (raw JSON) |
-| `get_flow_nodes(flow_id)` | All nodes organized by type |
+| `get_flow_nodes(flow_id, compact=False)` | All nodes organized by type. Pass `compact=True` on 40+ node flows — slim projection + `name_to_id` map (the full form can exceed the response-size limit). |
 | `get_flow_connections(graph_id)` | All edges + CDT/DT routing (machine shape) |
 | `describe_flow(graph_id, fmt)` | **Readable** view: nodes, reads/writes, wiring, orphans, dangling. `fmt`=`text`\|`mermaid`\|`both`. Use this to *see* what you built. |
 | `validate_flow_paths(graph_id)` | Check every `input_map`/`output_map` path against declared start variables + upstream writers |
@@ -79,7 +79,7 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 | `update_flow_metadata(flow_id, name, description, epicchat_enabled)` | Rename/redescribe a flow only — NOT the sync tool above |
 | `test_flow(graph_id)` | Structural check → `{ok, issues, summary}`; gate on `ok` |
 | `copy_flow(flow_id)` | Duplicate a flow |
-| `save_flow(flow_id, ..., allow_incomplete)` | Atomic bulk save. Gates on validation; pass `allow_incomplete=True` for a WIP save |
+| `save_flow(flow_id, ..., allow_incomplete)` | Atomic bulk save (auto-includes the graph's current `save_version`). Gates on validation; pass `allow_incomplete=True` for a WIP save. Best for moderate flows — for 60+ nodes, build incrementally with `add_node`/`add_edge` then `init_flow_metadata` to stay under the response-size limit. |
 | `export_flow(flow_id)` | Export flow as JSON |
 | `import_flow(payload)` | Import flow from JSON |
 
@@ -100,10 +100,10 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 |---|---|
 | `list_sessions(flow_id)` | Recent sessions for a flow |
 | `run_session(flow_id, variables)` | Start a session |
-| `run_session_and_wait(flow_id, variables, timeout)` | Start and poll until done |
+| `run_session_and_wait(flow_id, variables, timeout=600)` | Start and poll until done. Success = terminal status `"end"`; on real timeout returns the latest state with `"incomplete": true` (not a bare error). |
 | `get_session_updates(session_id)` | Current session status |
 | `stop_session(session_id)` | Stop a running session |
-| `inspect_session(session_id)` | Per-node input/output |
+| `inspect_session(session_id)` | Per-node input/output — compact; the go-to for confirming what actually ran (use over raw `get_session`, which embeds the full graph schema). |
 | `send_message(session_id, ...)` | Send human input to a waiting session |
 
 ### Session Debug
@@ -162,9 +162,9 @@ These rules encode hard-won lessons from production issues. Violating any causes
 | Start | `startnode` | `variables` JSON | none | `start-start` (single) | Patch via `patch_start_variables`. Must connect to at least one downstream node. |
 | End | `endnode` | `output_map` JSON | `end-in` (multi) | none | Only one end node per flow. Missing vars resolve to string `"not found"`. |
 | Python | `pythonnode` | `python_code.code`, `python_code.libraries`, `input_map`, `output_variable_path` | `python-in` (multi) | `python-out` (single) | Must have `def main(...)`. Always pass `libraries` when patching. |
-| Code Agent | `codeagentnode` | `system_prompt`, `llm_config_id`, `agent_mode` (defaults to `"build"`), `input_map`, `output_variable_path` | `code-agent-in` (multi) | `code-agent-out` (single) | `libraries` applies to `stream_handler_code` only. `output_schema` triggers retry on mismatch. `agent_mode` is a free `CharField(max_length=10)` defaulting to `"build"` — `"build"` is the operative value in the executor. (The `completion`/`streaming` values some docs showed are not used by the code-agent executor.) |
-| Project / Crew | `crewnode` | `crew` FK, `input_map`, `output_variable_path` | `project-in` (multi) | `project-out` (single) | Agent `tool_ids` PATCH is destructive — send all IDs. |
-| Table / CDT | `decisiontablenode` | `condition_groups[]`, `default_next_node`, `next_error_node` | `input` (input) | `decision-default`, `decision-error`, `decision-out-{group_name}` | Routing is metadata-only. `add_edge` does nothing here. `prompts` must be dict. Each group needs `"conditions": []`. |
+| Code Agent | `codeagentnode` | `system_prompt`, `llm_config_id`, `agent_mode` (defaults to `"build"`), `input_map`, `output_variable_path` | `code-agent-in` (multi) | `code-agent-out` (single) | **`input_map` MUST include a `prompt` or `action` key** — that's the runtime message the agent acts on (the `system_prompt` is only the system role); without it the run fails with `requires a 'prompt' or 'action' in input_map`. `add_node` accepts `llm_config_id` (auto-mapped to the `llm_config` FK). `libraries` applies to `stream_handler_code` only. `output_schema` triggers retry on mismatch. `agent_mode` is a free `CharField(max_length=10)` defaulting to `"build"` — `"build"` is the operative value in the executor. (The `completion`/`streaming` values some docs showed are not used by the code-agent executor.) |
+| Project / Crew | `crewnode` | `crew` FK, `input_map`, `output_variable_path` | `project-in` (multi) | `project-out` (single) | Agent `tool_ids` PATCH is destructive — send all IDs. **Output is an envelope** `{raw, message, token_usage}`, not the bare result — downstream readers/DT expressions must unwrap `.message`/`.raw`. |
+| Table / CDT | `decisiontablenode` | `condition_groups[]`, `default_next_node`, `next_error_node` | `input` (input) | `decision-default`, `decision-error`, `decision-out-{group_name}` | Routing is metadata-only. `add_edge` does nothing here — wire via `patch_dt_node` (give targets by name or id; stored as `next_node_id`/`default_next_node_id`). `prompts` must be dict. Each group needs `"conditions": []`. |
 | Subgraph | `subgraphnode` | `subgraph` FK, `input_map`, `output_variable_path` | `subgraph-in` (multi) | `subgraph-out` (single) | Circular references detected and blocked. |
 | Webhook Trigger | `webhooktriggernode` | `webhook_trigger.webhook_path`, `python_code.code` | none | `webhook-trigger-out` (single) | No input port — nothing wires TO it. Also connect `__start__` to same downstream node for manual runs. |
 | Telegram Trigger | `telegramtriggernode` | `telegram_bot_api_key`, `fields[]` | none | `telegram-trigger-out` (single) | Same dual-wiring rule as webhook trigger. `fields[]` maps telegram payload → variables paths. |
@@ -214,6 +214,89 @@ Rule of thumb: if both nodes are on the main execution path, source out → targ
 - **Single outgoing edge:** `python-out`, `code-agent-out`, `project-out`, `subgraph-out`, `file-extractor-out`, `audio-to-text-out`, `table-out`, `webhook-trigger-out`, `telegram-trigger-out`, `start-start`
 
 To branch execution from one source to two downstream nodes: use a CDT or conditional edge node — single-out ports cannot fan out directly.
+
+---
+
+## Section 5: Knowledge & RAG
+
+Retrieval-augmented generation lets a **crew agent** ground its answers in uploaded documents. Read the constraints first — they shape the whole design.
+
+### Critical Operational Rules
+
+1. **RAG is NOT a tool the agent calls — it is a pre-execution retrieval step.** Before a crew agent runs its task, the runtime issues one knowledge search (`search_knowledges`) over the agent's bound collection and injects the snippets into the task prompt. The agent never decides whether or what to retrieve; it always retrieves once, using the task/query text. There is no "search the knowledge base" tool to wire up.
+
+2. **An agent is statically bound to exactly ONE collection + ONE rag config at design time.** The binding lives on the **agent** record (`knowledge_collection`, plus a rag type `"naive:{id}"` and a search config of `search_limit` + `similarity_threshold`). To search a *different* collection you need a *different* agent. There is **no per-request collection switching**.
+
+3. **The only dynamic part of a search is the query string.** No metadata filtering, no role/tag filtering, no narrowing by document at runtime. If you need access control over documents, that is a *modeling* decision (see rule 4), not a runtime filter.
+
+4. **Document access control = one collection per audience + route the query only to permitted agents.** Because retrieval is collection-bound per agent and there is no query-time filtering, you cannot keep restricted and public docs in one collection and filter by role. Put each audience's documents in their own collection, bind one agent per collection, and route the request only to the agent(s) the user is permitted to use. You never query a forbidden collection. (See `flow-ddd` → Patterns That Work → "Access-controlled RAG".)
+
+5. **Only crew agents (`crewnode`) retrieve knowledge. `code-agent` (`codeagentnode`) CANNOT do RAG.** A code-agent has an `llm_config_id` but no knowledge binding. If a responsibility needs grounding in uploaded docs, it must be a crew agent inside a `crewnode`.
+
+6. **`python` nodes have no RAG access at all.** A python/webhook node executor only receives `state = {variables, state_history}` in its globals — no session id, no retrieval handle. Knowledge cannot be fetched from arbitrary code; it only enters via a crew agent's pre-task retrieval.
+
+7. **Indexing must complete before queries return anything.** A collection with documents but no embeddings returns empty retrieval. An embedding config is required on the collection/RAG before indexing. Always run indexing after uploading or re-chunking.
+
+8. **`knowledge_collection` alone does NOT enable retrieval — you must ALSO set `naive_rag_id`.** Retrieval fires only when the agent has an `AgentNaiveRag` join row (the runtime guard is literally `if self.rag_type_id:`, and `rag_type_id` is derived *solely* from that join — never from `knowledge_collection`). The backend creates the join from a `rag` field on the agent write API (`{"rag_type":"naive","rag_id":<naive_rag_id>}`) and *requires* it whenever `knowledge_collection` is set. The MCP `create_agent`/`update_agent` tools expose a **`naive_rag_id`** param that forwards this `rag` field — so to make a crew agent RAG-capable, pass **BOTH** `knowledge_collection=<collection_id>` and `naive_rag_id=<naive_rag_id>`. Setting only `knowledge_collection` is rejected (`"rag is required"`); setting neither = no retrieval.
+
+### Data model (hierarchy)
+
+```
+SourceCollection
+ └─ DocumentMetadata        (each document FK to exactly one collection)
+NaiveRag                    (a RAG index over a collection; has an embedding config)
+ └─ NaiveRagDocumentConfig  (per-document chunking: chunk_strategy/size/overlap; unique per (rag, document))
+     └─ NaiveRagChunk
+         └─ NaiveRagEmbedding (pgvector)
+Agent ── AgentNaiveRag (M:M) ── NaiveRag   (the static binding that makes an agent RAG-capable)
+```
+
+### MCP build sequence for a queryable collection
+
+| Step | Tool | Notes |
+|---|---|---|
+| 1. Create the collection | `create_source_collection(collection_name, embedding_config)` | Pass an `embedding_config` id; embeddings are required to query. Create one first with `create_embedding_config(custom_name, model)` / pick via `list_embedding_configs`, `list_embedding_models`. |
+| 2. Add documents | `upload_document_file(collection_id, file_content_base64, filename)` — the supported path | The tool sends the multipart field as `files` (required). `add_document` POSTs to a list-only endpoint and returns **405 — do not use it**. |
+| 3. Create the RAG index | `create_naive_rag(collection_id, embedder_id, chunk_strategy, chunk_size, chunk_overlap)` | `embedder_id` is **REQUIRED** (the EmbeddingConfig id — use the one the collection was created with). The chunk_* args set defaults applied when document configs are initialized. |
+| 4. Initialize per-doc chunk configs | `init_naive_rag_document_configs(naive_rag_id)` | Creates a `NaiveRagDocumentConfig` for every document in the collection. |
+| 5. (Optional) tune chunking | `bulk_update_naive_rag_document_configs(naive_rag_id, configs=[{"id":..., ...}])` or `update_naive_rag_document_config(...)` | Each config item must include its `id`. |
+| 6. (Optional) preview chunking | `process_chunking(naive_rag_id, config_id)` | **Preview only — does not save.** Per-config; use to eyeball how a document will split before indexing. |
+| 7. Index | `trigger_rag_indexing(rag_id, rag_type="naive")` — pass the **naive_rag_id**, NOT the collection id | Computes embeddings + builds the pgvector index. Must finish before retrieval returns results. (Indexing is async; poll `get_naive_rag(naive_rag_id)` until `rag_status == "completed"`.) |
+| 8. Bind a crew agent | `create_agent(role, goal, backstory, llm_config=<id>, knowledge_collection=<collection_id>, naive_rag_id=<naive_rag_id>)` (or `update_agent`) | Pass **BOTH** `knowledge_collection` and `naive_rag_id` — see rule 8. The agent then runs inside a `crewnode` (with a task whose instructions reference the question). (`update_agent` `tool_ids` is a destructive replace — see Section 2 rule 7.) |
+
+Inspection: `list_source_collections`, `get_source_collection`, `list_collection_documents` / `list_documents`, `list_naive_rag_for_collection`, `get_naive_rag`, `list_naive_rag_chunks` / `list_naive_rag_document_chunks`, `get_naive_rag_document_config`, `list_naive_rag_document_configs`.
+
+---
+
+## Section 6: EpicChat Integration
+
+A flow becomes the brain behind the EpicChat widget. The widget — not the flow — owns the conversation; the flow runs once per message.
+
+### Critical Operational Rules
+
+1. **`epicchat_enabled` is a marker only — there is no runtime branching on it.** It just flags the flow as chat-connected so the widget can pick it up. Set it with `update_flow_metadata(flow_id, epicchat_enabled=True)`. The flow runs identically whether invoked from the widget or a manual run.
+
+2. **Default model = one fresh, stateless session PER user message.** Each user message triggers a new `run_session`. The flow keeps no memory between turns by itself — the **widget replays history** on every call. Don't design EpicChat flows assuming in-session memory; for true cross-session memory use persistent variables (see `flow-ddd`).
+
+3. **Read the message from `variables.context`, not from a custom start variable.** Every widget call seeds `variables.context` with:
+
+   | Path | Contents |
+   |---|---|
+   | `variables.context.user_input` | The current message text — **this is the key the flow reads for the question.** |
+   | `variables.context.chat_history` | `[{role, content}, ...]` of prior turns (widget-supplied; the flow's only view of the conversation). |
+   | `variables.context.user_params` | Arbitrary metadata parsed from the widget's `userData` HTML attribute — the channel for identity/context from the embedding page (client-trusted). |
+   | `variables.context.user_action` | Optional; set when the user clicks an action button (see `epicchat-response`). |
+   | `variables.context.chat_session_id` | Present **only** in the Code-Agent "stateful" mode (preserves an OpenCode workspace); flow sessions are still independent per message. |
+
+   Declare these paths in the start node's `variables.context` (even as `null`/`[]`) so `input_map` reads resolve — undeclared paths raise at runtime.
+
+4. **The response to the widget = the End node's `output_map`, and it must include a `message` field.** The end node applies `output_map` against `variables` and that dict is sent to the widget. The default `output_map` is `{"context": "variables"}` — usually you override it to emit a `message` (plus optional `ef_tables`, `action_message`, etc.). See the `epicchat-response` skill for the full rich-formatting contract (buttons, tables, navigation actions).
+
+5. **User identity is NOT auto-injected into `variables`, and nodes cannot read `session_id`/`graph_user` at runtime.** The logged-in user is resolved from `username` (= email) into `Session.graph_user`, but that never lands in `variables`. Two supported ways to get identity into a node's reach:
+   - **Widget `userData` → `variables.context.user_params`** — set by the embedding page; client-trusted (don't authorize on it).
+   - **Pre-seed `GraphOrganizationUser.persistent_variables` per user** — these are merged into the session `variables` at start via a shallow top-level `variables.update(...)`; server-trusted. (See `flow-ddd` → Persistent Variables.)
+
+6. **Don't reach for `wait_for_user` for normal chat multi-turn.** `wait_for_user` is a *separate* mechanism: setting `human_input=True` on a crew Task pauses the session (`WAIT_FOR_USER`) and resumes via the AnswerToLLM endpoint. EpicChat multi-turn is already handled by the widget's per-message sessions + `chat_history` — using `wait_for_user` for it just deadlocks the chat. Reserve it for genuine mid-flow human approval loops.
 
 ---
 

@@ -1,6 +1,7 @@
 """MCP tools for managing EpicStaff flows (visual workflows) including nodes and edges."""
 from __future__ import annotations
 
+import ast
 import asyncio
 from typing import Any
 
@@ -69,18 +70,67 @@ async def update_flow_metadata(
     if epicchat_enabled is not None:
         payload["epicchat_enabled"] = epicchat_enabled
     async with get_client() as client:
+        # Graph PATCH requires the current save_version for optimistic concurrency.
+        graph = await client.get(f"/api/graphs/{flow_id}/")
+        payload["save_version"] = graph.get("save_version", 1)
         return await client.patch(f"/api/graphs/{flow_id}/", json=payload)
 
 
-async def get_flow_nodes(flow_id: int) -> dict[str, Any]:
-    """Get all node lists for a flow, organised by node type."""
+async def get_flow_nodes(flow_id: int, compact: bool = False) -> dict[str, Any]:
+    """Get all node lists for a flow, organised by node type.
+
+    The full response embeds every node config (input maps, crew/agent objects,
+    Python code, metadata) and can exceed the MCP token cap on large flows
+    (40+ nodes). Pass ``compact=True`` to get a slim projection instead: each
+    node reduced to ``{id, node_name, type, input_map, output_variable_path,
+    crew_id?}`` plus a top-level ``name_to_id`` map. Edges are returned as-is
+    (already lightweight). Use the full form only when you need a specific
+    node's complete config.
+    """
     async with get_client() as client:
         flow = await client.get(f"/api/graphs/{flow_id}/")
     node_keys = [
         k for k in flow
         if k.endswith("_list") or k in ("edge_list", "conditional_edge_list")
     ]
-    return {k: flow[k] for k in node_keys}
+    if not compact:
+        return {k: flow[k] for k in node_keys}
+
+    def _slim(node: dict[str, Any], endpoint: str) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "id": node.get("id"),
+            "node_name": node.get("node_name") or node.get("name"),
+            "type": endpoint,
+        }
+        for key in ("input_map", "output_variable_path", "default_next_node_id",
+                    "next_error_node_id"):
+            if node.get(key) is not None:
+                out[key] = node[key]
+        crew = node.get("crew")
+        if isinstance(crew, dict):
+            out["crew_id"] = crew.get("id")
+        elif node.get("crew_id") is not None:
+            out["crew_id"] = node["crew_id"]
+        groups = node.get("condition_groups")
+        if groups:
+            out["condition_groups"] = [
+                {"group_name": g.get("group_name"),
+                 "expression": g.get("expression"),
+                 "next_node_id": g.get("next_node_id")}
+                for g in groups
+            ]
+        return out
+
+    idx = _index_graph(flow)
+    result: dict[str, Any] = {"name_to_id": {v: k for k, v in idx["id_to_name"].items()}}
+    list_to_endpoint = dict(NODE_LIST_KEYS)
+    for k in node_keys:
+        if k in ("edge_list", "conditional_edge_list"):
+            result[k] = flow[k]
+        else:
+            endpoint = list_to_endpoint.get(k, k)
+            result[k] = [_slim(n, endpoint) for n in flow[k]]
+    return result
 
 
 async def add_node(
@@ -102,6 +152,12 @@ async def add_node(
       pythonnode: {python_code: {code: str, entrypoint: str, libraries: list[str]}}
       startnode:  {variables: dict}
       endnode:    {output_map: dict}
+      codeagentnode: {system_prompt, llm_config_id, agent_mode, input_map,
+                      output_variable_path} — input_map MUST include a 'prompt'
+                      or 'action' key (the runtime message).
+      telegramtriggernode: {telegram_bot_api_key, fields: [{field_name,
+                      variable_path, parent?}]} — each field's `parent` (the
+                      Telegram update type) defaults to "message" if omitted.
     """
     endpoint = NODE_TYPE_TO_ENDPOINT.get(node_type.lower())
     if not endpoint:
@@ -110,6 +166,30 @@ async def add_node(
             status_code=400,
             detail=f"Unknown node_type '{node_type}'. Valid types: {valid}",
         )
+    nt = node_type.lower()
+    config = dict(config)  # never mutate the caller's dict
+
+    # code-agent stores the LLM under `llm_config`; accept the friendlier
+    # `llm_config_id` alias (matches patch_code_agent_node) so it isn't silently
+    # dropped — the serializer ignores unknown keys, leaving llm_config null.
+    if nt == "codeagentnode" and "llm_config_id" in config:
+        config.setdefault("llm_config", config.pop("llm_config_id"))
+
+    # Telegram fields are created inline (the node serializer sets each field's
+    # `telegram_trigger_node` FK automatically). Each field requires a `parent`
+    # CharField — the Telegram update type, e.g. "message"/"callback_query" — so
+    # default it, letting callers pass just {field_name, variable_path}.
+    if nt == "telegramtriggernode" and isinstance(config.get("fields"), list):
+        config["fields"] = [
+            {**f, "parent": f.get("parent", "message")} if isinstance(f, dict) else f
+            for f in config["fields"]
+        ]
+
+    # Trigger-node serializers require `metadata` explicitly (other node types
+    # default it). Inject an empty dict when the caller didn't supply one.
+    if nt in ("webhooktriggernode", "telegramtriggernode"):
+        config.setdefault("metadata", {})
+
     payload: dict[str, Any] = {"graph": flow_id, **config}
     if node_name is not None:
         payload["node_name"] = node_name
@@ -151,8 +231,15 @@ async def update_node(
         return await client.patch(f"/api/{endpoint}/{node_id}/", json=config)
 
 
-async def delete_node(flow_id: int, node_id: int, node_type: str) -> dict[str, str]:
-    """Delete a node from a flow. node_type: same values as add_node."""
+async def delete_node(flow_id: int, node_id: int, node_type: str) -> dict[str, Any]:
+    """Delete a node from a flow, plus any edges that reference it.
+
+    The backend does NOT cascade-delete edges, so a bare node delete leaves
+    dangling edges (start/end pointing at a now-missing node). Those break the
+    next run — the langgraph build fails with "edge starting at unknown node",
+    and a dangling start-edge can even hijack the entrypoint. This removes every
+    regular and conditional edge touching the node before deleting it.
+    """
     endpoint = NODE_TYPE_TO_ENDPOINT.get(node_type.lower())
     if not endpoint:
         valid = ", ".join(NODE_TYPE_TO_ENDPOINT)
@@ -160,19 +247,37 @@ async def delete_node(flow_id: int, node_id: int, node_type: str) -> dict[str, s
             status_code=400,
             detail=f"Unknown node_type '{node_type}'. Valid types: {valid}",
         )
+    edges = await list_edges(flow_id)
+    removed_edges: list[int] = []
     async with get_client() as client:
+        for e in edges.get("edges", []):
+            if e.get("start_node_id") == node_id or e.get("end_node_id") == node_id:
+                await client.delete(f"/api/edges/{e['id']}/")
+                removed_edges.append(e["id"])
+        for e in edges.get("conditional_edges", []):
+            if e.get("source_node") == node_id or e.get("source_node_id") == node_id:
+                await client.delete(f"/api/conditionaledges/{e['id']}/")
+                removed_edges.append(e["id"])
         await client.delete(f"/api/{endpoint}/{node_id}/")
-    return {"message": f"Node {node_id} ({node_type}) deleted successfully"}
+    return {
+        "message": f"Node {node_id} ({node_type}) deleted successfully",
+        "removed_edges": removed_edges,
+    }
 
 
 async def list_edges(flow_id: int) -> dict[str, Any]:
     """List all regular and conditional edges for a flow."""
+    # The backend EdgeViewSet/ConditionalEdgeViewSet have no filter backend, so a
+    # `?graph=` query param is ignored and every edge in the DB comes back. Filter
+    # client-side by the edge's `graph` field to scope the result to this flow.
     async with get_client() as client:
         edges = await client.get("/api/edges/", params={"graph": flow_id})
         conditional = await client.get("/api/conditionaledges/", params={"graph": flow_id})
     return {
-        "edges": edges.get("results", []),
-        "conditional_edges": conditional.get("results", []),
+        "edges": [e for e in edges.get("results", []) if e.get("graph") == flow_id],
+        "conditional_edges": [
+            e for e in conditional.get("results", []) if e.get("graph") == flow_id
+        ],
     }
 
 
@@ -280,6 +385,11 @@ async def save_flow(
         "deleted": deleted or {},
     }
     async with get_client() as client:
+        # The save endpoint requires the graph's current save_version for
+        # optimistic-concurrency; fetch it fresh so each call carries the
+        # latest value (the backend increments it on every save).
+        graph = await client.get(f"/api/graphs/{flow_id}/")
+        payload["save_version"] = graph.get("save_version", 1)
         result = await client.post(f"/api/graphs/{flow_id}/save/", json=payload)
 
     # Re-validate the persisted flow and gate on blocker-level problems.
@@ -327,10 +437,12 @@ async def add_conditional_edge(
     input_map: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add a conditional edge to a flow. The python_code determines routing logic."""
+    # ConditionalEdge.python_code is a nested PythonCode object (code + libraries),
+    # not a bare string — wrap it (libraries is required on the nested serializer).
     payload: dict[str, Any] = {
         "graph": flow_id,
         "source_node": source_node_id,
-        "python_code": python_code,
+        "python_code": {"code": python_code, "entrypoint": "main", "libraries": []},
     }
     if input_map is not None:
         payload["input_map"] = input_map
@@ -384,11 +496,13 @@ async def create_graph_note(
     position_y: float | None = None,
 ) -> dict[str, Any]:
     """Create a note on a flow canvas."""
-    payload: dict[str, Any] = {"graph": flow_id, "content": content}
-    if position_x is not None:
-        payload["position_x"] = position_x
-    if position_y is not None:
-        payload["position_y"] = position_y
+    # GraphNote requires a `metadata` JSON object (serializer marks it required);
+    # there are no `position_x`/`position_y` model fields — canvas position lives
+    # inside metadata.
+    metadata: dict[str, Any] = {}
+    if position_x is not None or position_y is not None:
+        metadata["position"] = {"x": position_x or 0, "y": position_y or 0}
+    payload: dict[str, Any] = {"graph": flow_id, "content": content, "metadata": metadata}
     async with get_client() as client:
         return await client.post("/api/graph-notes/", json=payload)
 
@@ -399,15 +513,22 @@ async def update_graph_note(
     position_x: float | None = None,
     position_y: float | None = None,
 ) -> dict[str, Any]:
-    """Update a graph note's content or position."""
+    """Update a graph note's content or canvas position."""
     payload: dict[str, Any] = {}
     if content is not None:
         payload["content"] = content
-    if position_x is not None:
-        payload["position_x"] = position_x
-    if position_y is not None:
-        payload["position_y"] = position_y
     async with get_client() as client:
+        if position_x is not None or position_y is not None:
+            # Position is stored inside metadata; merge into the current value.
+            current = await client.get(f"/api/graph-notes/{note_id}/")
+            metadata = dict(current.get("metadata") or {})
+            pos = dict(metadata.get("position") or {})
+            if position_x is not None:
+                pos["x"] = position_x
+            if position_y is not None:
+                pos["y"] = position_y
+            metadata["position"] = pos
+            payload["metadata"] = metadata
         return await client.patch(f"/api/graph-notes/{note_id}/", json=payload)
 
 
@@ -419,41 +540,66 @@ async def delete_graph_note(note_id: int) -> dict[str, str]:
 
 
 # Graph Files
-async def list_graph_files(
-    flow_id: int | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> dict[str, Any]:
-    """List files attached to a flow."""
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if flow_id is not None:
-        params["graph"] = flow_id
+#
+# The old `GraphFile` model + `/api/graph-files/` endpoint were removed from the
+# backend (migration 0164_delete_graphfile). Files now live in the storage
+# subsystem (`/api/storage/...`) and are *associated* with a flow rather than
+# owned by it: upload to storage, then link the storage path to the graph.
+async def list_graph_files(flow_id: int) -> dict[str, Any]:
+    """List storage files attached to a flow."""
     async with get_client() as client:
-        return await client.get("/api/graph-files/", params=params)
+        return await client.get(
+            "/api/storage/graph-files/", params={"graph_id": flow_id}
+        )
 
 
 async def upload_graph_file(
     flow_id: int,
     file_content_base64: str,
     filename: str,
+    folder: str = "",
 ) -> dict[str, Any]:
-    """Upload a file to a flow. Provide file content as base64-encoded string."""
+    """Upload a file to storage and attach it to a flow.
+
+    Two-step against the storage API: upload the bytes (multipart `files`), then
+    link the resulting storage path(s) to the flow via add-to-graph. Provide
+    file content as a base64-encoded string. `folder` is an optional target
+    folder path within storage (default: root).
+    """
     import base64
 
     file_bytes = base64.b64decode(file_content_base64)
+    # The upload serializer's `path` defaults to "" but rejects an explicitly
+    # blank value, so only send it when a folder is actually given.
+    data = {"path": folder} if folder else None
     async with get_client() as client:
-        return await client.post_multipart(
-            "/api/graph-files/",
-            files={filename: (filename, file_bytes)},
-            data={"graph": str(flow_id)},
+        uploaded = await client.post_multipart(
+            "/api/storage/upload/",
+            files={"files": (filename, file_bytes)},
+            data=data,
         )
+        paths = [u["path"] for u in uploaded.get("uploaded", []) if u.get("path")]
+        linked: dict[str, Any] = {}
+        if paths:
+            linked = await client.post(
+                "/api/storage/add-to-graph/",
+                json={"paths": paths, "graph_ids": [flow_id]},
+            )
+    return {"uploaded": uploaded.get("uploaded", []), "linked": linked, "paths": paths}
 
 
-async def delete_graph_file(file_id: int) -> dict[str, str]:
-    """Delete a graph file by ID."""
+async def delete_graph_file(flow_id: int, path: str) -> dict[str, str]:
+    """Detach a storage file (by its storage path) from a flow.
+
+    Removes the flow↔file association via remove-from-graph; the file itself
+    remains in storage.
+    """
     async with get_client() as client:
-        await client.delete(f"/api/graph-files/{file_id}/")
-    return {"message": f"Graph file {file_id} deleted successfully"}
+        await client.delete(
+            "/api/storage/remove-from-graph/",
+            json={"paths": [path], "graph_ids": [flow_id]},
+        )
+    return {"message": f"Detached '{path}' from flow {flow_id}"}
 
 
 # ---------------------------------------------------------------------------
@@ -672,18 +818,18 @@ async def describe_flow(graph_id: int, fmt: str = "text") -> dict[str, Any]:
         for node in graph.get(list_key, []):
             src_id = node.get("id")
             if src_id is not None:
+                # Routing targets are stored as integer *_node_id fields.
                 targets = [
-                    (g.get("group_name") or "", g.get("next_node"))
+                    (g.get("group_name") or "", g.get("next_node_id"))
                     for g in node.get("condition_groups", [])
                 ]
-                targets.append(("default", node.get("default_next_node")))
-                targets.append(("error", node.get("next_error_node")))
-                for label, target_name in targets:
-                    if not target_name:
+                targets.append(("default", node.get("default_next_node_id")))
+                targets.append(("error", node.get("next_error_node_id")))
+                for label, dst_id in targets:
+                    if not dst_id:
                         continue
                     has_outgoing.add(src_id)
-                    dst_id = name_to_id.get(target_name)
-                    if dst_id is not None:
+                    if dst_id in id_to_name:
                         has_incoming.add(dst_id)
                         routing_edges.append((src_id, label, dst_id))
 
@@ -819,39 +965,111 @@ async def get_cdt_prompts(graph_id: int, name_or_id: str | int) -> dict[str, Any
 
 
 async def get_cdt_route_map(graph_id: int) -> dict[str, Any]:
-    """Get routing map for all CDT and DT nodes: which group routes where."""
+    """Get routing map for all CDT and DT nodes: which group routes where.
+
+    Routing targets are stored as integer ``*_node_id`` fields (NOT the
+    ``*_node`` name fields, which are always null). Each target is resolved to
+    ``{node_id, node_name}`` so the map is both correct and readable.
+    """
     async with get_client() as client:
         graph = await client.get(f"/api/graphs/{graph_id}/")
 
+    # Build id -> name across every node list so routing targets resolve.
+    id_to_name: dict[int, str | None] = {}
+    for key, nodes in graph.items():
+        if key.endswith("_node_list") and isinstance(nodes, list):
+            for n in nodes:
+                if isinstance(n, dict) and n.get("id") is not None:
+                    id_to_name[n["id"]] = n.get("node_name")
+
+    def _target(node_id: int | None) -> dict[str, Any] | None:
+        if not node_id:
+            return None
+        return {"node_id": node_id, "node_name": id_to_name.get(node_id)}
+
     routing: list[dict[str, Any]] = []
-
-    for node in graph.get("classification_decision_table_node_list", []):
-        route_map: dict[str, str | None] = {}
-        for g in node.get("condition_groups", []):
-            route_map[g.get("group_name", "")] = g.get("next_node")
-        routing.append({
-            "node_type": "cdt",
-            "node_name": node.get("node_name"),
-            "node_id": node.get("id"),
-            "routing": route_map,
-            "default": node.get("default_next_node"),
-            "error": node.get("next_error_node"),
-        })
-
-    for node in graph.get("decision_table_node_list", []):
-        route_map = {}
-        for g in node.get("condition_groups", []):
-            route_map[g.get("group_name", "")] = g.get("next_node")
-        routing.append({
-            "node_type": "dt",
-            "node_name": node.get("node_name"),
-            "node_id": node.get("id"),
-            "routing": route_map,
-            "default": node.get("default_next_node"),
-            "error": node.get("next_error_node"),
-        })
+    for ntype, list_key in (
+        ("cdt", "classification_decision_table_node_list"),
+        ("dt", "decision_table_node_list"),
+    ):
+        for node in graph.get(list_key, []):
+            route_map: dict[str, Any] = {}
+            for g in node.get("condition_groups", []):
+                route_map[g.get("group_name", "")] = _target(g.get("next_node_id"))
+            routing.append({
+                "node_type": ntype,
+                "node_name": node.get("node_name"),
+                "node_id": node.get("id"),
+                "routing": route_map,
+                "default": _target(node.get("default_next_node_id")),
+                "error": _target(node.get("next_error_node_id")),
+            })
 
     return {"graph_id": graph_id, "routing": routing}
+
+
+async def get_node(graph_id: int, name_or_id: str | int) -> dict[str, Any]:
+    """Get a single node's full config by name or ID (any node type).
+
+    The drill-in companion to get_flow_nodes(compact=True): orient with the
+    compact list, then fetch ONE node's complete config here instead of pulling
+    the whole graph. Resolves across every node type (python, crew, code-agent,
+    decision-table, start/end, triggers, subgraph). For crew nodes the raw form
+    holds agent/task IDs only — use get_crew_node for a resolved, token-shaped
+    view.
+    """
+    async with get_client() as client:
+        _endpoint, _node_id, node_data = await _resolve_node(client, graph_id, name_or_id)
+    return node_data
+
+
+async def get_crew_node(graph_id: int, name_or_id: str | int) -> dict[str, Any]:
+    """Get a crew node by name or ID as a token-shaped view.
+
+    Returns the node's wiring plus its crew's agents (id + role) and tasks
+    (id + name + agent_id), resolving the agent/task IDs the raw node stores so
+    you don't fire a get_agent/get_task per member. The heavy fields — agent
+    backstory/goal/tools, task instructions/expected_output/output_model/context
+    — are intentionally stripped; fetch get_agent(id) / get_task(id) when you
+    need them.
+    """
+    async with get_client() as client:
+        try:
+            _endpoint, _node_id, node = await _resolve_node(
+                client, graph_id, name_or_id,
+                [("crew_node_list", "crewnodes")],
+            )
+        except ValueError:
+            raise ValueError(
+                f"'{name_or_id}' is not a crew node in graph {graph_id}. "
+                "Use get_node for other node types."
+            )
+        crew = node.get("crew") or {}
+        agent_ids = [a if isinstance(a, int) else a.get("id") for a in crew.get("agents", [])]
+        task_ids = [t if isinstance(t, int) else t.get("id") for t in crew.get("tasks", [])]
+        agent_coros = [client.get(f"/api/agents/{aid}/") for aid in agent_ids if aid]
+        task_coros = [client.get(f"/api/tasks/{tid}/") for tid in task_ids if tid]
+        results = await asyncio.gather(*agent_coros, *task_coros)
+        agents_raw = results[: len(agent_coros)]
+        tasks_raw = results[len(agent_coros):]
+    return {
+        "id": node.get("id"),
+        "node_name": node.get("node_name"),
+        "input_map": node.get("input_map"),
+        "output_variable_path": node.get("output_variable_path"),
+        "stream_config": node.get("stream_config"),
+        "crew": {
+            "id": crew.get("id"),
+            "name": crew.get("name"),
+            "process": crew.get("process"),
+            "max_rpm": crew.get("max_rpm"),
+        },
+        "agents": [{"id": a.get("id"), "role": a.get("role")} for a in agents_raw],
+        "tasks": [
+            {"id": t.get("id"), "name": t.get("name"), "agent_id": t.get("agent")}
+            for t in tasks_raw
+        ],
+    }
 
 
 async def patch_python_node(
@@ -1070,28 +1288,52 @@ async def patch_dt_node(
     graph_id: int,
     name_or_id: str | int,
     condition_groups: list[dict],
-    default_next_node: str | None = None,
-    next_error_node: str | None = None,
+    default_next_node: str | int | None = None,
+    next_error_node: str | int | None = None,
 ) -> dict[str, Any]:
     """Update Decision Table node condition groups and routing.
 
-    IMPORTANT: Each condition_group item MUST include 'conditions: []' key —
-    the backend calls pop('conditions') and will error if missing.
+    Routing targets may be given as node NAMES or integer node IDs — this tool
+    resolves names to the ``next_node_id`` / ``default_next_node_id`` /
+    ``next_error_node_id`` integers the backend stores. In each condition group,
+    set the target via ``next_node`` (name) or ``next_node_id`` (id).
+
+    IMPORTANT: Each condition_group item MUST include 'conditions: []' (injected
+    here if omitted). A group with an ``expression`` defaults to
+    ``group_type="complex"`` when group_type is not supplied.
     """
     async with get_client() as client:
         endpoint, node_id, _ = await _resolve_node(
             client, graph_id, name_or_id,
             [("decision_table_node_list", "decision-table-node")],
         )
-        safe_groups = [
-            g if "conditions" in g else {**g, "conditions": []}
-            for g in condition_groups
-        ]
+        graph = await client.get(f"/api/graphs/{graph_id}/")
+        name_to_id = {v: k for k, v in _index_graph(graph)["id_to_name"].items()}
+
+        def _to_id(target: str | int | None) -> int | None:
+            if target is None or isinstance(target, int):
+                return target
+            if target in name_to_id:
+                return name_to_id[target]
+            raise EpicStaffAPIError(
+                status_code=400,
+                detail=f"DT routing target '{target}' is not a node in graph {graph_id}.",
+            )
+
+        safe_groups = []
+        for g in condition_groups:
+            ng = {k: v for k, v in g.items() if k not in ("next_node", "next_node_id")}
+            ng.setdefault("conditions", [])
+            if g.get("expression") and not ng.get("group_type"):
+                ng["group_type"] = "complex"
+            ng["next_node_id"] = _to_id(g.get("next_node_id", g.get("next_node")))
+            safe_groups.append(ng)
+
         payload: dict[str, Any] = {"condition_groups": safe_groups}
         if default_next_node is not None:
-            payload["default_next_node"] = default_next_node
+            payload["default_next_node_id"] = _to_id(default_next_node)
         if next_error_node is not None:
-            payload["next_error_node"] = next_error_node
+            payload["next_error_node_id"] = _to_id(next_error_node)
         result = await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
     # Validate the groups actually sent (conditions:[] already injected above).
     warnings = fv.check_dt_groups(safe_groups, name_or_id)
@@ -1258,11 +1500,12 @@ async def test_flow(graph_id: int) -> dict[str, Any]:
                 f"Node '{id_to_name.get(nid, nid)}' (id={nid}) has no edges (disconnected)."
             )
 
-    # CDT routing check
+    # CDT routing check. Routing targets are stored as next_node_id /
+    # default_next_node_id (ints); a node routed solely via its default is valid.
     for node in graph.get("classification_decision_table_node_list", []):
         groups = node.get("condition_groups", [])
-        routed = [g for g in groups if g.get("next_node")]
-        if not routed:
+        routed = [g for g in groups if g.get("next_node_id") or g.get("next_node")]
+        if not routed and not node.get("default_next_node_id"):
             issues.append(
                 f"CDT node '{node.get('node_name')}' has no condition groups with a next_node."
             )
@@ -1270,8 +1513,8 @@ async def test_flow(graph_id: int) -> dict[str, Any]:
     # DT routing check
     for node in graph.get("decision_table_node_list", []):
         groups = node.get("condition_groups", [])
-        routed = [g for g in groups if g.get("next_node")]
-        if not routed:
+        routed = [g for g in groups if g.get("next_node_id") or g.get("next_node")]
+        if not routed and not node.get("default_next_node_id"):
             issues.append(
                 f"DT node '{node.get('node_name')}' has no condition groups with a next_node."
             )
