@@ -89,6 +89,13 @@ via dotted `input_map` paths (e.g. `variables.request.query`).
 
 `crew_id` references an existing crew. `input_map` binds flow variables to crew inputs.
 
+> **Output is an envelope.** A crew node writes `{raw, message, token_usage}` to
+> its `output_variable_path`, not the bare result. The agent's actual text/JSON
+> is in `message` (and `raw`). Any downstream node or DT expression that consumes
+> a crew output must unwrap it — e.g. a Python node `rd.get("message")`, or point
+> the next `input_map`/expression at a variable a validator node has already
+> unwrapped. Reading the path directly yields the dict, not the value.
+
 ### `pythonnode`
 
 ```json
@@ -163,21 +170,31 @@ via dotted `input_map` paths (e.g. `variables.request.query`).
   "condition_groups": [
     {
       "group_name": "high",
+      "group_type": "complex",
+      "expression": "variables.get('score', 0) >= 80",
       "conditions": [],
-      "next_node": "HighScoreCrew"
+      "next_node_id": 51
     },
     {
       "group_name": "low",
+      "group_type": "complex",
+      "expression": "variables.get('score', 0) < 80",
       "conditions": [],
-      "next_node": "LowScoreCrew"
+      "next_node_id": 52
     }
   ],
-  "default_next_node": "DefaultCrew",
-  "next_error_node": null
+  "default_next_node_id": 53,
+  "next_error_node_id": null
 }
 ```
 
-Each `condition_groups` item **must** include `"conditions": []`. The DT node is not wired via regular edges — routing is embedded in the node itself.
+The backend stores routing as **integer node ids**: `next_node_id` per group plus
+`default_next_node_id` / `next_error_node_id`. When wiring via the `patch_dt_node`
+MCP tool you may pass node **names** instead (`next_node`, `default_next_node`,
+`next_error_node`) — the tool resolves them to these ids. Each `condition_groups`
+item **must** include `"conditions": []`; expression-based groups use
+`group_type: "complex"`. The DT node is not wired via regular edges — routing is
+embedded in the node itself.
 
 ### `webhooktriggernode`
 

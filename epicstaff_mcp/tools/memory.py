@@ -19,8 +19,12 @@ async def list_memories(
         return await client.get("/api/memory/", params=params)
 
 
-async def delete_memory(memory_id: int) -> dict[str, str]:
-    """Delete a memory entry by ID."""
+async def delete_memory(memory_id: str) -> dict[str, str]:
+    """Delete a memory entry by ID.
+
+    ``memory_id`` is the UUID string primary key returned by ``list_memories``
+    (the backend MemoryDatabase PK is a UUID, not an integer).
+    """
     async with get_client() as client:
         await client.delete(f"/api/memory/{memory_id}/")
     return {"message": f"Memory {memory_id} deleted successfully"}

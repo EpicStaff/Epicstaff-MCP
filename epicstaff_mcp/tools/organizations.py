@@ -55,41 +55,45 @@ async def delete_organization(org_id: int) -> dict[str, str]:
     return {"message": f"Organization {org_id} deleted successfully"}
 
 
-# Organization Users
+# Organization Users — managed under the RBAC admin endpoint nested by org id:
+#   /api/admin/organizations/{org_id}/users/[{user_id}/]
+# (the old flat /api/organization-users/ route does not exist). Requires
+# superadmin globally OR a role with USERS permission in the org.
 async def list_organization_users(
-    org_id: int | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    org_id: int,
+    role_name: str | None = None,
 ) -> dict[str, Any]:
-    """List organization user memberships, optionally filtered by organization."""
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if org_id is not None:
-        params["organization"] = org_id
+    """List user memberships of an organization."""
+    params: dict[str, Any] = {}
+    if role_name is not None:
+        params["role_name"] = role_name
     async with get_client() as client:
-        return await client.get("/api/organization-users/", params=params)
+        return await client.get(
+            f"/api/admin/organizations/{org_id}/users/", params=params
+        )
 
 
 async def add_organization_user(
     org_id: int,
     user_id: int,
-    role: str | None = None,
+    role_id: int,
 ) -> dict[str, Any]:
-    """Add a user to an organization.
+    """Add a user to an organization with a role.
 
-    role: optional role string (e.g. 'admin', 'member')
+    role_id: id of the org-scoped role to assign (see the org roles endpoint).
     """
-    payload: dict[str, Any] = {"organization": org_id, "user": user_id}
-    if role is not None:
-        payload["role"] = role
     async with get_client() as client:
-        return await client.post("/api/organization-users/", json=payload)
+        return await client.post(
+            f"/api/admin/organizations/{org_id}/users/",
+            json={"user_id": user_id, "role_id": role_id},
+        )
 
 
-async def remove_organization_user(membership_id: int) -> dict[str, str]:
-    """Remove a user from an organization by membership ID."""
+async def remove_organization_user(org_id: int, user_id: int) -> dict[str, str]:
+    """Remove a user from an organization."""
     async with get_client() as client:
-        await client.delete(f"/api/organization-users/{membership_id}/")
-    return {"message": f"Organization membership {membership_id} removed successfully"}
+        await client.delete(f"/api/admin/organizations/{org_id}/users/{user_id}/")
+    return {"message": f"User {user_id} removed from organization {org_id}"}
 
 
 # Graph Organizations (associate flows with organizations)
@@ -100,13 +104,19 @@ async def list_graph_organizations(
     offset: int = 0,
 ) -> dict[str, Any]:
     """List flow-organization associations."""
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if flow_id is not None:
-        params["graph"] = flow_id
-    if org_id is not None:
-        params["organization"] = org_id
+    # GraphOrganizationViewSet has no filter backend, so `graph`/`organization`
+    # query params are ignored and every association is returned. Filter
+    # client-side so flow_id/org_id actually scope the result.
     async with get_client() as client:
-        return await client.get("/api/graph-organizations/", params=params)
+        resp = await client.get(
+            "/api/graph-organizations/", params={"limit": limit, "offset": offset}
+        )
+    results = resp.get("results", [])
+    if flow_id is not None:
+        results = [r for r in results if r.get("graph") == flow_id]
+    if org_id is not None:
+        results = [r for r in results if r.get("organization") == org_id]
+    return {**resp, "results": results, "count": len(results)}
 
 
 async def add_graph_organization(
@@ -136,10 +146,15 @@ async def list_graph_organization_users(
     offset: int = 0,
 ) -> dict[str, Any]:
     """List per-user flow access records within organization context."""
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if flow_id is not None:
-        params["graph"] = flow_id
-    if org_id is not None:
-        params["organization"] = org_id
+    # GraphOrganizationUserViewSet is a plain ReadOnly viewset with no filter
+    # backend — scope client-side so flow_id/org_id are honored.
     async with get_client() as client:
-        return await client.get("/api/graph-organization-users/", params=params)
+        resp = await client.get(
+            "/api/graph-organization-users/", params={"limit": limit, "offset": offset}
+        )
+    results = resp.get("results", [])
+    if flow_id is not None:
+        results = [r for r in results if r.get("graph") == flow_id]
+    if org_id is not None:
+        results = [r for r in results if r.get("organization") == org_id]
+    return {**resp, "results": results, "count": len(results)}

@@ -32,6 +32,7 @@ async def create_agent(
     llm_config: int | None = None,
     fcm_llm_config: int | None = None,
     knowledge_collection: int | None = None,
+    naive_rag_id: int | None = None,
     tool_ids: list[str] | None = None,
     max_iter: int | None = None,
     max_rpm: int | None = None,
@@ -48,6 +49,12 @@ async def create_agent(
 
     tool_ids format: 'mcp-tool:5', 'python-code-tool:3', 'configured-tool:1'
     default_temperature: 0.0–2.0
+
+    Knowledge/RAG: to make the agent retrieve from a collection you MUST set BOTH
+    knowledge_collection (the SourceCollection id) AND naive_rag_id (the NaiveRag
+    id for that collection). naive_rag_id populates the agent's AgentNaiveRag link
+    via the serializer's required `rag` field — without it the backend rejects the
+    write, and retrieval (the search_knowledges pre-task step) never fires.
     """
     payload: dict[str, Any] = {"role": role, "goal": goal, "backstory": backstory}
     if llm_config is not None:
@@ -56,6 +63,8 @@ async def create_agent(
         payload["fcm_llm_config"] = fcm_llm_config
     if knowledge_collection is not None:
         payload["knowledge_collection"] = knowledge_collection
+    if naive_rag_id is not None:
+        payload["rag"] = {"rag_type": "naive", "rag_id": naive_rag_id}
     if tool_ids is not None:
         payload["tool_ids"] = tool_ids
     if max_iter is not None:
@@ -90,6 +99,7 @@ async def update_agent(
     llm_config: int | None = None,
     fcm_llm_config: int | None = None,
     knowledge_collection: int | None = None,
+    naive_rag_id: int | None = None,
     tool_ids: list[str] | None = None,
     max_iter: int | None = None,
     max_rpm: int | None = None,
@@ -102,7 +112,12 @@ async def update_agent(
     respect_context_window: bool | None = None,
     default_temperature: float | None = None,
 ) -> dict[str, Any]:
-    """Update one or more fields of an existing agent. Only provided fields are updated."""
+    """Update one or more fields of an existing agent. Only provided fields are updated.
+
+    To bind knowledge for retrieval, pass BOTH knowledge_collection and
+    naive_rag_id (see create_agent) — naive_rag_id is forwarded as the required
+    `rag` field that creates the AgentNaiveRag link.
+    """
     payload: dict[str, Any] = {}
     if role is not None:
         payload["role"] = role
@@ -116,6 +131,8 @@ async def update_agent(
         payload["fcm_llm_config"] = fcm_llm_config
     if knowledge_collection is not None:
         payload["knowledge_collection"] = knowledge_collection
+    if naive_rag_id is not None:
+        payload["rag"] = {"rag_type": "naive", "rag_id": naive_rag_id}
     if tool_ids is not None:
         payload["tool_ids"] = tool_ids
     if max_iter is not None:

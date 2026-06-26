@@ -17,7 +17,11 @@ All checks use MCP tools. Companion skills:
 > intent-check separately asks whether it's the *right* program. Both must pass.
 > The data-flow checks below now have a tool: `validate_flow_paths(graph_id)`
 > automates the writers/readers cross-reference, and `describe_flow(graph_id)`
-> surfaces orphans/dangling directly.
+> surfaces orphans/dangling directly. These (and `test_flow`) read DT routing
+> from the real `next_node_id` fields, so a correctly-wired decision-table node
+> is no longer falsely flagged as orphan/dangling or "no route" — trust the
+> gates. On 40+ node flows pass `get_flow_nodes(graph_id, compact=True)` to stay
+> under the response-size limit.
 
 ---
 

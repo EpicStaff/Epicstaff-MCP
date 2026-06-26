@@ -14,6 +14,8 @@ REQUIRED_TOOLS = {
     # flow inspection & readable view
     "get_flow_connections",
     "describe_flow",
+    "get_node",
+    "get_crew_node",
     "get_cdt_node",
     "get_cdt_prompts",
     "get_cdt_route_map",
@@ -42,6 +44,7 @@ REQUIRED_TOOLS = {
 
 
 async def test_combined_server_exposes_required_flow_tools():
+    # FastMCP 3.x exposes registered tools via list_tools() (returns Tool objects).
     tools = await combined.mcp.list_tools()
     names = {t.name for t in tools}
     missing = REQUIRED_TOOLS - names

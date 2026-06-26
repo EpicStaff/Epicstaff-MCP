@@ -29,21 +29,33 @@ async def create_source_collection(
 async def add_document(
     collection_id: int,
     content: str,
-    metadata: dict[str, Any] | None = None,
+    filename: str = "document.txt",
 ) -> dict[str, Any]:
-    """Add a document to a knowledge collection."""
-    payload: dict[str, Any] = {"collection": collection_id, "content": content}
-    if metadata:
-        payload["metadata"] = metadata
+    """Add a text document to a knowledge collection.
+
+    The backend exposes no JSON document-create endpoint (`/api/documents/` is
+    list/retrieve/delete only); documents are created exclusively through the
+    file-upload endpoint. This uploads `content` as a text file via that path.
+    Returns the upload envelope `{"message": ..., "documents": [...]}`.
+    """
+    file_bytes = content.encode("utf-8")
     async with get_client() as client:
-        return await client.post("/api/documents/", json=payload)
+        return await client.post_multipart(
+            f"/api/documents/source-collection/{collection_id}/upload/",
+            files={"files": (filename, file_bytes)},
+        )
 
 
-async def trigger_rag_indexing(collection_id: int) -> dict[str, Any]:
-    """Trigger embedding computation and vector indexing for a collection."""
+async def trigger_rag_indexing(rag_id: int, rag_type: str = "naive") -> dict[str, Any]:
+    """Trigger embedding computation and vector indexing for a RAG configuration.
+
+    rag_id: the NaiveRag id (naive_rag_id) to index — NOT the collection id.
+    rag_type: "naive" (default) or "graph". The backend derives the collection
+    from the RAG, so the endpoint requires {rag_id, rag_type}, not collection_id.
+    """
     async with get_client() as client:
         return await client.post(
-            "/api/process-rag-indexing/", json={"collection_id": collection_id}
+            "/api/process-rag-indexing/", json={"rag_id": rag_id, "rag_type": rag_type}
         )
 
 
@@ -124,8 +136,11 @@ async def get_document(document_id: int) -> dict[str, Any]:
 
 async def bulk_delete_documents(document_ids: list[int]) -> dict[str, Any]:
     """Delete multiple documents by their IDs in a single request."""
+    # Backend DocumentBulkDeleteSerializer requires the field `document_ids`.
     async with get_client() as client:
-        return await client.post("/api/documents/bulk-delete/", json={"ids": document_ids})
+        return await client.post(
+            "/api/documents/bulk-delete/", json={"document_ids": document_ids}
+        )
 
 
 async def upload_document_file(
@@ -138,9 +153,12 @@ async def upload_document_file(
 
     file_bytes = base64.b64decode(file_content_base64)
     async with get_client() as client:
+        # Backend's document upload serializer reads request.FILES.getlist("files")
+        # — the multipart field MUST be named "files" (not "file"), or it 400s
+        # with {'files': ['This field is required.']}.
         return await client.post_multipart(
             f"/api/documents/source-collection/{collection_id}/upload/",
-            files={"file": (filename, file_bytes)},
+            files={"files": (filename, file_bytes)},
         )
 
 
@@ -153,12 +171,21 @@ async def list_naive_rag_for_collection(collection_id: int) -> dict[str, Any]:
 
 async def create_naive_rag(
     collection_id: int,
+    embedder_id: int,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     chunk_strategy: str | None = None,
 ) -> dict[str, Any]:
-    """Create a Naive RAG configuration for a source collection."""
-    payload: dict[str, Any] = {"source_collection": collection_id}
+    """Create a Naive RAG configuration for a source collection.
+
+    embedder_id (REQUIRED): the EmbeddingConfig id used to embed this collection's
+    chunks — the backend rejects the create without it. Use the same embedding
+    config the collection was created with (see list_embedding_configs).
+    """
+    payload: dict[str, Any] = {
+        "source_collection": collection_id,
+        "embedder_id": embedder_id,
+    }
     if chunk_size is not None:
         payload["chunk_size"] = chunk_size
     if chunk_overlap is not None:
@@ -244,12 +271,30 @@ async def delete_naive_rag_document_config(naive_rag_id: int, config_id: int) ->
 
 async def bulk_update_naive_rag_document_configs(
     naive_rag_id: int,
-    configs: list[dict[str, Any]],
+    config_ids: list[int],
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+    chunk_strategy: str | None = None,
+    additional_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bulk update multiple document configs for a Naive RAG. Each item must include 'id'."""
+    """Bulk update document configs for a Naive RAG.
+
+    The backend applies the SAME update fields to every config in `config_ids`
+    (config ids are `naive_rag_document_id` values). At least one of
+    chunk_size / chunk_overlap / chunk_strategy / additional_params is required.
+    """
+    payload: dict[str, Any] = {"config_ids": config_ids}
+    for key, val in [
+        ("chunk_size", chunk_size),
+        ("chunk_overlap", chunk_overlap),
+        ("chunk_strategy", chunk_strategy),
+        ("additional_params", additional_params),
+    ]:
+        if val is not None:
+            payload[key] = val
     async with get_client() as client:
         return await client.put(
-            f"/api/naive-rag/{naive_rag_id}/document-configs/bulk-update/", json=configs
+            f"/api/naive-rag/{naive_rag_id}/document-configs/bulk-update/", json=payload
         )
 
 
@@ -258,10 +303,11 @@ async def bulk_delete_naive_rag_document_configs(
     config_ids: list[int],
 ) -> dict[str, Any]:
     """Bulk delete multiple document configs from a Naive RAG."""
+    # Backend DocumentConfigBulkDeleteSerializer requires the field `config_ids`.
     async with get_client() as client:
         return await client.post(
             f"/api/naive-rag/{naive_rag_id}/document-configs/bulk-delete/",
-            json={"ids": config_ids},
+            json={"config_ids": config_ids},
         )
 
 

@@ -5,8 +5,23 @@ import os
 
 import pytest
 
-# Ensure EPICSTAFF_BASE_URL is set for all tests
-os.environ.setdefault("EPICSTAFF_BASE_URL", "http://test.epicstaff.local")
+# Force the mocked test base URL so respx always matches — but only for the
+# mocked suite. Live runs (EPICSTAFF_LIVE=1, under tests/live/) must keep the
+# real EPICSTAFF_BASE_URL from the environment. Using setdefault here is not
+# enough: a dev shell that exports EPICSTAFF_BASE_URL=http://localhost:8000 for
+# the running stack would otherwise leak into the mocked suite and break every
+# respx expectation.
+if os.environ.get("EPICSTAFF_LIVE") != "1":
+    os.environ["EPICSTAFF_BASE_URL"] = "http://test.epicstaff.local"
+    # Clear ambient auth vars (a dev shell exports these for the running stack)
+    # so auth-mode/config tests start from a clean baseline and set their own.
+    for _var in (
+        "EPICSTAFF_API_KEY",
+        "EPICSTAFF_API_TOKEN",
+        "EPICSTAFF_USERNAME",
+        "EPICSTAFF_PASSWORD",
+    ):
+        os.environ.pop(_var, None)
 
 BASE_URL = "http://test.epicstaff.local/"
 

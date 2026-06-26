@@ -42,11 +42,16 @@ async def test_create_collection():
 
 @respx.mock
 async def test_add_document():
-    respx.post(f"{BASE_URL}api/documents/").mock(
-        return_value=httpx.Response(201, json={"id": 1, "collection": 1, "content": "Hello"})
+    # add_document creates a document via the file-upload endpoint (there is no
+    # JSON document-create endpoint), encoding the text content as a file.
+    respx.post(f"{BASE_URL}api/documents/source-collection/1/upload/").mock(
+        return_value=httpx.Response(
+            201,
+            json={"message": "ok", "documents": [{"document_id": 1, "file_name": "document.txt"}]},
+        )
     )
     result = await add_document(collection_id=1, content="Hello")
-    assert result["id"] == 1
+    assert result["documents"][0]["document_id"] == 1
 
 
 @respx.mock
@@ -54,5 +59,5 @@ async def test_trigger_rag_indexing():
     respx.post(f"{BASE_URL}api/process-rag-indexing/").mock(
         return_value=httpx.Response(200, json={"status": "started"})
     )
-    result = await trigger_rag_indexing(collection_id=1)
+    result = await trigger_rag_indexing(rag_id=1, rag_type="naive")
     assert result["status"] == "started"

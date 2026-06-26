@@ -95,8 +95,19 @@ async def update_mcp_tool(
     auth: str | None = None,
     init_timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Update one or more fields of an existing MCP tool connection."""
-    payload: dict[str, Any] = {}
+    """Update one or more fields of an existing MCP tool connection.
+
+    The backend's McpTool update endpoint replaces the whole object — any field
+    absent from the request is reset to its default/None. So we fetch the current
+    record and merge the provided changes over it before sending, to avoid nulling
+    out unspecified fields (name/transport/tool_name).
+    """
+    async with get_client() as client:
+        current = await client.get(f"/api/mcp-tools/{tool_id}/")
+    payload: dict[str, Any] = {
+        key: current.get(key)
+        for key in ("name", "transport", "tool_name", "timeout", "auth", "init_timeout")
+    }
     for key, val in [
         ("name", name),
         ("transport", transport),

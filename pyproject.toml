@@ -25,6 +25,9 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: exercises a real EpicStaff backend (opt-in; skipped unless EPICSTAFF_LIVE=1)",
+]
 
 [project.scripts]
 epicstaff-mcp = "epicstaff_mcp.servers.combined_server:main"

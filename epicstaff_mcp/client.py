@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from types import TracebackType
 from typing import Any
 
@@ -20,6 +21,38 @@ def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, (httpx.TransportError, EpicStaffConnectionError)):
         return True
     return isinstance(exc, EpicStaffAPIError) and exc.status_code >= 500
+
+
+_MAX_ERROR_DETAIL = 1500
+_DJANGO_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_DJANGO_EXC_RE = re.compile(
+    r'<pre class="exception_value">(.*?)</pre>', re.IGNORECASE | re.DOTALL
+)
+
+
+def _summarize_error_body(response: httpx.Response) -> str:
+    """Turn a backend error body into a compact, legible detail string.
+
+    A Django ``DEBUG=True`` 500 returns a ~100 KB HTML page that dumps the
+    entire settings object (secrets included) — dropping that verbatim into a
+    tool result floods the agent context and leaks config. Extract the
+    exception type + value when the body is HTML; otherwise truncate.
+    """
+    text = response.text or ""
+    content_type = response.headers.get("content-type", "")
+    is_html = "html" in content_type.lower() or text.lstrip().startswith("<")
+    if is_html:
+        title_m = _DJANGO_TITLE_RE.search(text)
+        exc_m = _DJANGO_EXC_RE.search(text)
+        if title_m or exc_m:
+            title = re.sub(r"\s+", " ", (title_m.group(1) if title_m else "")).strip()
+            value = re.sub(r"\s+", " ", (exc_m.group(1) if exc_m else "")).strip()
+            summary = " — ".join(p for p in (title, value) if p)
+            return f"{summary} (HTML error page truncated)"
+        return "HTML error page (truncated)"
+    if len(text) > _MAX_ERROR_DETAIL:
+        return text[:_MAX_ERROR_DETAIL] + " …(truncated)"
+    return text
 
 
 class EpicStaffClient:
@@ -69,7 +102,7 @@ class EpicStaffClient:
             try:
                 detail = str(response.json())
             except Exception:
-                detail = response.text
+                detail = _summarize_error_body(response)
             raise EpicStaffAPIError(status_code=response.status_code, detail=detail)
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:

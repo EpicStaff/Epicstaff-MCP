@@ -156,7 +156,7 @@ MCP `node_type` values and required `config` fields:
 | `pythonnode` | `python_code.{code,entrypoint,libraries}`, `input_map`, `output_variable_path` |
 | `webhooktriggernode` | `python_code.{code,libraries}`, `webhook_path` (no `input_map`/`output_variable_path` — runtime forces `__all__`/`variables`) |
 | `codeagentnode` | `system_prompt`, `stream_handler_code`, `libraries`, `llm_config_id`, `agent_mode` (defaults to `"build"`), `input_map`, `output_variable_path`, optionally `output_schema` |
-| `crewnode` | `crew_id`, `input_map`, `output_variable_path` (crew must exist — create via `create_crew`/`create_agent`/`create_task` first) |
+| `crewnode` | `crew_id`, `input_map`, `output_variable_path` (crew must exist — create via `create_crew`/`create_agent`/`create_task` first). **Output is an envelope** `{raw, message, token_usage}`, NOT the bare text — a downstream node/DT reading this path gets the dict, so unwrap `.message`/`.raw` (e.g. a Python node `rd.get("message")`, or a DT expression keyed off the unwrapped variable) before using structured output. |
 | `subgraphnode` | `subgraph_id`, `input_map`, `output_variable_path` |
 | `decisiontablenode` | `condition_groups`, `default_next_node`, `next_error_node` (each group needs `"conditions": []` — missing key causes silent rollback) |
 | `fileextractornode` | `input_map`, `output_variable_path` |
@@ -172,9 +172,11 @@ needed.
 Edges use **integer node IDs**, not names. Resolve them first, then wire:
 
 ```
-nodes = get_flow_nodes(flow_id)          # map node_name -> id
-add_edge(flow_id, nodes["__start__"], nodes["Process Request"])
+nodes = get_flow_nodes(flow_id, compact=True)   # slim; returns a name_to_id map
+add_edge(flow_id, name_to_id["__start__"], name_to_id["Process Request"])
 ```
+On large flows (40+ nodes) call `get_flow_nodes(flow_id, compact=True)` — the full
+form embeds every node config and can exceed the response size limit.
 
 - Always connect `__start__` to at least one downstream node — without it, `run_session` fails.
 - For trigger nodes (webhook/telegram), wire BOTH `__start__` and the trigger into the same first real node (resolve all three ids, then two `add_edge` calls into the same target id).
@@ -183,16 +185,18 @@ add_edge(flow_id, nodes["__start__"], nodes["Process Request"])
 ### Step 6 — Wire CDT routing (if CDT nodes exist)
 For each `decisiontablenode`, call:
 ```
-patch_dt_node(graph_id, name_or_id="<cdt name>",
+patch_dt_node(graph_id, name_or_id="<dt name>",
               condition_groups=[
-                {"group_name": "...", "group_type": "simple" | "complex",
+                {"group_name": "...", "group_type": "complex",
                  "expression": <str or null>, "conditions": [],
                  "manipulation": <str or null>, "next_node": "<target node name>"},
                 ...
               ],
               default_next_node="<name>", next_error_node="<name>")
 ```
-Every group object MUST include `"conditions": []` — the viewset calls `pop("conditions")` and silently rolls back if missing.
+- Routing targets (`next_node`, `default_next_node`, `next_error_node`) may be a node **name** (resolved for you) or an integer node **id** — the tool stores them as the backend's `next_node_id`/`default_next_node_id` fields.
+- A group with an `expression` should be `group_type: "complex"` (the tool defaults it to that when omitted); `"simple"` is for condition-list groups.
+- Every group object MUST include `"conditions": []` — the viewset calls `pop("conditions")` and silently rolls back if missing.
 
 ### Step 7 — `init_flow_metadata` (mandatory)
 ```

@@ -79,6 +79,8 @@ mcp.tool(flows.import_flow)
 # Flow inspection, validation & surgical patching
 mcp.tool(flows.get_flow_connections)
 mcp.tool(flows.describe_flow)
+mcp.tool(flows.get_node)
+mcp.tool(flows.get_crew_node)
 mcp.tool(flows.get_cdt_node)
 mcp.tool(flows.get_cdt_prompts)
 mcp.tool(flows.get_cdt_route_map)
