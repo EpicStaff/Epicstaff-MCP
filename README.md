@@ -2,6 +2,20 @@
 
 MCP server for [EpicStaff](https://github.com/EpicStaff/EpicStaff) — control your AI agents, flows, crews, and knowledge bases from Claude, Cursor, and any MCP-compatible tool.
 
+## Compatibility
+
+This MCP tracks EpicStaff release-for-release: **the MCP's `major.minor` mirrors the EpicStaff `major.minor` it supports** (the MCP patch number is reserved for its own fixes). To pick the right version, match your EpicStaff version's first two numbers and install the MCP tag with the same two numbers.
+
+| MCP version | EpicStaff release | Install ref |
+|---|---|---|
+| `1.0.x` | `1.0.4` – `1.0.12` | `…epicstaff-mcp.git@v1.0.0` |
+| `1.1.x` | `1.1.0` – `1.1.x` | `…epicstaff-mcp.git@v1.1.0` |
+
+> **Rule of thumb:** running EpicStaff `1.1.x`? Install MCP `1.1.*`. The numbers are meant to match.
+> Newer/older combinations across a minor boundary (e.g. MCP `1.0.x` against EpicStaff `1.1.0`) are unsupported — the API contract changes between EpicStaff minors.
+
+To pin a version, append the tag to the git URL, e.g. `git+https://github.com/EpicStaff/epicstaff-mcp.git@v1.1.0`.
+
 ## Requirements
 
 - Python 3.12+

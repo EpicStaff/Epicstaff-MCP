@@ -26,6 +26,39 @@ export EPICSTAFF_MCP_PATH=/path/to/epicstaff-mcp     # only for manual `claude m
 > the bundled server runs from `${CLAUDE_PLUGIN_ROOT}` automatically. Only set it for the
 > manual `claude mcp add` path or local development.
 
+## Versioning & Releases (developers)
+
+This MCP is maintained **release-for-release with EpicStaff**. The rule is simple and
+the same one users see in the README:
+
+- **MCP `major.minor` mirrors the EpicStaff `major.minor` it targets.** MCP for EpicStaff
+  `1.1.x` is versioned `1.1.x`. The MCP **patch** number is independent — bump it for
+  MCP-only fixes that still target the same EpicStaff minor.
+- The supported range is declared in `.claude-plugin/plugin.json` →
+  `"epicstaffCompatibility"` (e.g. `">=1.1.0 <1.2.0"`). Keep `version` (here and in
+  `pyproject.toml`) and this field in lockstep.
+
+**Compatibility matrix (source of truth — keep README's copy identical):**
+
+| MCP version | EpicStaff release | Git tag |
+|---|---|---|
+| `1.0.x` | `1.0.4` – `1.0.12` | `v1.0.0` (frozen at `95bce38`) |
+| `1.1.x` | `1.1.0` – `1.1.x` | `v1.1.0` |
+
+**When EpicStaff cuts a new release** (e.g. `1.2.0`):
+
+1. Test the current MCP against the new backend; note every API/contract change.
+2. Update tools/skills to match, then bump `version` in `pyproject.toml` **and**
+   `.claude-plugin/plugin.json`, and update `epicstaffCompatibility`
+   (`>=1.2.0 <1.3.0`).
+3. Add a matrix row **here and in README** (keep both tables identical).
+4. Tag the release commit `vMAJOR.MINOR.PATCH` (annotated) and push the tag.
+5. If the change is only an MCP bugfix against the *same* EpicStaff minor, bump the
+   **patch** only — don't touch `major.minor` or `epicstaffCompatibility`.
+
+> Older EpicStaff minors are **frozen, not actively maintained** — they keep working via
+> their pinned tag (e.g. `v1.0.0`). We move forward with EpicStaff rather than backporting.
+
 ## Skills
 
 | Skill | When to invoke |
@@ -39,7 +72,7 @@ export EPICSTAFF_MCP_PATH=/path/to/epicstaff-mcp     # only for manual `claude m
 | `flow-intent-check` | Final stage — reconcile the built flow against the original interview intent (gate G5) |
 | `epicchat-response` | Formatting output for the EpicChat widget (buttons, tables, navigation actions) |
 
-> **Tool reconciliation (v2 server).** The `patch_*`, `init_flow_metadata`,
+> **Tool reconciliation (1.1.x server).** The `patch_*`, `init_flow_metadata`,
 > `test_flow`, `validate_flow_paths`, `describe_flow`, `get_cdt_*`,
 > `get_flow_connections`, `run_session_and_wait`, and session-debug tools are now
 > registered in `combined_server.py`. Skills assume these tool names; an older
