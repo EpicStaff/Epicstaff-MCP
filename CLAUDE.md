@@ -10,13 +10,17 @@ Set these environment variables (once, in your shell profile):
 export EPICSTAFF_BASE_URL=http://localhost:8000      # EpicStaff backend URL
 export EPICSTAFF_API_KEY=                            # EpicStaff API key (sent as X-Api-Key) — preferred
 export EPICSTAFF_API_TOKEN=                          # OR a JWT bearer token (Authorization: Bearer)
+export EPICSTAFF_USERNAME=                           # OR basic auth — must be paired with EPICSTAFF_PASSWORD
+export EPICSTAFF_PASSWORD=                           # OR basic auth — must be paired with EPICSTAFF_USERNAME
 export EPICSTAFF_MCP_PATH=/path/to/epicstaff-mcp     # only for manual `claude mcp add` / dev runs
 ```
 
 > **Auth:** the backend's `JwtOrApiKeyAuthentication` treats `Bearer` as a JWT and
 > reads API keys from `X-Api-Key`. Use `EPICSTAFF_API_KEY` for a long-lived
 > EpicStaff API key (recommended for the MCP); use `EPICSTAFF_API_TOKEN` only for
-> a short-lived JWT. Set at most one auth method.
+> a short-lived JWT; or use `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD` (paired) for
+> HTTP basic auth (`Authorization: Basic`). Set **at most one** method — the server
+> rejects more than one as an ambiguous auth config.
 
 > When installed as a plugin (`/plugin install`), `EPICSTAFF_MCP_PATH` is **not** needed —
 > the bundled server runs from `${CLAUDE_PLUGIN_ROOT}` automatically. Only set it for the

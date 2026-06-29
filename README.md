@@ -39,7 +39,7 @@ flow building, DDD design, QA, debugging, EpicChat output) online together:
 /plugin install epicstaff-mcp@epicstaff
 ```
 
-Set `EPICSTAFF_BASE_URL` (and optionally `EPICSTAFF_API_TOKEN`) in your shell profile so
+Set `EPICSTAFF_BASE_URL` (and `EPICSTAFF_API_KEY`) in your shell profile so
 the bundled MCP server can reach your instance.
 
 ### As a bare MCP server (tools only — no skills)
@@ -49,7 +49,7 @@ If you only want the tools and not the skills:
 ```bash
 claude mcp add epicstaff \
   -e EPICSTAFF_BASE_URL=http://localhost:8000 \
-  -e EPICSTAFF_API_TOKEN=your-token \
+  -e EPICSTAFF_API_KEY=your-api-key \
   -- uvx --from git+https://github.com/EpicStaff/epicstaff-mcp.git epicstaff-mcp
 ```
 
@@ -74,7 +74,7 @@ Add to `claude_desktop_config.json` (`~/Library/Application Support/Claude/claud
       ],
       "env": {
         "EPICSTAFF_BASE_URL": "http://localhost:8000",
-        "EPICSTAFF_API_TOKEN": "your-token-here"
+        "EPICSTAFF_API_KEY": "your-api-key-here"
       }
     }
   }
@@ -97,7 +97,7 @@ In `.cursor/mcp.json`:
       ],
       "env": {
         "EPICSTAFF_BASE_URL": "http://localhost:8000",
-        "EPICSTAFF_API_TOKEN": "your-token-here"
+        "EPICSTAFF_API_KEY": "your-api-key-here"
       }
     }
   }
@@ -111,13 +111,14 @@ All settings are read from environment variables (prefix: `EPICSTAFF_`):
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `EPICSTAFF_BASE_URL` | yes | — | Base URL of your EpicStaff instance, e.g. `http://localhost:8000` |
-| `EPICSTAFF_API_TOKEN` | no | — | Bearer token for API key auth |
+| `EPICSTAFF_API_KEY` | no | — | EpicStaff API key, sent as `X-Api-Key` (**preferred** — long-lived) |
+| `EPICSTAFF_API_TOKEN` | no | — | JWT bearer token, sent as `Authorization: Bearer` |
 | `EPICSTAFF_USERNAME` | no | — | Username for basic auth (must be paired with `EPICSTAFF_PASSWORD`) |
 | `EPICSTAFF_PASSWORD` | no | — | Password for basic auth |
 | `EPICSTAFF_TIMEOUT` | no | `30.0` | HTTP request timeout in seconds |
 | `EPICSTAFF_MAX_RETRIES` | no | `3` | Number of retries on transient errors |
 
-Set either `EPICSTAFF_API_TOKEN` **or** `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD` — not both.
+Set **at most one** auth method: `EPICSTAFF_API_KEY`, `EPICSTAFF_API_TOKEN`, **or** `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD` (paired). Setting more than one is rejected as an ambiguous auth config. `EPICSTAFF_API_KEY` is recommended for the MCP — the backend treats `Bearer` strictly as a JWT and reads long-lived API keys from `X-Api-Key`.
 
 ## Available Tools
 
