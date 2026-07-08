@@ -474,3 +474,66 @@ async def test_get_schedule_trigger_node():
     )
     result = await get_schedule_trigger_node(node_id=5)
     assert result["id"] == 5
+
+
+@respx.mock
+async def test_add_node_cdt_maps_to_classification_endpoint():
+    route = respx.post(f"{BASE_URL}api/classification-decision-table-node/").mock(
+        return_value=httpx.Response(201, json={"id": 60, "graph": 1})
+    )
+    await add_node(flow_id=1, node_type="classificationdecisiontablenode", config={})
+    assert route.called
+    assert json.loads(route.calls.last.request.content)["graph"] == 1
+
+
+@respx.mock
+async def test_patch_cdt_node_routing_and_strips_next_node():
+    cdt = {"id": 40, "graph": 1, "node_name": "cdt_1"}
+    respx.get(f"{BASE_URL}api/classification-decision-table-node/40/").mock(
+        return_value=httpx.Response(200, json=cdt)
+    )
+    route = respx.patch(f"{BASE_URL}api/classification-decision-table-node/40/").mock(
+        return_value=httpx.Response(200, json=cdt)
+    )
+    await patch_cdt_node(
+        graph_id=1,
+        name_or_id=40,
+        condition_groups=[
+            {"group_name": "g1", "next_node": "Some Node #5", "next_node_id": 5}
+        ],
+        default_next_node_id=11,
+        next_error_node_id=12,
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["default_next_node_id"] == 11
+    assert body["next_error_node_id"] == 12
+    grp = body["condition_groups"][0]
+    assert "next_node" not in grp
+    assert grp["next_node_id"] == 5
+
+
+@respx.mock
+async def test_patch_dt_node_strips_next_node_name():
+    dt_node = {"id": 50, "graph": 1, "node_name": "dt_1"}
+    graph = {
+        **FULL_FLOW,
+        "decision_table_node_list": [dt_node],
+        "classification_decision_table_node_list": [],
+    }
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=graph)
+    )
+    route = respx.patch(f"{BASE_URL}api/decision-table-node/50/").mock(
+        return_value=httpx.Response(200, json=dt_node)
+    )
+    await patch_dt_node(
+        graph_id=1,
+        name_or_id=50,
+        condition_groups=[
+            {"group_name": "g1", "next_node": "Live Lookup #74", "next_node_id": 74}
+        ],
+    )
+    grp = json.loads(route.calls.last.request.content)["condition_groups"][0]
+    assert "next_node" not in grp
+    assert grp["next_node_id"] == 74
+    assert grp["conditions"] == []

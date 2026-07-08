@@ -19,6 +19,7 @@ NODE_TYPE_TO_ENDPOINT: dict[str, str] = {
     "fileextractornode": "file-extractor-nodes",
     "audiotranscriptionnode": "audio-transcription-nodes",
     "decisiontablenode": "decision-table-node",
+    "classificationdecisiontablenode": "classification-decision-table-node",
     "telegramtriggernode": "telegram-trigger-nodes",
     "webhooktriggernode": "webhook-trigger-nodes",
 }
@@ -111,7 +112,13 @@ async def add_node(
 
     node_type must be one of: crewnode, pythonnode, startnode, endnode,
     subgraphnode, codeagentnode, fileextractornode, audiotranscriptionnode,
-    decisiontablenode, telegramtriggernode, webhooktriggernode
+    decisiontablenode, classificationdecisiontablenode, telegramtriggernode,
+    webhooktriggernode
+
+    Prefer classificationdecisiontablenode (CDT) over decisiontablenode (DT):
+    CDT is a deterministic superset (routes on a group `expression` with no LLM
+    unless a group sets `prompt_id`) and avoids the DT viewset's crash on stray
+    fields. Wire CDT routing with patch_cdt_node (next_node_id per group).
 
     node_name: optional display name for the node.
 
@@ -120,6 +127,7 @@ async def add_node(
       pythonnode: {python_code: {code: str, entrypoint: str, libraries: list[str]}}
       startnode:  {variables: dict}
       endnode:    {output_map: dict}
+      subgraphnode: {subgraph: int (or subgraph_id alias), input_map, output_variable_path}
     """
     endpoint = NODE_TYPE_TO_ENDPOINT.get(node_type.lower())
     if not endpoint:
@@ -857,14 +865,19 @@ async def patch_cdt_node(
     post_python_code: dict | None = None,
     prompt_configs: list[dict] | None = None,
     condition_groups: list[dict] | None = None,
+    default_next_node_id: int | None = None,
+    next_error_node_id: int | None = None,
 ) -> dict[str, Any]:
     """Update CDT node fields. Only provided (non-None) fields are updated.
 
     pre_python_code / post_python_code are nested code objects
     ({code, entrypoint, libraries}). prompt_configs is a list of
     {prompt_key, prompt_text, llm_config, output_schema, result_variable,
-    variable_mappings}. condition_groups items must NOT contain 'id' or
-    'classification_decision_table_node' fields — remove them before passing.
+    variable_mappings}. Each condition_group routes via 'next_node_id' (int);
+    for pure variable routing set an 'expression' and leave 'prompt_id' unset
+    (no LLM call). default_next_node_id / next_error_node_id are node ids for the
+    fallback / error branches. Read-only 'id', 'classification_decision_table_node',
+    and 'next_node' (name) keys are stripped automatically.
     """
     async with get_client() as client:
         cdt_id, _ = await _get_cdt_node(client, graph_id, name_or_id)
@@ -880,11 +893,16 @@ async def patch_cdt_node(
                 {
                     k: v
                     for k, v in g.items()
-                    if k not in ("id", "classification_decision_table_node")
+                    if k
+                    not in ("id", "classification_decision_table_node", "next_node")
                 }
                 for g in condition_groups
             ]
             payload["condition_groups"] = clean_groups
+        if default_next_node_id is not None:
+            payload["default_next_node_id"] = default_next_node_id
+        if next_error_node_id is not None:
+            payload["next_error_node_id"] = next_error_node_id
         return await client.patch(
             f"/api/classification-decision-table-node/{cdt_id}/", json=payload
         )
@@ -910,8 +928,15 @@ async def patch_dt_node(
             name_or_id,
             [("decision_table_node_list", "decision-table-node")],
         )
+        # Ensure required 'conditions' key and strip the read-only 'next_node' NAME
+        # (the read tools emit it; sending it back splats into the model ctor and
+        # crashes the DT viewset — routing is via 'next_node_id' only).
         safe_groups = [
-            g if "conditions" in g else {**g, "conditions": []}
+            {
+                k: v
+                for k, v in {**g, "conditions": g.get("conditions", [])}.items()
+                if k != "next_node"
+            }
             for g in condition_groups
         ]
         payload: dict[str, Any] = {"condition_groups": safe_groups}

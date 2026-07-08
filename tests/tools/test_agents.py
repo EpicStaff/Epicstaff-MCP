@@ -1,4 +1,5 @@
 """Tests for agent tools."""
+
 from __future__ import annotations
 
 import httpx
@@ -18,7 +19,13 @@ from tests.conftest import AGENT_PAYLOAD, BASE_URL
 async def test_list_agents_returns_results():
     respx.get(f"{BASE_URL}api/agents/").mock(
         return_value=httpx.Response(
-            200, json={"count": 1, "next": None, "previous": None, "results": [AGENT_PAYLOAD]}
+            200,
+            json={
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [AGENT_PAYLOAD],
+            },
         )
     )
     result = await list_agents()
@@ -80,6 +87,7 @@ async def test_create_agent_sends_correct_payload():
         memory=True,
     )
     import json
+
     body = json.loads(route.calls.last.request.content)
     assert body["role"] == "Researcher"
     assert body["llm_config"] == 5
@@ -103,3 +111,36 @@ async def test_delete_agent():
     respx.delete(f"{BASE_URL}api/agents/1/").mock(return_value=httpx.Response(204))
     result = await delete_agent(agent_id=1)
     assert result == {"message": "Agent 1 deleted successfully"}
+
+
+@respx.mock
+async def test_create_agent_forwards_rag_object():
+    route = respx.post(f"{BASE_URL}api/agents/").mock(
+        return_value=httpx.Response(201, json=AGENT_PAYLOAD)
+    )
+    await create_agent(
+        role="R",
+        goal="G",
+        backstory="B",
+        knowledge_collection=4,
+        rag_type="naive",
+        rag_id=7,
+    )
+    import json
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["knowledge_collection"] == 4
+    assert body["rag"] == {"rag_type": "naive", "rag_id": 7}
+
+
+@respx.mock
+async def test_update_agent_forwards_rag_object():
+    respx.patch(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=AGENT_PAYLOAD)
+    )
+    route = respx.patch(f"{BASE_URL}api/agents/1/")
+    await update_agent(agent_id=1, knowledge_collection=4, rag_type="naive", rag_id=7)
+    import json
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["rag"] == {"rag_type": "naive", "rag_id": 7}

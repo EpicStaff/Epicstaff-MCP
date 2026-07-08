@@ -1,4 +1,5 @@
 """MCP tools for managing EpicStaff agents."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -43,11 +44,18 @@ async def create_agent(
     max_retry_limit: int | None = None,
     respect_context_window: bool | None = None,
     default_temperature: float | None = None,
+    rag_type: str | None = None,
+    rag_id: int | None = None,
 ) -> dict[str, Any]:
     """Create a new agent.
 
     tool_ids format: 'mcp-tool:5', 'python-code-tool:3', 'configured-tool:1'
     default_temperature: 0.0–2.0
+
+    To ground the agent in a knowledge collection, pass BOTH knowledge_collection
+    (the collection id) AND its RAG: rag_type ("naive" | "graph") + rag_id (the
+    rag id from GET /source-collections/{id}/ -> rag_configurations[].rag_id).
+    The backend requires `rag` whenever knowledge_collection is set.
     """
     payload: dict[str, Any] = {"role": role, "goal": goal, "backstory": backstory}
     if llm_config is not None:
@@ -78,6 +86,8 @@ async def create_agent(
         payload["respect_context_window"] = respect_context_window
     if default_temperature is not None:
         payload["default_temperature"] = default_temperature
+    if rag_type is not None and rag_id is not None:
+        payload["rag"] = {"rag_type": rag_type, "rag_id": rag_id}
     async with get_client() as client:
         return await client.post("/api/agents/", json=payload)
 
@@ -101,8 +111,14 @@ async def update_agent(
     max_retry_limit: int | None = None,
     respect_context_window: bool | None = None,
     default_temperature: float | None = None,
+    rag_type: str | None = None,
+    rag_id: int | None = None,
 ) -> dict[str, Any]:
-    """Update one or more fields of an existing agent. Only provided fields are updated."""
+    """Update one or more fields of an existing agent. Only provided fields are updated.
+
+    To (re)attach knowledge, pass knowledge_collection together with rag_type
+    ("naive" | "graph") + rag_id — the backend requires `rag` when a collection is set.
+    """
     payload: dict[str, Any] = {}
     if role is not None:
         payload["role"] = role
@@ -138,6 +154,8 @@ async def update_agent(
         payload["respect_context_window"] = respect_context_window
     if default_temperature is not None:
         payload["default_temperature"] = default_temperature
+    if rag_type is not None and rag_id is not None:
+        payload["rag"] = {"rag_type": rag_type, "rag_id": rag_id}
     async with get_client() as client:
         return await client.patch(f"/api/agents/{agent_id}/", json=payload)
 
@@ -165,7 +183,9 @@ async def copy_agent(agent_id: int, name: str | None = None) -> dict[str, Any]:
 async def list_template_agents(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List all template agents available in EpicStaff."""
     async with get_client() as client:
-        return await client.get("/api/template-agents/", params={"limit": limit, "offset": offset})
+        return await client.get(
+            "/api/template-agents/", params={"limit": limit, "offset": offset}
+        )
 
 
 async def get_template_agent(template_agent_id: int) -> dict[str, Any]:
@@ -177,7 +197,9 @@ async def get_template_agent(template_agent_id: int) -> dict[str, Any]:
 async def list_agent_tags(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List all agent tags."""
     async with get_client() as client:
-        return await client.get("/api/agent-tags/", params={"limit": limit, "offset": offset})
+        return await client.get(
+            "/api/agent-tags/", params={"limit": limit, "offset": offset}
+        )
 
 
 async def create_agent_tag(name: str) -> dict[str, Any]:
