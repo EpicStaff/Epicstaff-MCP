@@ -55,7 +55,24 @@ one config.)
 
 ---
 
+### E. Agent RAG search-config not auto-created on UPDATE → crew crash — backend asymmetry
+- **File:** `src/django_app/tables/serializers/model_serializers/crew_serializers.py` — `create()` (lines 352-360) auto-creates a default search config when `rag` is set without `search_configs`; **`update()` (lines 406-408) does NOT** (no `elif rag_data:` branch).
+- **Symptom:** attaching RAG to an existing agent via `update_agent` leaves `rag_search_config = null`; at run time the crew raises `src.shared.models.knowledge.NaiveRagSearchConfig() argument after ** must be a mapping, not NoneType` and the session errors before any LLM call.
+- **Proposed fix:** mirror the `create()` default-config branch in `update()` (create default naive/graph search config when `rag_data` is set and no `search_configs` provided).
+- **MCP workaround (in use):** create agents with RAG via `create_agent` (default config is auto-created), not `update_agent`. Verified: crew then retrieves and answers from the docs.
+
+### F. CDT condition-group PATCH crashes on a stray field (`group_type`) — same class as B
+- **File:** `src/django_app/tables/views/model_view_sets.py:~1474` (`ClassificationDecisionTableNodeModelViewSet`). It filters only `id`/`classification_decision_table_node` (blacklist), then `ClassificationConditionGroup(**gd)`. `ClassificationConditionGroup` has **no `group_type` field** (unlike DT's `ConditionGroup`), so a group dict containing `group_type` → `TypeError` → unhandled 500 / disconnect.
+- **Proposed fix:** whitelist real `ClassificationConditionGroup` fields before construct (same fix shape as B).
+- **MCP note:** `patch_cdt_node` now strips `id`/`classification_decision_table_node`/`next_node`; callers must NOT send `group_type` for CDT groups.
+
+### G. Usage note (not a bug): CDT vs DT expression syntax differs
+CDT expressions evaluate `variables` as an attribute namespace → use **`variables.routing.category`** (dot access). Plain DT accepts subscript (`variables['routing']['category']`). A subscript expression in a CDT raises `'types.SimpleNamespace' object is not subscriptable`, and the CDT routes to its `next_error_node`.
+
 ## Suggested backend priority
-D and C first (silent data corruption makes subgraphs unusable for real work), then B (a public
-endpoint should never 500 on extra input). Add tests: `src/crew/tests/graph/subgraphs/test_subgraph_node.py`
-(input nesting, non-destructive output, no double-nest) and a `DecisionTableNodeModelViewSet` PATCH API test.
+E first (blocks RAG-grounded agents on the natural update path), then D and C (silent subgraph data
+corruption), then B and F (a public endpoint should never 500 on extra input). Add tests:
+`src/crew/tests/graph/subgraphs/test_subgraph_node.py` (input nesting, non-destructive output, no
+double-nest); a `DecisionTableNodeModelViewSet` + `ClassificationDecisionTableNodeModelViewSet` PATCH
+API test (stray field → 400, not 500); and an agent-update RAG test asserting the default search config
+is created.
