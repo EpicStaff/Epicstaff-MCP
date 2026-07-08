@@ -124,7 +124,8 @@ These rules encode hard-won lessons from production issues. Violating any causes
 | Python | `pythonnode` | `python_code.code`, `python_code.libraries`, `input_map`, `output_variable_path` | `python-in` (multi) | `python-out` (single) | Must have `def main(...)`. Always pass `libraries` when patching. |
 | Code Agent | `codeagentnode` | `system_prompt`, `llm_config_id`, `agent_mode` (`build`/`plan`), `input_map`, `output_variable_path` | `code-agent-in` (multi) | `code-agent-out` (single) | `libraries` applies to `stream_handler_code` only. `output_schema` triggers retry on mismatch. |
 | Project / Crew | `crewnode` | `crew` FK, `input_map`, `output_variable_path` | `project-in` (multi) | `project-out` (single) | Agent `tool_ids` PATCH is destructive — send all IDs. |
-| Table / CDT | `decisiontablenode` | `condition_groups[]`, `default_next_node`, `next_error_node` | `input` (input) | `decision-default`, `decision-error`, `decision-out-{group_name}` | Routing is metadata-only. `add_edge` does nothing here. `prompts` must be dict. Each group needs `"conditions": []`. |
+| Decision Table (DT) | `decisiontablenode` | `condition_groups[]`, `default_next_node_id`, `next_error_node_id` | `input` (input) | `decision-default`, `decision-error`, `decision-out-{group_name}` | **Avoid — prefer CDT.** Routing is metadata-only (`add_edge` does nothing); wire via `patch_dt_node`. Backend PATCH 500s on a stray `next_node` NAME (route by `next_node_id`). |
+| Classification Decision Table (CDT) | `classificationdecisiontablenode` | `condition_groups[]` (each `expression` + `next_node_id`), `default_next_node_id`, `next_error_node_id`; optional `prompts` | `input` | metadata routing | **Preferred brancher.** Deterministic superset of DT — routes on a group `expression` against `variables` with NO LLM unless a group sets `prompt_id`. Wire via `patch_cdt_node`. |
 | Subgraph | `subgraphnode` | `subgraph` FK, `input_map`, `output_variable_path` | `subgraph-in` (multi) | `subgraph-out` (single) | Circular references detected and blocked. |
 | Webhook Trigger | `webhooktriggernode` | `webhook_trigger.webhook_path`, `python_code.code` | none | `webhook-trigger-out` (single) | No input port — nothing wires TO it. Also connect `__start__` to same downstream node for manual runs. |
 | Telegram Trigger | `telegramtriggernode` | `telegram_bot_api_key`, `fields[]` | none | `telegram-trigger-out` (single) | Same dual-wiring rule as webhook trigger. `fields[]` maps telegram payload → variables paths. |
@@ -139,7 +140,7 @@ These rules encode hard-won lessons from production issues. Violating any causes
 | Deterministic transform, external HTTP, data reshaping | `python` |
 | Agent reasoning, tool use, file work, EpicChat-facing | `code-agent` |
 | Multi-agent collaboration with specialized roles | `project` (crew) |
-| Branch to N nodes by rule | `table` (CDT) |
+| Branch to N nodes by rule | `classificationdecisiontablenode` (CDT — preferred; avoid plain `decisiontablenode`) |
 | Branch by Python predicate (2 paths) | `edge` (conditional edge) |
 | External HTTP event starts the flow | `webhook-trigger` |
 | Telegram bot starts the flow | `telegram-trigger` |
