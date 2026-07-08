@@ -16,6 +16,7 @@ from epicstaff_mcp.tools import (
     organizations,
     python_code,
     realtime,
+    session_debug,
     sessions,
     surfaces,
     tasks,
@@ -113,6 +114,13 @@ mcp.tool(sessions.send_message)
 mcp.tool(sessions.delete_session)
 mcp.tool(sessions.get_session_warnings)
 mcp.tool(sessions.list_session_messages)
+
+# Session debug
+mcp.tool(session_debug.inspect_session)
+mcp.tool(session_debug.get_session_timings)
+mcp.tool(session_debug.get_session_trace)
+mcp.tool(session_debug.get_session_crew_input)
+mcp.tool(session_debug.get_flow_persistent_vars)
 
 # Tools
 mcp.tool(tools.list_tools)
