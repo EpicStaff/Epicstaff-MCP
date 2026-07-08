@@ -18,6 +18,7 @@ from epicstaff_mcp.tools import (
     realtime,
     session_debug,
     sessions,
+    storage,
     surfaces,
     tasks,
     tools,
@@ -121,6 +122,20 @@ mcp.tool(session_debug.get_session_timings)
 mcp.tool(session_debug.get_session_trace)
 mcp.tool(session_debug.get_session_crew_input)
 mcp.tool(session_debug.get_flow_persistent_vars)
+
+# Storage (MinIO/S3-backed file store + flow attachment)
+mcp.tool(storage.list_storage)
+mcp.tool(storage.storage_tree)
+mcp.tool(storage.get_storage_info)
+mcp.tool(storage.create_storage_folder)
+mcp.tool(storage.upload_storage_file)
+mcp.tool(storage.delete_storage_paths)
+mcp.tool(storage.rename_storage)
+mcp.tool(storage.move_storage)
+mcp.tool(storage.copy_storage)
+mcp.tool(storage.attach_storage_to_flow)
+mcp.tool(storage.detach_storage_from_flow)
+mcp.tool(storage.list_flow_storage)
 
 # Tools
 mcp.tool(tools.list_tools)
