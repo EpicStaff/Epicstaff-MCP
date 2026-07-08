@@ -1,9 +1,11 @@
 """MCP tools for EpicStaff webhook and Telegram trigger management."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from epicstaff_mcp.client import get_client
+from epicstaff_mcp.exceptions import EpicStaffAPIError
 
 
 # Webhook Triggers
@@ -56,13 +58,15 @@ async def delete_webhook_trigger(trigger_id: int) -> dict[str, str]:
     return {"message": f"Webhook trigger {trigger_id} deleted successfully"}
 
 
-async def register_webhooks(trigger_ids: list[int]) -> dict[str, Any]:
-    """Register one or more webhook triggers with the webhook service.
+async def register_webhooks() -> dict[str, Any]:
+    """Register all webhook triggers with the webhook service.
 
-    This activates the triggers so they start receiving incoming webhook events.
+    Activates the triggers so they start receiving incoming webhook events.
+    Note: the backend re-registers every trigger and ignores any per-trigger
+    selection, so this endpoint takes no arguments.
     """
     async with get_client() as client:
-        return await client.post("/api/register-webhooks/", json={"trigger_ids": trigger_ids})
+        return await client.post("/api/register-webhooks/", json={})
 
 
 # Webhook Trigger Nodes (flow nodes — mostly read-only from this endpoint)
@@ -130,28 +134,45 @@ async def register_telegram_trigger(
     async with get_client() as client:
         return await client.post(
             "/api/register-telegram-trigger/",
-            json={"node_id": node_id, "bot_token": bot_token},
+            json={"telegram_trigger_node_id": node_id, "bot_token": bot_token},
         )
 
 
 # Ngrok Configuration
 async def get_ngrok_config() -> dict[str, Any]:
-    """Get the current ngrok tunnel configuration."""
+    """Get the current ngrok tunnel configuration.
+
+    The collection endpoint returns a paginated list; this returns the first
+    (and typically only) configuration record, or an empty dict if none exist.
+    """
     async with get_client() as client:
-        return await client.get("/api/ngrok-config/")
+        response = await client.get("/api/ngrok-config/")
+    results = response.get("results", [])
+    return results[0] if results else {}
 
 
 async def update_ngrok_config(
     auth_token: str | None = None,
     domain: str | None = None,
 ) -> dict[str, Any]:
-    """Update the ngrok tunnel configuration."""
+    """Update the ngrok tunnel configuration.
+
+    The ngrok config endpoint has no collection-level PUT; the existing record's
+    id is fetched from the list first, then updated at its detail route.
+    """
     async with get_client() as client:
-        current = await client.get("/api/ngrok-config/")
+        listing = await client.get("/api/ngrok-config/")
+    results = listing.get("results", [])
+    if not results:
+        raise EpicStaffAPIError(
+            status_code=404, detail="No ngrok configuration exists to update"
+        )
+    current = results[0]
+    config_id = current["id"]
     payload = dict(current)
     if auth_token is not None:
         payload["auth_token"] = auth_token
     if domain is not None:
         payload["domain"] = domain
     async with get_client() as client:
-        return await client.put("/api/ngrok-config/", json=payload)
+        return await client.put(f"/api/ngrok-config/{config_id}/", json=payload)

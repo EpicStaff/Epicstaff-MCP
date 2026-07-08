@@ -1,4 +1,5 @@
 """Tests for session tools."""
+
 from __future__ import annotations
 
 import httpx
@@ -8,8 +9,10 @@ import respx
 from epicstaff_mcp.exceptions import EpicStaffAPIError
 from epicstaff_mcp.tools.sessions import (
     get_session_updates,
+    list_session_messages,
     list_sessions,
     run_session,
+    run_session_and_wait,
     send_message,
     stop_session,
 )
@@ -31,10 +34,34 @@ SESSION_PAYLOAD = {
 @respx.mock
 async def test_list_sessions():
     respx.get(f"{BASE_URL}api/sessions/").mock(
-        return_value=httpx.Response(200, json={"count": 1, "results": [SESSION_PAYLOAD]})
+        return_value=httpx.Response(
+            200, json={"count": 1, "results": [SESSION_PAYLOAD]}
+        )
     )
     result = await list_sessions(flow_id=1)
     assert result["count"] == 1
+
+
+@respx.mock
+async def test_list_sessions_uses_graph_id_param():
+    route = respx.get(f"{BASE_URL}api/sessions/").mock(
+        return_value=httpx.Response(200, json={"count": 0, "results": []})
+    )
+    await list_sessions(flow_id=7)
+    params = route.calls.last.request.url.params
+    assert params["graph_id"] == "7"
+    assert "graph" not in params
+
+
+@respx.mock
+async def test_list_session_messages_uses_session_id_param():
+    route = respx.get(f"{BASE_URL}api/graph-session-messages/").mock(
+        return_value=httpx.Response(200, json={"count": 0, "results": []})
+    )
+    await list_session_messages(session_id=42)
+    params = route.calls.last.request.url.params
+    assert params["session_id"] == "42"
+    assert "session" not in params
 
 
 @respx.mock
@@ -53,7 +80,7 @@ async def test_run_session_without_id_raises():
 
 @respx.mock
 async def test_get_session_updates():
-    respx.post(f"{BASE_URL}api/get-updates/").mock(
+    respx.get(f"{BASE_URL}api/sessions/10/get-updates/").mock(
         return_value=httpx.Response(200, json={"messages": [], "status": "run"})
     )
     result = await get_session_updates(session_id=10)
@@ -62,7 +89,7 @@ async def test_get_session_updates():
 
 @respx.mock
 async def test_stop_session():
-    respx.post(f"{BASE_URL}api/stop-session/").mock(
+    respx.post(f"{BASE_URL}api/sessions/10/stop/").mock(
         return_value=httpx.Response(200, json={"status": "stopped"})
     )
     result = await stop_session(session_id=10)
@@ -78,3 +105,16 @@ async def test_send_message():
         session_id=10, crew_id=1, execution_order=0, name="user", answer="yes"
     )
     assert result["status"] == "ok"
+
+
+@respx.mock
+async def test_run_session_and_wait_terminates_on_end_status():
+    respx.post(f"{BASE_URL}api/run-session/").mock(
+        return_value=httpx.Response(200, json={"session_id": 42})
+    )
+    respx.get(f"{BASE_URL}api/sessions/42/get-updates/").mock(
+        return_value=httpx.Response(200, json={"status": "end"})
+    )
+    result = await run_session_and_wait(flow_id=1, timeout=5, poll_interval=1)
+    assert result["status"] == "end"
+    assert "error" not in result

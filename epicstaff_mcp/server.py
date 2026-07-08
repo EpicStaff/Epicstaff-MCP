@@ -1,4 +1,5 @@
 """EpicStaff MCP Server — registers all tools and starts the server."""
+
 from __future__ import annotations
 
 from fastmcp import FastMCP
@@ -62,7 +63,6 @@ mcp.tool(tools.delete_tool)
 # Knowledge
 mcp.tool(knowledge.list_source_collections)
 mcp.tool(knowledge.create_source_collection)
-mcp.tool(knowledge.add_document)
 mcp.tool(knowledge.trigger_rag_indexing)
 
 # LLM Configs

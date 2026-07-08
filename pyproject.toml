@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epicstaff-mcp"
-version = "2.0.0"
+version = "3.1.2"
 description = "Modular MCP server for EpicStaff flow management"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,3 +23,6 @@ epicstaff-mcp-organizations = "epicstaff_mcp.servers.organizations_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["epicstaff_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

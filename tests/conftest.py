@@ -1,12 +1,16 @@
 """Shared pytest fixtures for epicstaff-mcp tests."""
+
 from __future__ import annotations
 
 import os
 
 import pytest
 
-# Ensure EPICSTAFF_BASE_URL is set for all tests
-os.environ.setdefault("EPICSTAFF_BASE_URL", "http://test.epicstaff.local")
+# Isolate tests from the developer's real shell env: force the test base URL and
+# strip any auth vars so the client runs in no-auth mode (no real /auth/login/ calls).
+os.environ["EPICSTAFF_BASE_URL"] = "http://test.epicstaff.local"
+for _auth_var in ("EPICSTAFF_API_TOKEN", "EPICSTAFF_USERNAME", "EPICSTAFF_PASSWORD"):
+    os.environ.pop(_auth_var, None)
 
 BASE_URL = "http://test.epicstaff.local/"
 
@@ -34,8 +38,18 @@ AGENT_PAYLOAD: dict = {
 
 @pytest.fixture(autouse=True)
 def reset_client():
-    """Reset the module-level client singleton before each test."""
+    """Reset the module-level client singleton and active-org state before each test."""
     import epicstaff_mcp.client as client_module
-    client_module._client = None
+    from epicstaff_mcp.config import get_settings
+
+    def _reset() -> None:
+        get_settings.cache_clear()
+        client_module._client = None
+        client_module._active_org_id = None
+        client_module._override_set = False
+        client_module._resolved_default_org_id = None
+        client_module._default_resolved = False
+
+    _reset()
     yield
-    client_module._client = None
+    _reset()

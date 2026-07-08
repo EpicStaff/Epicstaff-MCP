@@ -1,4 +1,5 @@
 """MCP tools for querying EpicStaff crew memory (vector store)."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -19,8 +20,8 @@ async def list_memories(
         return await client.get("/api/memory/", params=params)
 
 
-async def delete_memory(memory_id: int) -> dict[str, str]:
-    """Delete a memory entry by ID."""
+async def delete_memory(memory_id: str) -> dict[str, str]:
+    """Delete a memory entry by ID (the memory PK is a UUID string)."""
     async with get_client() as client:
         await client.delete(f"/api/memory/{memory_id}/")
     return {"message": f"Memory {memory_id} deleted successfully"}

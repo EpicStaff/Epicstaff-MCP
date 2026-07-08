@@ -1,4 +1,5 @@
 """MCP tools for managing and running EpicStaff sessions."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,12 +10,14 @@ from epicstaff_mcp.client import get_client
 from epicstaff_mcp.exceptions import EpicStaffAPIError
 
 
-async def list_sessions(flow_id: int, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+async def list_sessions(
+    flow_id: int, limit: int = 50, offset: int = 0
+) -> dict[str, Any]:
     """List sessions for a specific flow."""
     async with get_client() as client:
         return await client.get(
             "/api/sessions/",
-            params={"graph": flow_id, "limit": limit, "offset": offset},
+            params={"graph_id": flow_id, "limit": limit, "offset": offset},
         )
 
 
@@ -104,11 +107,11 @@ async def list_session_messages(
     async with get_client() as client:
         return await client.get(
             "/api/graph-session-messages/",
-            params={"session": session_id, "limit": limit, "offset": offset},
+            params={"session_id": session_id, "limit": limit, "offset": offset},
         )
 
 
-_TERMINAL_STATUSES = {"completed", "failed", "stopped", "error"}
+_TERMINAL_STATUSES = {"completed", "failed", "stopped", "error", "end", "ended"}
 
 
 async def run_session_and_wait(

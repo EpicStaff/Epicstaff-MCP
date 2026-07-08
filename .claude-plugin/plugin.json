@@ -1,11 +1,17 @@
 {
   "name": "epicstaff-mcp",
-  "description": "EpicStaff MCP — full-cycle flow building and debugging. MCP server + skills for interview, DDD design, build, QA, debug, and EpicChat output.",
-  "version": "2.0.0",
+  "description": "EpicStaff MCP \u2014 full-cycle flow building and debugging. MCP server + skills for interview, DDD design, build, QA, debug, and EpicChat output.",
+  "version": "3.1.2",
   "author": {
     "name": "EpicStaff"
   },
   "homepage": "https://github.com/EpicStaff/epicstaff-mcp",
-  "keywords": ["epicstaff", "mcp", "flows", "agents", "ddd"],
+  "keywords": [
+    "epicstaff",
+    "mcp",
+    "flows",
+    "agents",
+    "ddd"
+  ],
   "mcpServers": "./.mcp.json"
 }

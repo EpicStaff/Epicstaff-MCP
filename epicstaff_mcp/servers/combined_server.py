@@ -1,9 +1,11 @@
 """EpicStaff MCP Combined Server — registers all tools and starts the server."""
+
 from __future__ import annotations
 
 from fastmcp import FastMCP
 
 from epicstaff_mcp.tools import (
+    agent_definitions,
     agents,
     config,
     crews,
@@ -15,6 +17,7 @@ from epicstaff_mcp.tools import (
     python_code,
     realtime,
     sessions,
+    surfaces,
     tasks,
     tools,
     webhooks,
@@ -51,17 +54,35 @@ mcp.tool(flows.list_flows)
 mcp.tool(flows.get_flow)
 mcp.tool(flows.create_flow)
 mcp.tool(flows.update_flow_metadata)
+mcp.tool(flows.init_flow_metadata)
 mcp.tool(flows.get_flow_nodes)
+mcp.tool(flows.get_flow_connections)
 mcp.tool(flows.add_node)
 mcp.tool(flows.update_node)
 mcp.tool(flows.delete_node)
 mcp.tool(flows.list_edges)
 mcp.tool(flows.add_edge)
 mcp.tool(flows.delete_edge)
+mcp.tool(flows.add_conditional_edge)
 mcp.tool(flows.copy_flow)
 mcp.tool(flows.save_flow)
 mcp.tool(flows.delete_flow)
-mcp.tool(flows.add_conditional_edge)
+mcp.tool(flows.test_flow)
+mcp.tool(flows.get_graph_run_status)
+mcp.tool(flows.get_schedule_trigger_node)
+# Flow node patch helpers
+mcp.tool(flows.get_cdt_node)
+mcp.tool(flows.get_cdt_prompts)
+mcp.tool(flows.get_cdt_route_map)
+mcp.tool(flows.patch_cdt_node)
+mcp.tool(flows.patch_dt_node)
+mcp.tool(flows.patch_python_node)
+mcp.tool(flows.patch_code_agent_node)
+mcp.tool(flows.patch_webhook_node)
+mcp.tool(flows.patch_node_libraries)
+mcp.tool(flows.patch_node_metadata)
+mcp.tool(flows.patch_start_variables)
+# Graph tags & notes
 mcp.tool(flows.list_graph_tags)
 mcp.tool(flows.create_graph_tag)
 mcp.tool(flows.delete_graph_tag)
@@ -69,9 +90,14 @@ mcp.tool(flows.list_graph_notes)
 mcp.tool(flows.create_graph_note)
 mcp.tool(flows.update_graph_note)
 mcp.tool(flows.delete_graph_note)
-mcp.tool(flows.list_graph_files)
-mcp.tool(flows.upload_graph_file)
-mcp.tool(flows.delete_graph_file)
+# Graph versions
+mcp.tool(flows.list_graph_versions)
+mcp.tool(flows.get_graph_version)
+mcp.tool(flows.save_graph_version)
+mcp.tool(flows.update_graph_version)
+mcp.tool(flows.restore_graph_version)
+mcp.tool(flows.create_graph_from_version)
+# Import / export
 mcp.tool(flows.export_flow)
 mcp.tool(flows.bulk_export_flows)
 mcp.tool(flows.import_flow)
@@ -80,6 +106,7 @@ mcp.tool(flows.import_flow)
 mcp.tool(sessions.list_sessions)
 mcp.tool(sessions.get_session)
 mcp.tool(sessions.run_session)
+mcp.tool(sessions.run_session_and_wait)
 mcp.tool(sessions.get_session_updates)
 mcp.tool(sessions.stop_session)
 mcp.tool(sessions.send_message)
@@ -104,7 +131,6 @@ mcp.tool(knowledge.get_source_collection)
 mcp.tool(knowledge.update_source_collection)
 mcp.tool(knowledge.delete_source_collection)
 mcp.tool(knowledge.copy_source_collection)
-mcp.tool(knowledge.add_document)
 mcp.tool(knowledge.trigger_rag_indexing)
 mcp.tool(knowledge.list_documents)
 mcp.tool(knowledge.delete_document)
@@ -129,6 +155,12 @@ mcp.tool(knowledge.list_naive_rag_document_chunks)
 mcp.tool(knowledge.list_labels)
 mcp.tool(knowledge.create_label)
 mcp.tool(knowledge.delete_label)
+# Graph RAG
+mcp.tool(knowledge.list_available_rags)
+mcp.tool(knowledge.create_graph_rag)
+mcp.tool(knowledge.get_graph_rag)
+mcp.tool(knowledge.delete_graph_rag)
+mcp.tool(knowledge.update_graph_rag_index_config)
 
 # LLM Configs
 mcp.tool(llm_configs.list_llm_configs)
@@ -208,6 +240,7 @@ mcp.tool(organizations.get_organization)
 mcp.tool(organizations.create_organization)
 mcp.tool(organizations.update_organization)
 mcp.tool(organizations.delete_organization)
+mcp.tool(organizations.deactivate_organization)
 mcp.tool(organizations.list_organization_users)
 mcp.tool(organizations.add_organization_user)
 mcp.tool(organizations.remove_organization_user)
@@ -215,6 +248,25 @@ mcp.tool(organizations.list_graph_organizations)
 mcp.tool(organizations.add_graph_organization)
 mcp.tool(organizations.remove_graph_organization)
 mcp.tool(organizations.list_graph_organization_users)
+mcp.tool(organizations.set_active_organization)
+mcp.tool(organizations.get_active_organization)
+mcp.tool(organizations.clear_active_organization)
+mcp.tool(organizations.list_my_organizations)
+
+# Agent Definitions
+mcp.tool(agent_definitions.list_agent_definitions)
+mcp.tool(agent_definitions.get_agent_definition)
+mcp.tool(agent_definitions.create_agent_definition)
+mcp.tool(agent_definitions.update_agent_definition)
+mcp.tool(agent_definitions.delete_agent_definition)
+
+# Surfaces
+mcp.tool(surfaces.list_surfaces)
+mcp.tool(surfaces.get_surface)
+mcp.tool(surfaces.create_surface)
+mcp.tool(surfaces.update_surface)
+mcp.tool(surfaces.delete_surface)
+mcp.tool(surfaces.combine_surfaces)
 
 # Config / Health
 mcp.tool(config.ping)

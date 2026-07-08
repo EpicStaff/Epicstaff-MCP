@@ -1,4 +1,5 @@
 """MCP tools for EpicStaff realtime (voice/audio) features."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -16,7 +17,9 @@ async def list_realtime_models(limit: int = 100, offset: int = 0) -> dict[str, A
 
 
 # Realtime Model Configs
-async def list_realtime_model_configs(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+async def list_realtime_model_configs(
+    limit: int = 100, offset: int = 0
+) -> dict[str, Any]:
     """List all realtime model configurations."""
     async with get_client() as client:
         return await client.get(
@@ -76,7 +79,9 @@ async def update_realtime_model_config(
     if instructions is not None:
         payload["instructions"] = instructions
     async with get_client() as client:
-        return await client.patch(f"/api/realtime-model-configs/{config_id}/", json=payload)
+        return await client.patch(
+            f"/api/realtime-model-configs/{config_id}/", json=payload
+        )
 
 
 async def delete_realtime_model_config(config_id: int) -> dict[str, str]:
@@ -87,11 +92,14 @@ async def delete_realtime_model_config(config_id: int) -> dict[str, str]:
 
 
 # Realtime Transcription Models (read-only catalogue)
-async def list_realtime_transcription_models(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+async def list_realtime_transcription_models(
+    limit: int = 100, offset: int = 0
+) -> dict[str, Any]:
     """List all available realtime transcription models."""
     async with get_client() as client:
         return await client.get(
-            "/api/realtime-transcription-models/", params={"limit": limit, "offset": offset}
+            "/api/realtime-transcription-models/",
+            params={"limit": limit, "offset": offset},
         )
 
 
@@ -140,7 +148,9 @@ async def delete_realtime_transcription_model_config(config_id: int) -> dict[str
     """Delete a realtime transcription model configuration by ID."""
     async with get_client() as client:
         await client.delete(f"/api/realtime-transcription-model-configs/{config_id}/")
-    return {"message": f"Realtime transcription model config {config_id} deleted successfully"}
+    return {
+        "message": f"Realtime transcription model config {config_id} deleted successfully"
+    }
 
 
 # Realtime Agents
@@ -235,14 +245,17 @@ async def list_realtime_session_items(
 # Realtime Session Initialization
 async def init_realtime(
     agent_id: int,
-    session_id: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Initialize a realtime session for a realtime agent.
 
+    agent_id: ID of the realtime agent (required)
+    config: optional dict of session configuration overrides
+
     Returns connection credentials and session info for establishing a WebRTC/WebSocket connection.
     """
-    payload: dict[str, Any] = {"realtime_agent": agent_id}
-    if session_id is not None:
-        payload["session_id"] = session_id
+    payload: dict[str, Any] = {"agent_id": agent_id}
+    if config is not None:
+        payload["config"] = config
     async with get_client() as client:
         return await client.post("/api/init-realtime/", json=payload)

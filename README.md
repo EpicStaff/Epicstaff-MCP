@@ -111,13 +111,31 @@ All settings are read from environment variables (prefix: `EPICSTAFF_`):
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `EPICSTAFF_BASE_URL` | yes | — | Base URL of your EpicStaff instance, e.g. `http://localhost:8000` |
-| `EPICSTAFF_API_TOKEN` | no | — | Bearer token for API key auth |
-| `EPICSTAFF_USERNAME` | no | — | Username for basic auth (must be paired with `EPICSTAFF_PASSWORD`) |
-| `EPICSTAFF_PASSWORD` | no | — | Password for basic auth |
+| `EPICSTAFF_API_TOKEN` | no | — | JWT sent as `Authorization: Bearer <token>` (the backend rejects HTTP Basic) |
+| `EPICSTAFF_USERNAME` | no | — | Login email — performs a JWT login + auto-refresh, exactly like the EpicStaff frontend (must be paired with `EPICSTAFF_PASSWORD`) |
+| `EPICSTAFF_PASSWORD` | no | — | Login password (paired with `EPICSTAFF_USERNAME`) |
 | `EPICSTAFF_TIMEOUT` | no | `30.0` | HTTP request timeout in seconds |
 | `EPICSTAFF_MAX_RETRIES` | no | `3` | Number of retries on transient errors |
 
 Set either `EPICSTAFF_API_TOKEN` **or** `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD` — not both.
+
+The backend (`JwtOrApiKeyAuthentication`) accepts only `Authorization: Bearer <JWT>`, `X-Api-Key`, or `ApiKey` — it does **not** accept HTTP Basic. With `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD` the client logs in against `POST /api/auth/login/`, sends the returned access token as `Bearer`, and transparently refreshes it via `POST /api/auth/refresh/` (re-logging in if the refresh token has also expired) — the same JWT flow the frontend uses. With `EPICSTAFF_API_TOKEN`, pass a JWT; it is sent as `Bearer` verbatim with no login/refresh.
+
+### Active organization (RBAC)
+
+The EpicStaff backend is org-scoped: org-scoped endpoints resolve the active organization
+from the `X-Organization-Id` request header. There is no env var to configure this — it's
+resolved automatically, the same way the EpicStaff frontend bootstraps: on first org-scoped
+call, the client reads `GET /api/profile/` and adopts the current user's first organization
+membership as the default. Superadmins with no memberships get no default and must switch
+explicitly.
+
+| Tool | Description |
+|---|---|
+| `list_my_organizations` | List the organizations the current user belongs to, alongside the active org id |
+| `set_active_organization` | Switch the active org used for the `X-Organization-Id` header on subsequent calls (validates membership; superadmins may switch to any org) |
+| `get_active_organization` | Get the current active org id plus the caller's organization roster |
+| `clear_active_organization` | Clear the runtime override, falling back to the auto-resolved default |
 
 ## Available Tools
 
@@ -129,6 +147,29 @@ Set either `EPICSTAFF_API_TOKEN` **or** `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD
 | `create_agent` | Create a new agent |
 | `update_agent` | Update an existing agent |
 | `delete_agent` | Delete an agent |
+
+### Agent Definitions
+The CrewAI-replacement first-class agent entity (`/api/agent-definitions/`), distinct from the legacy Crew agents above.
+
+| Tool | Description |
+|---|---|
+| `list_agent_definitions` | List all agent definitions |
+| `get_agent_definition` | Get an agent definition by ID |
+| `create_agent_definition` | Create a new agent definition |
+| `update_agent_definition` | Update an existing agent definition |
+| `delete_agent_definition` | Delete an agent definition |
+
+### Surfaces
+Resource bundles (tools + storage files + knowledge collections with allow/deny) attached to agents/nodes (`/api/surfaces/`).
+
+| Tool | Description |
+|---|---|
+| `list_surfaces` | List all surfaces |
+| `get_surface` | Get a surface by ID |
+| `create_surface` | Create a new surface |
+| `update_surface` | Update an existing surface |
+| `delete_surface` | Delete a surface |
+| `combine_surfaces` | Merge multiple surfaces into a CombinedSurface |
 
 ### Crews
 | Tool | Description |

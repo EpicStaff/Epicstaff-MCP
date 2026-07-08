@@ -1,4 +1,5 @@
 """MCP tools for managing EpicStaff flows (visual workflows) including nodes and edges."""
+
 from __future__ import annotations
 
 import asyncio
@@ -24,12 +25,29 @@ NODE_TYPE_TO_ENDPOINT: dict[str, str] = {
 
 
 async def list_flows(
-    limit: int = 100, offset: int = 0, search: str | None = None
+    limit: int = 100,
+    offset: int = 0,
+    search: str | None = None,
+    label_id: int | None = None,
+    no_label: bool = False,
+    epicchat_enabled: bool | None = None,
 ) -> dict[str, Any]:
-    """List all flows (lightweight — no node detail). Supports pagination and search."""
+    """List all flows (lightweight — no node detail).
+
+    Supports pagination, search, and optional filters:
+      label_id: only flows tagged with this label id
+      no_label: only flows without any label
+      epicchat_enabled: filter by EpicChat enabled state
+    """
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     if search:
         params["search"] = search
+    if label_id is not None:
+        params["label_id"] = label_id
+    if no_label:
+        params["no_label"] = "true"
+    if epicchat_enabled is not None:
+        params["epicchat_enabled"] = str(epicchat_enabled).lower()
     async with get_client() as client:
         return await client.get("/api/graph-light/", params=params)
 
@@ -76,7 +94,8 @@ async def get_flow_nodes(flow_id: int) -> dict[str, Any]:
     async with get_client() as client:
         flow = await client.get(f"/api/graphs/{flow_id}/")
     node_keys = [
-        k for k in flow
+        k
+        for k in flow
         if k.endswith("_list") or k in ("edge_list", "conditional_edge_list")
     ]
     return {k: flow[k] for k in node_keys}
@@ -109,7 +128,16 @@ async def add_node(
             status_code=400,
             detail=f"Unknown node_type '{node_type}'. Valid types: {valid}",
         )
-    payload: dict[str, Any] = {"graph": flow_id, **config}
+    normalized = dict(config)
+    # A subgraph node's FK field is `subgraph`; accept `subgraph_id` as an alias
+    # so callers aren't silently left with an unlinked node.
+    if (
+        node_type.lower() == "subgraphnode"
+        and "subgraph" not in normalized
+        and "subgraph_id" in normalized
+    ):
+        normalized["subgraph"] = normalized.pop("subgraph_id")
+    payload: dict[str, Any] = {"graph": flow_id, **normalized}
     if node_name is not None:
         payload["node_name"] = node_name
     async with get_client() as client:
@@ -156,7 +184,9 @@ async def list_edges(flow_id: int) -> dict[str, Any]:
     """List all regular and conditional edges for a flow."""
     async with get_client() as client:
         edges = await client.get("/api/edges/", params={"graph": flow_id})
-        conditional = await client.get("/api/conditionaledges/", params={"graph": flow_id})
+        conditional = await client.get(
+            "/api/conditionaledges/", params={"graph": flow_id}
+        )
     return {
         "edges": edges.get("results", []),
         "conditional_edges": conditional.get("results", []),
@@ -172,7 +202,11 @@ async def add_edge(
     async with get_client() as client:
         return await client.post(
             "/api/edges/",
-            json={"graph": flow_id, "start_node_id": start_node_id, "end_node_id": end_node_id},
+            json={
+                "graph": flow_id,
+                "start_node_id": start_node_id,
+                "end_node_id": end_node_id,
+            },
         )
 
 
@@ -266,14 +300,27 @@ async def delete_flow(flow_id: int) -> dict[str, str]:
 async def add_conditional_edge(
     flow_id: int,
     source_node_id: int,
-    python_code: str,
+    code: str,
+    entrypoint: str = "main",
+    libraries: list[str] | None = None,
     input_map: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Add a conditional edge to a flow. The python_code determines routing logic."""
+    """Add a conditional edge to a flow.
+
+    Routing is decided by python_code, sent as a nested code object
+    ({code, entrypoint, libraries}). The code MUST return a string naming the
+    target node in "<node_name> #<id>" form (e.g. "Activity Logger #75") — this
+    is the key the runtime routes on. Returning a bare name ends the graph
+    silently; returning an int raises "output should be a string".
+    """
     payload: dict[str, Any] = {
         "graph": flow_id,
-        "source_node": source_node_id,
-        "python_code": python_code,
+        "source_node_id": source_node_id,
+        "python_code": {
+            "code": code,
+            "entrypoint": entrypoint,
+            "libraries": libraries or [],
+        },
     }
     if input_map is not None:
         payload["input_map"] = input_map
@@ -285,7 +332,9 @@ async def add_conditional_edge(
 async def list_graph_tags(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List all graph (flow) tags."""
     async with get_client() as client:
-        return await client.get("/api/graph-tags/", params={"limit": limit, "offset": offset})
+        return await client.get(
+            "/api/graph-tags/", params={"limit": limit, "offset": offset}
+        )
 
 
 async def create_graph_tag(name: str) -> dict[str, Any]:
@@ -356,42 +405,85 @@ async def delete_graph_note(note_id: int) -> dict[str, str]:
     return {"message": f"Graph note {note_id} deleted successfully"}
 
 
-# Graph Files
-async def list_graph_files(
-    flow_id: int | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> dict[str, Any]:
-    """List files attached to a flow."""
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if flow_id is not None:
-        params["graph"] = flow_id
+# Graph Versions
+async def list_graph_versions(flow_id: int) -> dict[str, Any]:
+    """List saved versions (snapshots) of a flow, newest first."""
     async with get_client() as client:
-        return await client.get("/api/graph-files/", params=params)
+        return await client.get("/api/graph-versions/", params={"graph_id": flow_id})
 
 
-async def upload_graph_file(
+async def get_graph_version(version_id: int) -> dict[str, Any]:
+    """Get a single graph version by ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/graph-versions/{version_id}/")
+
+
+async def save_graph_version(
     flow_id: int,
-    file_content_base64: str,
-    filename: str,
+    name: str,
+    description: str | None = None,
 ) -> dict[str, Any]:
-    """Upload a file to a flow. Provide file content as base64-encoded string."""
-    import base64
-
-    file_bytes = base64.b64decode(file_content_base64)
+    """Save the current state of a flow as a new named version (snapshot)."""
+    payload: dict[str, Any] = {"graph_id": flow_id, "name": name}
+    if description is not None:
+        payload["description"] = description
     async with get_client() as client:
-        return await client.post_multipart(
-            "/api/graph-files/",
-            files={filename: (filename, file_bytes)},
-            data={"graph": str(flow_id)},
+        return await client.post("/api/graph-versions/", json=payload)
+
+
+async def update_graph_version(
+    version_id: int,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Update a graph version's name or description."""
+    payload: dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    async with get_client() as client:
+        return await client.patch(f"/api/graph-versions/{version_id}/", json=payload)
+
+
+async def restore_graph_version(
+    version_id: int,
+    save_version: int,
+    backup: bool = True,
+) -> dict[str, Any]:
+    """Restore a flow to a saved version.
+
+    save_version is the expected current version number (optimistic lock).
+    backup=True snapshots the current state before restoring.
+    """
+    params = {"backup": "true"} if backup else None
+    async with get_client() as client:
+        return await client.post(
+            f"/api/graph-versions/{version_id}/restore/",
+            json={"save_version": save_version},
+            params=params,
         )
 
 
-async def delete_graph_file(file_id: int) -> dict[str, str]:
-    """Delete a graph file by ID."""
+async def create_graph_from_version(version_id: int) -> dict[str, Any]:
+    """Create a brand-new flow (graph) from a saved version snapshot."""
     async with get_client() as client:
-        await client.delete(f"/api/graph-files/{file_id}/")
-    return {"message": f"Graph file {file_id} deleted successfully"}
+        return await client.post(
+            f"/api/graph-versions/{version_id}/create-graph/", json={}
+        )
+
+
+# Graph run status & schedule triggers
+async def get_graph_run_status(run_id: str) -> dict[str, Any]:
+    """Get the execution status of a graph run by its run ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/graph_runs/{run_id}/status/")
+
+
+async def get_schedule_trigger_node(node_id: int) -> dict[str, Any]:
+    """Get a schedule trigger node by ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/schedule-trigger-nodes/{node_id}/")
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +509,7 @@ NODE_LIST_KEYS: list[tuple[str, str]] = [
 # Private helpers (not registered as MCP tools — leading underscore)
 # ---------------------------------------------------------------------------
 
+
 async def _resolve_node(
     client: Any,
     graph_id: int,
@@ -425,7 +518,11 @@ async def _resolve_node(
 ) -> tuple[str, int, dict]:
     """Find a node in a graph by name or ID. Returns (endpoint, node_id, node_data)."""
     graph = await client.get(f"/api/graphs/{graph_id}/")
-    pairs = list_key_endpoint_pairs if list_key_endpoint_pairs is not None else NODE_LIST_KEYS
+    pairs = (
+        list_key_endpoint_pairs
+        if list_key_endpoint_pairs is not None
+        else NODE_LIST_KEYS
+    )
     for list_key, endpoint in pairs:
         nodes = graph.get(list_key, [])
         for node in nodes:
@@ -448,7 +545,9 @@ async def _get_cdt_node(
 ) -> tuple[int, dict]:
     """Find a CDT node by name or ID. Returns (cdt_id, cdt_data)."""
     if isinstance(name_or_id, int):
-        data = await client.get(f"/api/classification-decision-table-node/{name_or_id}/")
+        data = await client.get(
+            f"/api/classification-decision-table-node/{name_or_id}/"
+        )
         return data["id"], data
 
     nodes = await client.get(
@@ -458,14 +557,13 @@ async def _get_cdt_node(
     for node in results:
         if node.get("node_name") == name_or_id:
             return node["id"], node
-    raise ValueError(
-        f"CDT node '{name_or_id}' not found in graph {graph_id}."
-    )
+    raise ValueError(f"CDT node '{name_or_id}' not found in graph {graph_id}.")
 
 
 # ---------------------------------------------------------------------------
 # New public tool functions
 # ---------------------------------------------------------------------------
+
 
 async def get_flow_connections(graph_id: int) -> dict[str, Any]:
     """Get all connections in a flow: edges, conditional edges, and CDT/DT routing."""
@@ -482,46 +580,73 @@ async def get_flow_connections(graph_id: int) -> dict[str, Any]:
 
     edges = []
     for e in graph.get("edge_list", []):
-        edges.append({
-            "id": e.get("id"),
-            "from": id_to_name.get(e.get("start_node_id"), e.get("start_node_id")),
-            "to": id_to_name.get(e.get("end_node_id"), e.get("end_node_id")),
-        })
+        edges.append(
+            {
+                "id": e.get("id"),
+                "from": id_to_name.get(e.get("start_node_id"), e.get("start_node_id")),
+                "to": id_to_name.get(e.get("end_node_id"), e.get("end_node_id")),
+            }
+        )
 
     conditional_edges = []
     for e in graph.get("conditional_edge_list", []):
-        conditional_edges.append({
-            "id": e.get("id"),
-            "from": id_to_name.get(e.get("source_node_id") or e.get("source_node"), e.get("source_node_id")),
-            "to": id_to_name.get(e.get("target_node_id") or e.get("target_node"), e.get("target_node_id")),
-            "condition": e.get("python_code"),
-        })
+        conditional_edges.append(
+            {
+                "id": e.get("id"),
+                "from": id_to_name.get(
+                    e.get("source_node_id"), e.get("source_node_id")
+                ),
+                "python_code": e.get("python_code"),
+            }
+        )
 
     cdt_routing = []
     for node in graph.get("classification_decision_table_node_list", []):
         groups = [
-            {"group_name": g.get("group_name"), "next_node": g.get("next_node")}
+            {
+                "group_name": g.get("group_name"),
+                "next_node": id_to_name.get(
+                    g.get("next_node_id"), g.get("next_node_id")
+                ),
+            }
             for g in node.get("condition_groups", [])
         ]
-        cdt_routing.append({
-            "node": node.get("node_name"),
-            "groups": groups,
-            "default": node.get("default_next_node"),
-            "error": node.get("next_error_node"),
-        })
+        cdt_routing.append(
+            {
+                "node": node.get("node_name"),
+                "groups": groups,
+                "default": id_to_name.get(
+                    node.get("default_next_node_id"), node.get("default_next_node_id")
+                ),
+                "error": id_to_name.get(
+                    node.get("next_error_node_id"), node.get("next_error_node_id")
+                ),
+            }
+        )
 
     dt_routing = []
     for node in graph.get("decision_table_node_list", []):
         groups = [
-            {"group_name": g.get("group_name"), "next_node": g.get("next_node")}
+            {
+                "group_name": g.get("group_name"),
+                "next_node": id_to_name.get(
+                    g.get("next_node_id"), g.get("next_node_id")
+                ),
+            }
             for g in node.get("condition_groups", [])
         ]
-        dt_routing.append({
-            "node": node.get("node_name"),
-            "groups": groups,
-            "default": node.get("default_next_node"),
-            "error": node.get("next_error_node"),
-        })
+        dt_routing.append(
+            {
+                "node": node.get("node_name"),
+                "groups": groups,
+                "default": id_to_name.get(
+                    node.get("default_next_node_id"), node.get("default_next_node_id")
+                ),
+                "error": id_to_name.get(
+                    node.get("next_error_node_id"), node.get("next_error_node_id")
+                ),
+            }
+        )
 
     return {
         "edges": edges,
@@ -532,17 +657,20 @@ async def get_flow_connections(graph_id: int) -> dict[str, Any]:
 
 
 async def get_cdt_node(graph_id: int, name_or_id: str | int) -> dict[str, Any]:
-    """Get full CDT node details: pre/post code, prompts dict, condition groups."""
+    """Get full CDT node details: pre/post python code, prompt_configs, condition groups."""
     async with get_client() as client:
         cdt_id, _ = await _get_cdt_node(client, graph_id, name_or_id)
         return await client.get(f"/api/classification-decision-table-node/{cdt_id}/")
 
 
 async def get_cdt_prompts(graph_id: int, name_or_id: str | int) -> dict[str, Any]:
-    """Get just the prompts dict from a CDT node."""
+    """Get the prompt_configs list from a CDT node."""
     async with get_client() as client:
         _, cdt_data = await _get_cdt_node(client, graph_id, name_or_id)
-    return {"node_name": cdt_data.get("node_name"), "prompts": cdt_data.get("prompts", {})}
+    return {
+        "node_name": cdt_data.get("node_name"),
+        "prompt_configs": cdt_data.get("prompt_configs", []),
+    }
 
 
 async def get_cdt_route_map(graph_id: int) -> dict[str, Any]:
@@ -553,30 +681,34 @@ async def get_cdt_route_map(graph_id: int) -> dict[str, Any]:
     routing: list[dict[str, Any]] = []
 
     for node in graph.get("classification_decision_table_node_list", []):
-        route_map: dict[str, str | None] = {}
+        route_map: dict[str, int | None] = {}
         for g in node.get("condition_groups", []):
-            route_map[g.get("group_name", "")] = g.get("next_node")
-        routing.append({
-            "node_type": "cdt",
-            "node_name": node.get("node_name"),
-            "node_id": node.get("id"),
-            "routing": route_map,
-            "default": node.get("default_next_node"),
-            "error": node.get("next_error_node"),
-        })
+            route_map[g.get("group_name", "")] = g.get("next_node_id")
+        routing.append(
+            {
+                "node_type": "cdt",
+                "node_name": node.get("node_name"),
+                "node_id": node.get("id"),
+                "routing": route_map,
+                "default": node.get("default_next_node_id"),
+                "error": node.get("next_error_node_id"),
+            }
+        )
 
     for node in graph.get("decision_table_node_list", []):
         route_map = {}
         for g in node.get("condition_groups", []):
-            route_map[g.get("group_name", "")] = g.get("next_node")
-        routing.append({
-            "node_type": "dt",
-            "node_name": node.get("node_name"),
-            "node_id": node.get("id"),
-            "routing": route_map,
-            "default": node.get("default_next_node"),
-            "error": node.get("next_error_node"),
-        })
+            route_map[g.get("group_name", "")] = g.get("next_node_id")
+        routing.append(
+            {
+                "node_type": "dt",
+                "node_name": node.get("node_name"),
+                "node_id": node.get("id"),
+                "routing": route_map,
+                "default": node.get("default_next_node_id"),
+                "error": node.get("next_error_node_id"),
+            }
+        )
 
     return {"graph_id": graph_id, "routing": routing}
 
@@ -590,7 +722,9 @@ async def patch_python_node(
     """Update Python node code. IMPORTANT: always include libraries or they will be wiped."""
     async with get_client() as client:
         endpoint, node_id, node_data = await _resolve_node(
-            client, graph_id, name_or_id,
+            client,
+            graph_id,
+            name_or_id,
             [("python_node_list", "pythonnodes")],
         )
         existing_libs = libraries
@@ -609,7 +743,9 @@ async def patch_webhook_node(
     """Update Webhook node handler code. Always include libraries to avoid wiping them."""
     async with get_client() as client:
         endpoint, node_id, node_data = await _resolve_node(
-            client, graph_id, name_or_id,
+            client,
+            graph_id,
+            name_or_id,
             [("webhook_trigger_node_list", "webhook-trigger-nodes")],
         )
         existing_libs = libraries
@@ -631,14 +767,16 @@ async def patch_code_agent_node(
     """Update Code Agent node fields. Only provided (non-None) fields are updated."""
     async with get_client() as client:
         endpoint, node_id, node_data = await _resolve_node(
-            client, graph_id, name_or_id,
+            client,
+            graph_id,
+            name_or_id,
             [("code_agent_node_list", "code-agent-nodes")],
         )
         payload: dict[str, Any] = {}
         if system_prompt is not None:
             payload["system_prompt"] = system_prompt
         if stream_handler_code is not None or libraries is not None:
-            existing_code = (node_data.get("python_code") or {})
+            existing_code = node_data.get("python_code") or {}
             new_code = dict(existing_code)
             if stream_handler_code is not None:
                 new_code["code"] = stream_handler_code
@@ -691,7 +829,9 @@ async def patch_node_metadata(
             metadata["position"] = position
         if color is not None:
             metadata["color"] = color
-        return await client.patch(f"/api/{endpoint}/{node_id}/", json={"metadata": metadata})
+        return await client.patch(
+            f"/api/{endpoint}/{node_id}/", json={"metadata": metadata}
+        )
 
 
 async def patch_start_variables(
@@ -705,34 +845,43 @@ async def patch_start_variables(
         if not start_nodes:
             raise ValueError(f"No start node found in graph {graph_id}.")
         node_id = start_nodes[0]["id"]
-        return await client.patch(f"/api/startnodes/{node_id}/", json={"variables": variables})
+        return await client.patch(
+            f"/api/startnodes/{node_id}/", json={"variables": variables}
+        )
 
 
 async def patch_cdt_node(
     graph_id: int,
     name_or_id: str | int,
-    pre_computation_code: str | None = None,
-    post_computation_code: str | None = None,
-    prompts: dict | None = None,
+    pre_python_code: dict | None = None,
+    post_python_code: dict | None = None,
+    prompt_configs: list[dict] | None = None,
     condition_groups: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Update CDT node fields. Only provided (non-None) fields are updated.
 
-    IMPORTANT: prompts must be a dict (not list). condition_groups items must NOT contain
-    'id' or 'classification_decision_table_node' fields — remove them before passing.
+    pre_python_code / post_python_code are nested code objects
+    ({code, entrypoint, libraries}). prompt_configs is a list of
+    {prompt_key, prompt_text, llm_config, output_schema, result_variable,
+    variable_mappings}. condition_groups items must NOT contain 'id' or
+    'classification_decision_table_node' fields — remove them before passing.
     """
     async with get_client() as client:
         cdt_id, _ = await _get_cdt_node(client, graph_id, name_or_id)
         payload: dict[str, Any] = {}
-        if pre_computation_code is not None:
-            payload["pre_computation_code"] = pre_computation_code
-        if post_computation_code is not None:
-            payload["post_computation_code"] = post_computation_code
-        if prompts is not None:
-            payload["prompts"] = prompts
+        if pre_python_code is not None:
+            payload["pre_python_code"] = pre_python_code
+        if post_python_code is not None:
+            payload["post_python_code"] = post_python_code
+        if prompt_configs is not None:
+            payload["prompt_configs"] = prompt_configs
         if condition_groups is not None:
             clean_groups = [
-                {k: v for k, v in g.items() if k not in ("id", "classification_decision_table_node")}
+                {
+                    k: v
+                    for k, v in g.items()
+                    if k not in ("id", "classification_decision_table_node")
+                }
                 for g in condition_groups
             ]
             payload["condition_groups"] = clean_groups
@@ -745,17 +894,20 @@ async def patch_dt_node(
     graph_id: int,
     name_or_id: str | int,
     condition_groups: list[dict],
-    default_next_node: str | None = None,
-    next_error_node: str | None = None,
+    default_next_node_id: int | None = None,
+    next_error_node_id: int | None = None,
 ) -> dict[str, Any]:
     """Update Decision Table node condition groups and routing.
 
+    default_next_node_id / next_error_node_id are node ids (ints).
     IMPORTANT: Each condition_group item MUST include 'conditions: []' key —
     the backend calls pop('conditions') and will error if missing.
     """
     async with get_client() as client:
         endpoint, node_id, _ = await _resolve_node(
-            client, graph_id, name_or_id,
+            client,
+            graph_id,
+            name_or_id,
             [("decision_table_node_list", "decision-table-node")],
         )
         safe_groups = [
@@ -763,10 +915,10 @@ async def patch_dt_node(
             for g in condition_groups
         ]
         payload: dict[str, Any] = {"condition_groups": safe_groups}
-        if default_next_node is not None:
-            payload["default_next_node"] = default_next_node
-        if next_error_node is not None:
-            payload["next_error_node"] = next_error_node
+        if default_next_node_id is not None:
+            payload["default_next_node_id"] = default_next_node_id
+        if next_error_node_id is not None:
+            payload["next_error_node_id"] = next_error_node_id
         return await client.patch(f"/api/{endpoint}/{node_id}/", json=payload)
 
 
@@ -804,7 +956,9 @@ async def init_flow_metadata(graph_id: int) -> dict[str, Any]:
                 if nid is not None:
                     id_to_name[nid] = name
                     id_to_endpoint[nid] = endpoint
-                    all_nodes.append({"id": nid, "name": name, "endpoint": endpoint, "data": node})
+                    all_nodes.append(
+                        {"id": nid, "name": name, "endpoint": endpoint, "data": node}
+                    )
 
         # Build adjacency from edge_list
         adjacency: dict[str, list[str]] = {}
@@ -868,16 +1022,22 @@ async def init_flow_metadata(graph_id: int) -> dict[str, Any]:
                 "size": {"width": 180, "height": 50},
                 "parentId": None,
             }
-            return await client.patch(f"/api/{endpoint}/{nid}/", json={"metadata": metadata})
+            return await client.patch(
+                f"/api/{endpoint}/{nid}/", json={"metadata": metadata}
+            )
 
-        results = await asyncio.gather(*[_patch_node(n) for n in all_nodes], return_exceptions=True)
+        results = await asyncio.gather(
+            *[_patch_node(n) for n in all_nodes], return_exceptions=True
+        )
 
     patched = sum(1 for r in results if not isinstance(r, Exception))
     summary_nodes = []
     for node_info in all_nodes:
         name = node_info["name"]
         x, y = node_positions.get(name, (0, 0))
-        summary_nodes.append({"name": name, "type": node_info["endpoint"], "position": {"x": x, "y": y}})
+        summary_nodes.append(
+            {"name": name, "type": node_info["endpoint"], "position": {"x": x, "y": y}}
+        )
 
     return {"patched": patched, "nodes": summary_nodes}
 
@@ -944,7 +1104,7 @@ async def test_flow(graph_id: int) -> dict[str, Any]:
     # CDT routing check
     for node in graph.get("classification_decision_table_node_list", []):
         groups = node.get("condition_groups", [])
-        routed = [g for g in groups if g.get("next_node")]
+        routed = [g for g in groups if g.get("next_node") or g.get("next_node_id")]
         if not routed:
             issues.append(
                 f"CDT node '{node.get('node_name')}' has no condition groups with a next_node."
@@ -953,7 +1113,7 @@ async def test_flow(graph_id: int) -> dict[str, Any]:
     # DT routing check
     for node in graph.get("decision_table_node_list", []):
         groups = node.get("condition_groups", [])
-        routed = [g for g in groups if g.get("next_node")]
+        routed = [g for g in groups if g.get("next_node") or g.get("next_node_id")]
         if not routed:
             issues.append(
                 f"DT node '{node.get('node_name')}' has no condition groups with a next_node."
@@ -982,13 +1142,16 @@ async def bulk_export_flows(flow_ids: list[int]) -> dict[str, Any]:
         return await client.post("/api/graphs/bulk-export/", json={"ids": flow_ids})
 
 
-async def import_flow(flow_data: dict[str, Any], preserve_uuids: bool = False) -> dict[str, Any]:
+async def import_flow(
+    flow_data: dict[str, Any], preserve_uuids: bool = False
+) -> dict[str, Any]:
     """Import a flow from a previously exported JSON bundle.
 
     Pass the dict you received from export_flow or bulk_export_flows as flow_data.
     Returns a summary of created/updated entities.
     """
     import json as _json
+
     file_bytes = _json.dumps(flow_data).encode()
     async with get_client() as client:
         return await client.post_multipart(

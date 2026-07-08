@@ -1,9 +1,11 @@
 """MCP tools for managing EpicStaff knowledge bases (RAG source collections)."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from epicstaff_mcp.client import get_client
+from epicstaff_mcp.exceptions import EpicStaffAPIError
 
 
 async def list_source_collections(limit: int = 100, offset: int = 0) -> dict[str, Any]:
@@ -14,37 +16,44 @@ async def list_source_collections(limit: int = 100, offset: int = 0) -> dict[str
         )
 
 
-async def create_source_collection(
-    collection_name: str,
-    embedding_config: int | None = None,
-) -> dict[str, Any]:
+async def create_source_collection(collection_name: str) -> dict[str, Any]:
     """Create a new knowledge collection for RAG."""
-    payload: dict[str, Any] = {"collection_name": collection_name}
-    if embedding_config is not None:
-        payload["embedding_config"] = embedding_config
     async with get_client() as client:
-        return await client.post("/api/source-collections/", json=payload)
-
-
-async def add_document(
-    collection_id: int,
-    content: str,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Add a document to a knowledge collection."""
-    payload: dict[str, Any] = {"collection": collection_id, "content": content}
-    if metadata:
-        payload["metadata"] = metadata
-    async with get_client() as client:
-        return await client.post("/api/documents/", json=payload)
+        return await client.post(
+            "/api/source-collections/", json={"collection_name": collection_name}
+        )
 
 
 async def trigger_rag_indexing(collection_id: int) -> dict[str, Any]:
-    """Trigger embedding computation and vector indexing for a collection."""
+    """Trigger embedding computation and vector indexing for a collection.
+
+    The indexing endpoint requires the specific rag_id + rag_type, not just the
+    collection id, so this resolves the collection's configured RAG(s) first and
+    triggers indexing for each one.
+    """
     async with get_client() as client:
-        return await client.post(
-            "/api/process-rag-indexing/", json={"collection_id": collection_id}
-        )
+        collection = await client.get(f"/api/source-collections/{collection_id}/")
+        rag_configs = collection.get("rag_configurations", [])
+        if not rag_configs:
+            raise EpicStaffAPIError(
+                status_code=400,
+                detail=(
+                    f"Collection {collection_id} has no RAG configuration to index. "
+                    "Create one with create_naive_rag or create_graph_rag first."
+                ),
+            )
+        results = [
+            await client.post(
+                "/api/process-rag-indexing/",
+                json={
+                    "collection_id": collection_id,
+                    "rag_id": rag.get("rag_id"),
+                    "rag_type": rag.get("rag_type"),
+                },
+            )
+            for rag in rag_configs
+        ]
+    return {"indexed": results, "count": len(results)}
 
 
 async def get_source_collection(collection_id: int) -> dict[str, Any]:
@@ -55,17 +64,14 @@ async def get_source_collection(collection_id: int) -> dict[str, Any]:
 
 async def update_source_collection(
     collection_id: int,
-    collection_name: str | None = None,
-    embedding_config: int | None = None,
+    collection_name: str,
 ) -> dict[str, Any]:
-    """Update a knowledge collection by its ID."""
-    payload: dict[str, Any] = {}
-    if collection_name is not None:
-        payload["collection_name"] = collection_name
-    if embedding_config is not None:
-        payload["embedding_config"] = embedding_config
+    """Update a knowledge collection's name by its ID."""
     async with get_client() as client:
-        return await client.patch(f"/api/source-collections/{collection_id}/", json=payload)
+        return await client.patch(
+            f"/api/source-collections/{collection_id}/",
+            json={"collection_name": collection_name},
+        )
 
 
 async def delete_source_collection(collection_id: int) -> dict[str, Any]:
@@ -80,7 +86,7 @@ async def list_documents(
     """List documents, optionally filtered by collection ID."""
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     if collection_id is not None:
-        params["collection"] = collection_id
+        params["collection_id"] = collection_id
     async with get_client() as client:
         return await client.get("/api/documents/", params=params)
 
@@ -100,7 +106,9 @@ async def copy_source_collection(
     if new_collection_name is not None:
         payload["new_collection_name"] = new_collection_name
     async with get_client() as client:
-        return await client.post(f"/api/source-collections/{collection_id}/copy/", json=payload)
+        return await client.post(
+            f"/api/source-collections/{collection_id}/copy/", json=payload
+        )
 
 
 async def list_collection_documents(
@@ -125,7 +133,9 @@ async def get_document(document_id: int) -> dict[str, Any]:
 async def bulk_delete_documents(document_ids: list[int]) -> dict[str, Any]:
     """Delete multiple documents by their IDs in a single request."""
     async with get_client() as client:
-        return await client.post("/api/documents/bulk-delete/", json={"ids": document_ids})
+        return await client.post(
+            "/api/documents/bulk-delete/", json={"document_ids": document_ids}
+        )
 
 
 async def upload_document_file(
@@ -140,7 +150,7 @@ async def upload_document_file(
     async with get_client() as client:
         return await client.post_multipart(
             f"/api/documents/source-collection/{collection_id}/upload/",
-            files={"file": (filename, file_bytes)},
+            files=[("files", (filename, file_bytes))],
         )
 
 
@@ -148,26 +158,17 @@ async def upload_document_file(
 async def list_naive_rag_for_collection(collection_id: int) -> dict[str, Any]:
     """List Naive RAG configurations associated with a source collection."""
     async with get_client() as client:
-        return await client.get(f"/api/naive-rag/collections/{collection_id}/naive-rag/")
+        return await client.get(
+            f"/api/naive-rag/collections/{collection_id}/naive-rag/"
+        )
 
 
-async def create_naive_rag(
-    collection_id: int,
-    chunk_size: int | None = None,
-    chunk_overlap: int | None = None,
-    chunk_strategy: str | None = None,
-) -> dict[str, Any]:
-    """Create a Naive RAG configuration for a source collection."""
-    payload: dict[str, Any] = {"source_collection": collection_id}
-    if chunk_size is not None:
-        payload["chunk_size"] = chunk_size
-    if chunk_overlap is not None:
-        payload["chunk_overlap"] = chunk_overlap
-    if chunk_strategy is not None:
-        payload["chunk_strategy"] = chunk_strategy
+async def create_naive_rag(collection_id: int, embedder_id: int) -> dict[str, Any]:
+    """Create (or update) the Naive RAG configuration for a source collection."""
     async with get_client() as client:
         return await client.post(
-            f"/api/naive-rag/collections/{collection_id}/naive-rag/", json=payload
+            f"/api/naive-rag/collections/{collection_id}/naive-rag/",
+            json={"embedder_id": embedder_id},
         )
 
 
@@ -187,7 +188,9 @@ async def delete_naive_rag(naive_rag_id: int) -> dict[str, str]:
 async def init_naive_rag_document_configs(naive_rag_id: int) -> dict[str, Any]:
     """Initialize document configs for a Naive RAG (creates configs for all documents)."""
     async with get_client() as client:
-        return await client.post(f"/api/naive-rag/{naive_rag_id}/document-configs/initialize/")
+        return await client.post(
+            f"/api/naive-rag/{naive_rag_id}/document-configs/initialize/"
+        )
 
 
 async def list_naive_rag_document_configs(naive_rag_id: int) -> dict[str, Any]:
@@ -196,7 +199,9 @@ async def list_naive_rag_document_configs(naive_rag_id: int) -> dict[str, Any]:
         return await client.get(f"/api/naive-rag/{naive_rag_id}/document-configs/")
 
 
-async def get_naive_rag_document_config(naive_rag_id: int, config_id: int) -> dict[str, Any]:
+async def get_naive_rag_document_config(
+    naive_rag_id: int, config_id: int
+) -> dict[str, Any]:
     """Get a specific document config within a Naive RAG."""
     async with get_client() as client:
         return await client.get(
@@ -210,30 +215,27 @@ async def update_naive_rag_document_config(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     chunk_strategy: str | None = None,
-    is_active: bool | None = None,
+    additional_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Update a Naive RAG document config."""
-    async with get_client() as client:
-        current = await client.get(
-            f"/api/naive-rag/{naive_rag_id}/document-configs/{config_id}/"
-        )
-    payload = dict(current)
-    updates = {
-        "chunk_size": chunk_size,
-        "chunk_overlap": chunk_overlap,
-        "chunk_strategy": chunk_strategy,
-        "is_active": is_active,
-    }
-    for k, v in updates.items():
-        if v is not None:
-            payload[k] = v
+    """Update a Naive RAG document config. Only provided fields are changed."""
+    payload: dict[str, Any] = {}
+    if chunk_size is not None:
+        payload["chunk_size"] = chunk_size
+    if chunk_overlap is not None:
+        payload["chunk_overlap"] = chunk_overlap
+    if chunk_strategy is not None:
+        payload["chunk_strategy"] = chunk_strategy
+    if additional_params is not None:
+        payload["additional_params"] = additional_params
     async with get_client() as client:
         return await client.put(
             f"/api/naive-rag/{naive_rag_id}/document-configs/{config_id}/", json=payload
         )
 
 
-async def delete_naive_rag_document_config(naive_rag_id: int, config_id: int) -> dict[str, str]:
+async def delete_naive_rag_document_config(
+    naive_rag_id: int, config_id: int
+) -> dict[str, str]:
     """Delete a Naive RAG document config by ID."""
     async with get_client() as client:
         await client.delete(
@@ -244,12 +246,30 @@ async def delete_naive_rag_document_config(naive_rag_id: int, config_id: int) ->
 
 async def bulk_update_naive_rag_document_configs(
     naive_rag_id: int,
-    configs: list[dict[str, Any]],
+    config_ids: list[int],
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+    chunk_strategy: str | None = None,
+    additional_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bulk update multiple document configs for a Naive RAG. Each item must include 'id'."""
+    """Bulk update document configs for a Naive RAG.
+
+    The given chunk settings are applied to every config in ``config_ids``.
+    At least one of chunk_size / chunk_overlap / chunk_strategy / additional_params
+    must be provided.
+    """
+    payload: dict[str, Any] = {"config_ids": config_ids}
+    if chunk_size is not None:
+        payload["chunk_size"] = chunk_size
+    if chunk_overlap is not None:
+        payload["chunk_overlap"] = chunk_overlap
+    if chunk_strategy is not None:
+        payload["chunk_strategy"] = chunk_strategy
+    if additional_params is not None:
+        payload["additional_params"] = additional_params
     async with get_client() as client:
         return await client.put(
-            f"/api/naive-rag/{naive_rag_id}/document-configs/bulk-update/", json=configs
+            f"/api/naive-rag/{naive_rag_id}/document-configs/bulk-update/", json=payload
         )
 
 
@@ -261,7 +281,7 @@ async def bulk_delete_naive_rag_document_configs(
     async with get_client() as client:
         return await client.post(
             f"/api/naive-rag/{naive_rag_id}/document-configs/bulk-delete/",
-            json={"ids": config_ids},
+            json={"config_ids": config_ids},
         )
 
 
@@ -293,11 +313,87 @@ async def list_naive_rag_document_chunks(
         )
 
 
+# Available RAGs
+async def list_available_rags(collection_id: int) -> dict[str, Any]:
+    """List the RAG configurations available (indexable) for a source collection."""
+    async with get_client() as client:
+        return await client.get(
+            f"/api/source-collections/{collection_id}/available-rags/"
+        )
+
+
+# Graph RAG
+async def create_graph_rag(
+    collection_id: int,
+    embedder_id: int,
+    llm_id: int,
+) -> dict[str, Any]:
+    """Create (or update) the Graph RAG configuration for a source collection.
+
+    Adds all documents in the collection. ``llm_id`` is the LLM config used for
+    entity extraction.
+    """
+    async with get_client() as client:
+        return await client.post(
+            f"/api/graph-rag/collections/{collection_id}/graph-rag/",
+            json={"embedder_id": embedder_id, "llm_id": llm_id},
+        )
+
+
+async def get_graph_rag(graph_rag_id: int) -> dict[str, Any]:
+    """Get a Graph RAG configuration (with index config and documents) by ID."""
+    async with get_client() as client:
+        return await client.get(f"/api/graph-rag/{graph_rag_id}/")
+
+
+async def delete_graph_rag(graph_rag_id: int) -> dict[str, Any]:
+    """Delete a Graph RAG configuration by ID."""
+    async with get_client() as client:
+        return await client.delete(f"/api/graph-rag/{graph_rag_id}/")
+
+
+async def update_graph_rag_index_config(
+    graph_rag_id: int,
+    file_type: str | None = None,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+    chunk_strategy: str | None = None,
+    entity_types: list[str] | None = None,
+    max_gleanings: int | None = None,
+    max_cluster_size: int | None = None,
+) -> dict[str, Any]:
+    """Update a Graph RAG index configuration. Only provided fields are changed.
+
+    At least one field must be provided.
+    """
+    payload: dict[str, Any] = {}
+    if file_type is not None:
+        payload["file_type"] = file_type
+    if chunk_size is not None:
+        payload["chunk_size"] = chunk_size
+    if chunk_overlap is not None:
+        payload["chunk_overlap"] = chunk_overlap
+    if chunk_strategy is not None:
+        payload["chunk_strategy"] = chunk_strategy
+    if entity_types is not None:
+        payload["entity_types"] = entity_types
+    if max_gleanings is not None:
+        payload["max_gleanings"] = max_gleanings
+    if max_cluster_size is not None:
+        payload["max_cluster_size"] = max_cluster_size
+    async with get_client() as client:
+        return await client.put(
+            f"/api/graph-rag/{graph_rag_id}/index-config/", json=payload
+        )
+
+
 # Labels
 async def list_labels(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List all labels."""
     async with get_client() as client:
-        return await client.get("/api/labels/", params={"limit": limit, "offset": offset})
+        return await client.get(
+            "/api/labels/", params={"limit": limit, "offset": offset}
+        )
 
 
 async def create_label(name: str, color: str | None = None) -> dict[str, Any]:
