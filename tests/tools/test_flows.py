@@ -10,6 +10,7 @@ import respx
 
 from epicstaff_mcp.exceptions import EpicStaffAPIError
 from epicstaff_mcp.tools.flows import (
+    add_agent_node_task,
     add_conditional_edge,
     add_edge,
     add_node,
@@ -158,6 +159,117 @@ async def test_add_node_sends_graph_id():
 async def test_add_node_invalid_type_raises():
     with pytest.raises(EpicStaffAPIError, match="Unknown node_type"):
         await add_node(flow_id=1, node_type="invalidnode", config={})
+
+
+@respx.mock
+async def test_add_node_tasknode_posts_to_tasknodes():
+    route = respx.post(f"{BASE_URL}api/tasknodes/").mock(
+        return_value=httpx.Response(201, json={"id": 20})
+    )
+    await add_node(
+        flow_id=3,
+        node_type="tasknode",
+        node_name="Order Intake",
+        config={
+            "agent_definition": 5,
+            "surface_list": [8],
+            "instructions": "Extract the order as JSON.",
+            "input_map": {"question": "variables.intake.question"},
+            "output_variable_path": "variables.order",
+        },
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["graph"] == 3
+    assert body["agent_definition"] == 5
+    assert body["surface_list"] == [8]
+    assert body["instructions"] == "Extract the order as JSON."
+    assert body["node_name"] == "Order Intake"
+    assert "ports" not in body
+
+
+@respx.mock
+async def test_add_node_agentnode_sends_inline_tasks():
+    route = respx.post(f"{BASE_URL}api/agentnodes/").mock(
+        return_value=httpx.Response(201, json={"id": 21})
+    )
+    tasks = [
+        {
+            "name": "understand",
+            "order": 0,
+            "instructions": "Understand.",
+            "temp_id": "a",
+        },
+        {
+            "name": "respond",
+            "order": 1,
+            "instructions": "Respond.",
+            "context_task_temp_ids": ["a"],
+        },
+    ]
+    await add_node(
+        flow_id=3,
+        node_type="agentnode",
+        config={"agent_definition": 5, "surface_list": [8, 9], "tasks": tasks},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["graph"] == 3
+    assert body["tasks"] == tasks
+    assert body["surface_list"] == [8, 9]
+
+
+@respx.mock
+async def test_add_node_agent_definition_id_alias():
+    route = respx.post(f"{BASE_URL}api/tasknodes/").mock(
+        return_value=httpx.Response(201, json={"id": 22})
+    )
+    await add_node(flow_id=3, node_type="tasknode", config={"agent_definition_id": 7})
+    body = json.loads(route.calls.last.request.content)
+    assert body["agent_definition"] == 7
+    assert "agent_definition_id" not in body
+
+
+@respx.mock
+async def test_add_node_scheduletriggernode_sends_schedule_block():
+    route = respx.post(f"{BASE_URL}api/schedule-trigger-nodes/").mock(
+        return_value=httpx.Response(201, json={"id": 23})
+    )
+    schedule = {
+        "run_mode": "repeat",
+        "timezone": "UTC",
+        "start_date_time": "2026-07-10T09:00:00",
+        "interval": {"every": 1, "unit": "hours", "weekdays": []},
+        "end": {"type": "never"},
+    }
+    await add_node(
+        flow_id=3,
+        node_type="scheduletriggernode",
+        node_name="Daily Digest",
+        config={"is_active": True, "schedule": schedule},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["graph"] == 3
+    assert body["node_name"] == "Daily Digest"
+    assert body["schedule"] == schedule
+    assert body["is_active"] is True
+
+
+@respx.mock
+async def test_add_agent_node_task_posts_with_agent_node_parent():
+    route = respx.post(f"{BASE_URL}api/agentnodetasks/").mock(
+        return_value=httpx.Response(201, json={"id": 30})
+    )
+    await add_agent_node_task(
+        agent_node_id=21,
+        name="review",
+        order=2,
+        instructions="Review the report.",
+        context_tasks=[28, 29],
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["agent_node"] == 21
+    assert "graph" not in body
+    assert body["order"] == 2
+    assert body["context_tasks"] == [28, 29]
 
 
 @respx.mock

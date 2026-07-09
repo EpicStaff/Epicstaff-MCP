@@ -22,6 +22,11 @@ NODE_TYPE_TO_ENDPOINT: dict[str, str] = {
     "classificationdecisiontablenode": "classification-decision-table-node",
     "telegramtriggernode": "telegram-trigger-nodes",
     "webhooktriggernode": "webhook-trigger-nodes",
+    "scheduletriggernode": "schedule-trigger-nodes",
+    # CrewAI-replacement nodes — one AgentDefinition run by the standalone agent
+    # microservice (no crew). AgentNode = ordered list of sub-tasks; TaskNode = single task.
+    "agentnode": "agentnodes",
+    "tasknode": "tasknodes",
 }
 
 
@@ -113,12 +118,16 @@ async def add_node(
     node_type must be one of: crewnode, pythonnode, startnode, endnode,
     subgraphnode, codeagentnode, fileextractornode, audiotranscriptionnode,
     decisiontablenode, classificationdecisiontablenode, telegramtriggernode,
-    webhooktriggernode
+    webhooktriggernode, scheduletriggernode, agentnode, tasknode
 
     Prefer classificationdecisiontablenode (CDT) over decisiontablenode (DT):
     CDT is a deterministic superset (routes on a group `expression` with no LLM
     unless a group sets `prompt_id`) and avoids the DT viewset's crash on stray
     fields. Wire CDT routing with patch_cdt_node (next_node_id per group).
+
+    agentnode / tasknode run a single AgentDefinition on the standalone agent
+    microservice (the CrewAI replacement) — no crew. They attach reusable Surfaces
+    (tool/knowledge/storage bundles). Never send a `ports` field for these.
 
     node_name: optional display name for the node.
 
@@ -128,6 +137,16 @@ async def add_node(
       startnode:  {variables: dict}
       endnode:    {output_map: dict}
       subgraphnode: {subgraph: int (or subgraph_id alias), input_map, output_variable_path}
+      tasknode:   {agent_definition: int (or agent_definition_id alias), surface_list: [int],
+                   inline_surface: dict, instructions: str (the prompt), output_schema: dict,
+                   remember_output: bool, input_map: dict, output_variable_path: str}
+      agentnode:  {agent_definition, surface_list, inline_surface, input_map,
+                   output_variable_path, tasks: [{name, order, instructions,
+                   temp_id?, context_task_temp_ids?}]}  # ordered sub-tasks, inline
+      scheduletriggernode: {node_name (REQUIRED — no auto-gen), is_active: bool,
+                   schedule: {run_mode: "once"|"repeat", timezone, start_date_time,
+                   interval: {every, unit, weekdays}, end: {type, ...}}}  # is itself an
+                   entrypoint — wire outgoing edges FROM it
     """
     endpoint = NODE_TYPE_TO_ENDPOINT.get(node_type.lower())
     if not endpoint:
@@ -145,6 +164,14 @@ async def add_node(
         and "subgraph_id" in normalized
     ):
         normalized["subgraph"] = normalized.pop("subgraph_id")
+    # agent/task nodes reference an AgentDefinition via `agent_definition`; accept
+    # the `agent_definition_id` alias for the same reason.
+    if (
+        node_type.lower() in ("agentnode", "tasknode")
+        and "agent_definition" not in normalized
+        and "agent_definition_id" in normalized
+    ):
+        normalized["agent_definition"] = normalized.pop("agent_definition_id")
     payload: dict[str, Any] = {"graph": flow_id, **normalized}
     if node_name is not None:
         payload["node_name"] = node_name
@@ -186,6 +213,37 @@ async def delete_node(flow_id: int, node_id: int, node_type: str) -> dict[str, s
     async with get_client() as client:
         await client.delete(f"/api/{endpoint}/{node_id}/")
     return {"message": f"Node {node_id} ({node_type}) deleted successfully"}
+
+
+async def add_agent_node_task(
+    agent_node_id: int,
+    name: str,
+    order: int,
+    instructions: str = "",
+    output_schema: dict[str, Any] | None = None,
+    context_tasks: list[int] | None = None,
+) -> dict[str, Any]:
+    """Add a sub-task to an existing AgentNode.
+
+    AgentNode sub-tasks are usually created inline via add_node("agentnode",
+    {tasks: [...]}). Use this to append a task to an AgentNode that already exists.
+
+    order must be unique within the AgentNode. context_tasks is a list of existing
+    AgentNodeTask ids (same AgentNode, each with a strictly lower order) whose output
+    is injected as context for this task.
+    """
+    payload: dict[str, Any] = {
+        "agent_node": agent_node_id,
+        "name": name,
+        "order": order,
+        "instructions": instructions,
+    }
+    if output_schema is not None:
+        payload["output_schema"] = output_schema
+    if context_tasks:
+        payload["context_tasks"] = context_tasks
+    async with get_client() as client:
+        return await client.post("/api/agentnodetasks/", json=payload)
 
 
 async def list_edges(flow_id: int) -> dict[str, Any]:
