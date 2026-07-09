@@ -13,8 +13,20 @@ from epicstaff_mcp.tools.tools import (
     create_python_tool,
     delete_tool,
     list_tools,
+    update_python_tool,
 )
+from epicstaff_mcp.variable_conversion import args_schema_to_variables
 from tests.conftest import BASE_URL
+
+PRICE_ARGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "width": {"type": "number", "description": "Machine width in meters"},
+        "origin": {"type": "string", "description": "Pick-up city"},
+        "make_model": {"type": "string", "description": "Machine make and model"},
+    },
+    "required": ["width", "origin"],
+}
 
 MCP_TOOL = {
     "id": 1,
@@ -101,3 +113,59 @@ async def test_create_python_tool():
         code="def main(): pass",
     )
     assert result["name"] == "Data Formatter"
+
+
+def test_args_schema_to_variables_marks_required_and_types():
+    variables = args_schema_to_variables(PRICE_ARGS_SCHEMA)
+    by_name = {v["name"]: v for v in variables}
+    assert set(by_name) == {"width", "origin", "make_model"}
+    assert by_name["width"]["type"] == "number"
+    assert by_name["width"]["required"] is True
+    assert by_name["origin"]["required"] is True
+    assert by_name["make_model"]["required"] is False
+    assert all(v["input_type"] == "agent_input" for v in variables)
+
+
+@respx.mock
+async def test_create_python_tool_sends_variables_not_args_schema():
+    route = respx.post(f"{BASE_URL}api/python-code-tool/").mock(
+        return_value=httpx.Response(201, json=PYTHON_TOOL)
+    )
+    await create_python_tool(
+        name="Price Tool",
+        description="Prices a shipment",
+        args_schema=PRICE_ARGS_SCHEMA,
+        code="def main(width, origin): return ''",
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert "args_schema" not in body
+    names = {v["name"] for v in body["variables"]}
+    assert names == {"width", "origin", "make_model"}
+
+
+@respx.mock
+async def test_create_python_tool_variables_override_wins():
+    route = respx.post(f"{BASE_URL}api/python-code-tool/").mock(
+        return_value=httpx.Response(201, json=PYTHON_TOOL)
+    )
+    explicit = [{"name": "x", "input_type": "agent_input", "required": True, "type": "string"}]
+    await create_python_tool(
+        name="Override Tool",
+        description="d",
+        args_schema=PRICE_ARGS_SCHEMA,
+        code="def main(x): return x",
+        variables=explicit,
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["variables"] == explicit
+
+
+@respx.mock
+async def test_update_python_tool_converts_args_schema_to_variables():
+    route = respx.patch(f"{BASE_URL}api/python-code-tool/2/").mock(
+        return_value=httpx.Response(200, json=PYTHON_TOOL)
+    )
+    await update_python_tool(tool_id=2, args_schema=PRICE_ARGS_SCHEMA)
+    body = json.loads(route.calls.last.request.content)
+    assert "args_schema" not in body
+    assert {v["name"] for v in body["variables"]} == {"width", "origin", "make_model"}

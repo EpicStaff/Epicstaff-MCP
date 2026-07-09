@@ -5,6 +5,7 @@ from typing import Any
 
 from epicstaff_mcp.client import get_client
 from epicstaff_mcp.exceptions import EpicStaffAPIError
+from epicstaff_mcp.variable_conversion import args_schema_to_variables
 
 
 async def list_tools(limit: int = 100, offset: int = 0) -> dict[str, Any]:
@@ -65,17 +66,26 @@ async def create_python_tool(
     code: str,
     entrypoint: str = "main",
     libraries: list[str] | None = None,
+    variables: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Add a new Python code tool.
 
-    args_schema: JSON Schema dict defining the tool's input parameters
+    args_schema: JSON Schema dict defining the tool's input parameters. Its
+        top-level ``properties``/``required`` are converted into the EpicStaff
+        ``variables`` the backend actually stores (each an ``agent_input``
+        field). Without these, an agent has no argument schema and cannot call
+        the tool.
+    variables: optional pre-built variables list; overrides ``args_schema`` when
+        given (use for exact control over input_type / nested shapes).
     code: Python code containing the entrypoint function
     libraries: pip-installable packages required by the code
     """
     payload: dict[str, Any] = {
         "name": name,
         "description": description,
-        "args_schema": args_schema,
+        "variables": variables
+        if variables is not None
+        else args_schema_to_variables(args_schema),
         "python_code": {
             "code": code,
             "entrypoint": entrypoint,
@@ -119,13 +129,22 @@ async def update_python_tool(
     code: str | None = None,
     entrypoint: str | None = None,
     libraries: list[str] | None = None,
+    variables: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Update one or more fields of an existing Python code tool."""
+    """Update one or more fields of an existing Python code tool.
+
+    args_schema is converted into the backend ``variables`` list (the field
+    that actually drives the agent-facing argument schema). Pass ``variables``
+    directly to override the conversion.
+    """
     payload: dict[str, Any] = {}
+    if variables is not None:
+        payload["variables"] = variables
+    elif args_schema is not None:
+        payload["variables"] = args_schema_to_variables(args_schema)
     for key, val in [
         ("name", name),
         ("description", description),
-        ("args_schema", args_schema),
     ]:
         if val is not None:
             payload[key] = val
