@@ -97,7 +97,7 @@ These rules encode hard-won lessons from production issues. Violating any causes
 
 3. **`patch_python_node` and `patch_webhook_node` MUST always include `libraries`.** Omitting `libraries` wipes the existing list, causing silent import failures at runtime.
 
-4. **CDT routing is metadata-based, NOT edge-based.** `add_edge` on a CDT output does nothing. Wire targets via `patch_dt_node(..., condition_groups=[{"group_name": ..., "next_node": "<name>", "conditions": [...]}])`.
+4. **CDT/DT routing is metadata-based, NOT edge-based.** `add_edge` on a CDT/DT output does nothing. Wire each group by its target's **numeric `next_node_id`** via `patch_cdt_node` (CDT) or `patch_dt_node` (DT), and set `default_next_node_id` + `next_error_node_id`. Passing a `next_node` **name** instead crashes the backend (500 / server disconnect) — always route by id.
 
 5. **CDT `prompts` must be a dict, not a list.** `converter_service.py` calls `.items()` — passing a list crashes the crew at runtime.
 
@@ -110,6 +110,23 @@ These rules encode hard-won lessons from production issues. Violating any causes
 9. **Python nodes require `def main(...)` as the entrypoint.** The crew executor calls it with `input_map` keys as kwargs. Code without `def main` fails with `name 'main' is not defined`.
 
 10. **`output_variable_path` for webhook trigger is always `"variables"`.** The runtime forces it — the handler's return dict merges into `variables` wholesale.
+
+11. **CDT expressions use dot-notation against `variables`, NOT subscript.** `variables.routing.category == "hr"` works; `variables['routing']['category']` raises `'types.SimpleNamespace' object is not subscriptable` at runtime.
+
+12. **CDT condition groups must NOT include a `group_type` field.** The viewset rejects unknown keys and crashes. Send only `group_name`, `expression`, `next_node_id` (plus `conditions: []`).
+
+13. **A conditional edge's `main()` must return the string `"NodeName #id"`** (e.g. `"Escalation #76"`). A bare name silently routes to graph end; an int errors with "output should be a string".
+
+14. **UI saves can drop CDT group `next_node_id` (routing silently wiped).** After any UI edit of a flow containing CDTs, re-verify with `get_cdt_route_map` and re-patch the groups.
+
+15. **Subgraph I/O is fragile — use flat vars + a scoped output path.** Child subflows should read/write FLAT top-level vars (nested `input_map` keys do not reach `variables.input.*`), and the parent `subgraphnode` must set a SCOPED `output_variable_path` (e.g. `variables.live`) — never `"variables"`, which clobbers the whole parent dict.
+
+---
+
+## Related skills
+
+- **`epicstaff-channels`** — receiving from / replying to Telegram (messages, inline buttons, `callback_query`), webhooks, and file/voice inputs. There is no built-in reply node; you build one.
+- **`epicstaff-state`** — persisting data across sessions / per user. Python-node storage is path-locked to `sessions/<id>/` until you attach a folder via `attach_storage_to_flow`.
 
 ---
 
