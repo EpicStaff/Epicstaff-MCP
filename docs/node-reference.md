@@ -8,10 +8,10 @@ Reference for all node types supported by EpicStaff flows.
 |---|---|---|---|
 | `startnode` | `startnodes` | `start_node_list` | Entry point of a flow; defines input variables |
 | `endnode` | `endnodes` | `end_node_list` | Terminal node; maps outputs back to the session |
-| `crewnode` | `crewnodes` | `crew_node_list` | Runs a CrewAI crew (agents + tasks) |
+| `crewnode` | `crewnodes` | `crew_node_list` | **DEPRECATED** (slated for removal) — runs a CrewAI crew. Prefer `agentnode`/`tasknode`. |
 | `pythonnode` | `pythonnodes` | `python_node_list` | Executes arbitrary Python code in the sandbox |
 | `subgraphnode` | `subgraph-nodes` | `subgraph_node_list` | Embeds another flow as a nested sub-flow |
-| `codeagentnode` | `code-agent-nodes` | `code_agent_node_list` | An LLM-backed agent with a system prompt and optional stream-handler code |
+| `codeagentnode` | `code-agent-nodes` | `code_agent_node_list` | **DEPRECATED** (slated for removal) — LLM agent with a system prompt. Prefer `agentnode`/`tasknode`. |
 | `fileextractornode` | `file-extractor-nodes` | `file_extractor_node_list` | Extracts text/data from uploaded files |
 | `audiotranscriptionnode` | `audio-transcription-nodes` | `audio_transcription_node_list` | Transcribes audio to text |
 | `decisiontablenode` | `decision-table-node` | `decision_table_node_list` | Routes execution based on condition groups (Decision Table) |
@@ -62,6 +62,8 @@ Additional node kinds returned in the graph response (read-only / internal):
 
 ### `crewnode`
 
+> **⚠ Deprecated — slated for removal.** Prefer an `agentnode` (one agent with ordered inline tasks) on the standalone agent microservice, which replaces crew. Still runs; `add_node`/`create_flow_from_spec` emit a deprecation warning.
+
 ```json
 {
   "graph": 42,
@@ -95,6 +97,8 @@ Additional node kinds returned in the graph response (read-only / internal):
 `python_code.code` must define the entrypoint function. `libraries` lists pip packages to install.
 
 ### `codeagentnode`
+
+> **⚠ Deprecated — slated for removal.** Prefer an `agentnode` (ordered inline tasks) or `tasknode` (single task). Still runs; `add_node`/`create_flow_from_spec` emit a deprecation warning.
 
 ```json
 {

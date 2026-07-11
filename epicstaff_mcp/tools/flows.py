@@ -35,6 +35,34 @@ NODE_TYPE_TO_ENDPOINT: dict[str, str] = {
     "tasknode": "tasknodes",
 }
 
+# Deprecated node types — still executed by the current EpicStaff, but slated for
+# removal in favor of the standalone-agent primitives (agentnode / tasknode). Creation
+# is NOT blocked; callers get a soft warning steering them to the replacement.
+_DEPRECATION_REPLACEMENT = (
+    "Use agentnode (single agent with ordered inline tasks) or tasknode (one task) "
+    "instead — the standalone agent microservice that replaces it. Still runs in the "
+    "current EpicStaff but is slated for removal."
+)
+_DEPRECATED_NODE_TYPES: dict[str, str] = {
+    "codeagentnode": f"'codeagentnode' (Code Agent) is deprecated. {_DEPRECATION_REPLACEMENT}",
+    "crewnode": f"'crewnode' (Crew/Project) is deprecated. {_DEPRECATION_REPLACEMENT}",
+}
+# Same concept keyed by the DSL spec `type` discriminator (create_flow_from_spec).
+_DEPRECATED_SPEC_TYPES: dict[str, str] = {
+    "code_agent": f"'code_agent' (Code Agent) is deprecated. {_DEPRECATION_REPLACEMENT}",
+    "crew": f"'crew' (Crew/Project) is deprecated. {_DEPRECATION_REPLACEMENT}",
+}
+
+
+def _deprecation_note(node_type: str) -> str | None:
+    """Return the deprecation message for a node_type (add_node form), or None."""
+    return _DEPRECATED_NODE_TYPES.get((node_type or "").lower())
+
+
+def _spec_deprecation_note(spec_type: str) -> str | None:
+    """Return the deprecation message for a DSL spec `type`, or None."""
+    return _DEPRECATED_SPEC_TYPES.get((spec_type or "").lower())
+
 
 async def list_flows(
     limit: int = 100,
@@ -184,6 +212,11 @@ async def add_node(
     decisiontablenode, classificationdecisiontablenode, telegramtriggernode,
     webhooktriggernode, scheduletriggernode, agentnode, tasknode
 
+    DEPRECATED (still executes, slated for removal): `codeagentnode` (Code Agent)
+    and `crewnode` (Crew/Project). Prefer `agentnode` (single agent, ordered inline
+    tasks) or `tasknode` (one task) — the standalone agent microservice that replaces
+    them. Creating either still works but returns a `deprecation_warning`.
+
     Prefer classificationdecisiontablenode (CDT) over decisiontablenode (DT):
     CDT is a deterministic superset (routes on a group `expression` with no LLM
     unless a group sets `prompt_id`) and avoids the DT viewset's crash on stray
@@ -248,6 +281,9 @@ async def add_node(
         result = await client.post(f"/api/{endpoint}/", json=payload)
     if sync_metadata:
         await init_flow_metadata(flow_id)
+    note = _deprecation_note(node_type)
+    if note and isinstance(result, dict):
+        result = {**result, "deprecation_warning": note}
     return result
 
 

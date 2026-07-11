@@ -668,6 +668,29 @@ async def get_flow_spec_schema() -> dict[str, Any]:
     }
 
 
+def _deprecated_node_findings(parsed: FlowSpec) -> list[dict[str, Any]]:
+    """Warning findings for any deprecated node types (code_agent / crew) in the spec.
+
+    Advisory only (severity 'warning') — the flow still materializes; it steers new
+    builds toward agentnode/tasknode.
+    """
+    findings: list[dict[str, Any]] = []
+    for node in parsed.nodes:
+        note = flows._spec_deprecation_note(getattr(node, "type", ""))
+        if note:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "deprecated_node_type",
+                    "node": getattr(node, "name", None),
+                    "message": note,
+                    "fix": "Replace with an 'agent' node (ordered inline tasks) or a "
+                    "'task' node.",
+                }
+            )
+    return findings
+
+
 async def create_flow_from_spec(
     spec: dict[str, Any], auto_suffix: bool = False
 ) -> dict[str, Any]:
@@ -726,6 +749,7 @@ async def create_flow_from_spec(
     placeholder_findings = await _check_task_placeholders(parsed, entity_exists)
     resolved_name, name_conflict = await _resolve_flow_name(parsed.name, auto_suffix)
     preflight_findings = [*reference_findings, *placeholder_findings]
+    preflight_findings.extend(_deprecated_node_findings(parsed))
     if name_conflict is not None:
         preflight_findings.append(name_conflict)
     if any(f["severity"] == "error" for f in preflight_findings):

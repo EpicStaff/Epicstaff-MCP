@@ -133,15 +133,19 @@ These rules encode hard-won lessons from production issues. Violating any causes
 
 ## Section 3: Node Types Reference
 
-12 active node types. Do not use `llmnode` — it exists in the DB but has no UI panel and cannot be configured. Use `code-agent` for LLM-based reasoning.
+Do not use `llmnode` — it exists in the DB but has no UI panel and cannot be configured. For LLM-based reasoning use an **`agentnode`** (single agent with ordered inline tasks) or **`tasknode`** (one task) — the standalone agent microservice.
+
+> **Deprecated (still run, slated for removal):** `codeagentnode` (Code Agent) and `crewnode` (Crew/Project). Prefer `agentnode`/`tasknode`. Creating them via `add_node` returns a `deprecation_warning`; `create_flow_from_spec` emits a `deprecated_node_type` warning.
 
 | Display name | MCP `node_type` for `add_node` | Required config fields | Input port | Output port | Key gotchas |
 |---|---|---|---|---|---|
 | Start | `startnode` | `variables` JSON | none | `start-start` (single) | Patch via `patch_start_variables`. Must connect to at least one downstream node. |
 | End | `endnode` | `output_map` JSON | `end-in` (multi) | none | Only one end node per flow. Missing vars resolve to string `"not found"`. |
 | Python | `pythonnode` | `python_code.code`, `python_code.libraries`, `input_map`, `output_variable_path` | `python-in` (multi) | `python-out` (single) | Must have `def main(...)`. Always pass `libraries` when patching. |
-| Code Agent | `codeagentnode` | `system_prompt`, `llm_config_id`, `agent_mode` (`build`/`plan`), `input_map`, `output_variable_path` | `code-agent-in` (multi) | `code-agent-out` (single) | `libraries` applies to `stream_handler_code` only. `output_schema` triggers retry on mismatch. |
-| Project / Crew | `crewnode` | `crew` FK, `input_map`, `output_variable_path` | `project-in` (multi) | `project-out` (single) | Agent `tool_ids` PATCH is destructive — send all IDs. |
+| Code Agent | `codeagentnode` | `system_prompt`, `llm_config_id`, `agent_mode` (`build`/`plan`), `input_map`, `output_variable_path` | `code-agent-in` (multi) | `code-agent-out` (single) | **⚠ DEPRECATED — prefer `agentnode`/`tasknode`.** `libraries` applies to `stream_handler_code` only. `output_schema` triggers retry on mismatch. |
+| Project / Crew | `crewnode` | `crew` FK, `input_map`, `output_variable_path` | `project-in` (multi) | `project-out` (single) | **⚠ DEPRECATED — prefer `agentnode` (ordered inline tasks).** Agent `tool_ids` PATCH is destructive — send all IDs. |
+| Agent | `agentnode` | `agent_definition`, `tasks[]` (ordered), `input_map`, `output_variable_path`, optional `surface_list`/`inline_surface` | `agent-in` (multi) | `agent-out` (single) | **Preferred agent node** (standalone microservice, no crew). Task output is a plain string under `.message`; map end node to the path itself, not `.message`. Never send `ports`. |
+| Task | `tasknode` | `agent_definition`, `instructions`, `input_map`, `output_variable_path`, optional `output_schema`/`surface_list` | `task-in` (multi) | `task-out` (single) | Single-task variant of agentnode. Never send `ports`. |
 | Decision Table (DT) | `decisiontablenode` | `condition_groups[]`, `default_next_node_id`, `next_error_node_id` | `input` (input) | `decision-default`, `decision-error`, `decision-out-{group_name}` | **Avoid — prefer CDT.** Routing is metadata-only (`add_edge` does nothing); wire via `patch_dt_node`. Backend PATCH 500s on a stray `next_node` NAME (route by `next_node_id`). |
 | Classification Decision Table (CDT) | `classificationdecisiontablenode` | `condition_groups[]` (each `expression` + `next_node_id`), `default_next_node_id`, `next_error_node_id`; optional `prompts` | `input` | metadata routing | **Preferred brancher.** Deterministic superset of DT — routes on a group `expression` against `variables` with NO LLM unless a group sets `prompt_id`. Wire via `patch_cdt_node`. |
 | Subgraph | `subgraphnode` | `subgraph` FK, `input_map`, `output_variable_path` | `subgraph-in` (multi) | `subgraph-out` (single) | Circular references detected and blocked. |
@@ -156,8 +160,8 @@ These rules encode hard-won lessons from production issues. Violating any causes
 | Requirement | Pick |
 |---|---|
 | Deterministic transform, external HTTP, data reshaping | `python` |
-| Agent reasoning, tool use, file work, EpicChat-facing | `code-agent` |
-| Multi-agent collaboration with specialized roles | `project` (crew) |
+| Agent reasoning, tool use, file work, EpicChat-facing | `agentnode` (ordered inline tasks) or `tasknode` — *not* `code-agent` (deprecated) |
+| Multi-agent / multi-step role work | `agentnode` with ordered `tasks[]` — *not* `project`/`crew` (deprecated) |
 | Branch to N nodes by rule | `classificationdecisiontablenode` (CDT — preferred; avoid plain `decisiontablenode`) |
 | Branch by Python predicate (2 paths) | `edge` (conditional edge) |
 | External HTTP event starts the flow | `webhook-trigger` |

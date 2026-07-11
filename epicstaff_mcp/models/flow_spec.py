@@ -114,7 +114,13 @@ class PythonNodeSpec(_IoNodeSpec):
 
 
 class CodeAgentNodeSpec(_IoNodeSpec):
-    """LLM agent node (single-agent reasoning over the mapped inputs)."""
+    """DEPRECATED — LLM agent node (single-agent reasoning over the mapped inputs).
+
+    Slated for removal. Prefer an `agent` node (AgentNodeSpec — single agent with
+    ordered inline tasks) or a `task` node (TaskNodeSpec) on the standalone agent
+    microservice. Still compiles/runs, but create_flow_from_spec emits a
+    `deprecated_node_type` warning.
+    """
 
     type: Literal["code_agent"]
     system_prompt: str
@@ -131,7 +137,12 @@ class CodeAgentNodeSpec(_IoNodeSpec):
 
 
 class CrewNodeSpec(_IoNodeSpec):
-    """Runs an existing CrewAI crew (multi-agent project)."""
+    """DEPRECATED — runs an existing CrewAI crew (multi-agent project).
+
+    Slated for removal. Prefer an `agent` node (AgentNodeSpec — one agent with ordered
+    inline tasks) on the standalone agent microservice, which replaces crew. Still
+    compiles/runs, but create_flow_from_spec emits a `deprecated_node_type` warning.
+    """
 
     type: Literal["crew"]
     crew_id: int = Field(description="Existing Crew id. Create the crew first.")
