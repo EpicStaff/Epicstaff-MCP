@@ -116,8 +116,9 @@ Business requirements translate to nodes, not the other way around. The question
 | Reuse a whole existing flow | `subgraph` |
 
 Heuristics that matter:
+- **Facts and numbers come from real data, never from the LLM.** Coordinates, distances, prices, EU/country checks, lookups, validation — do them in a `python` node against an authoritative source. The sandbox has full internet (see the Platform Capabilities section of the `epicstaff` skill), so call a real geocoder/router/API instead of asking the model to recall a fact. LLM-recalled data is approximate and unverifiable. Never put the LLM in the numbers path.
 - **If the logic is a pure function of structured inputs, use `python`.** It is cheaper, faster, more reliable than any agent node.
-- **If the logic needs reasoning over fuzzy text, use an `agent`/`task` node.** (`code-agent` is deprecated — use `agentnode`/`tasknode`.)
+- **If the logic needs reasoning over fuzzy text, use an `agent`/`task` node.** (`code-agent` is deprecated — use `agentnode`/`tasknode`.) Give it real tools (which can hit the internet) rather than relying on its memory.
 - **For multi-step agent work, use one `agent` node with ordered `tasks[]`.** `crew`/`project` is deprecated and slated for removal — do not reach for it; an `agentnode` covers single- and multi-step agent work.
 - **Use CDT when branching is a business rule expressed as predicates over variables.** Use conditional `edge` when branching is a short Python expression that returns a node name.
 - **Use `subgraph` when the sub-workflow is genuinely reusable and has its own lifecycle.** Copy-pasting nodes is worse than a subgraph, but a subgraph you only call once is pure indirection.

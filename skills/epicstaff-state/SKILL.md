@@ -9,6 +9,8 @@ A flow session is stateless by default: variables reset every run. To remember a
 
 ---
 
+> **Sandbox scope:** the path-lock below is a **filesystem** restriction only. The sandbox has **full outbound internet** — Python nodes can call any external API (geocoders, routers, REST, webhooks), and `libraries` pip-installs packages. Persistence is locked down; the network is not. Prefer real APIs over LLM-recalled data. (See the Platform Capabilities section of the `epicstaff` skill.)
+
 ## Core principle — storage is path-locked
 
 A Python node with `use_storage: true` gets an `EpicStaffStorage` handle, but the sandbox **hard-locks its allowed paths to `sessions/<session_id>/`** — a folder that is unique per run and thrown away after. Writing there does NOT persist across sessions.

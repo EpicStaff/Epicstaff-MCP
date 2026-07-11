@@ -9,6 +9,36 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 
 ---
 
+## Section 0: Platform Capabilities — what EpicStaff can actually do
+
+Read this before designing a flow. Do NOT assume a capability is missing — assuming a
+constraint that doesn't exist leads to worse designs (e.g. substituting LLM-recalled facts
+for real data). When unsure, **verify empirically** with `run_python_code` before building
+around a supposed limitation.
+
+- **The Python sandbox has full outbound internet.** `pythonnode` code (and python tools) can
+  call ANY external API/service — REST, geocoders, routers, search, scraping, webhooks, cloud
+  SDKs. Verified live: HTTPS to third-party APIs returns 200 in <350 ms from inside the sandbox.
+  So fetch **real, authoritative data** rather than having an LLM recall it from memory.
+- **Python nodes/tools can install packages.** Set the `libraries` field (e.g. `["requests",
+  "httpx", "pandas"]`) and the sandbox pip-installs them before running. Stdlib `urllib` also
+  works with zero libraries.
+- **Agents can use tools — including internet-facing ones.** Agent/task nodes (and crews)
+  attach tools (MCP tools, python tools, custom `BaseTool`s) via Surfaces; those tools can hit
+  the internet, call services, read/write storage. An agent is not limited to its own text.
+- **Flows persist state across sessions.** Attach a storage folder and use `EpicStaffStorage`
+  from a python node (see the `epicstaff-state` skill) — memory, counters, user profiles, files.
+- **Flows have real I/O surfaces.** Webhook / Telegram / schedule triggers start flows from
+  outside; file-extractor and audio-transcription nodes ingest uploads; EpicChat and the
+  run-session REST API drive them from a UI.
+
+**Design rule (deterministic-first):** use real data sources and Python for **facts and every
+number** (coordinates, distances, prices, lookups, validation); use the LLM only for **language
+and fuzzy text** (parsing a free-text message, composing a reply, classification). Never put the
+LLM in the numbers path — LLM-recalled facts are approximate and unverifiable.
+
+---
+
 ## Section 1: MCP Tool Catalog
 
 ### Flow Inspection
