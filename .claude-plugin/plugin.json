@@ -1,7 +1,7 @@
 {
   "name": "epicstaff-mcp",
   "description": "EpicStaff MCP \u2014 full-cycle flow building and debugging. MCP server + skills for interview, DDD design, build, QA, debug, CDT branching, channel integration, state/persistence, and EpicChat output.",
-  "version": "3.1.21",
+  "version": "3.1.22",
   "author": {
     "name": "EpicStaff"
   },

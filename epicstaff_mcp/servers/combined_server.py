@@ -9,6 +9,7 @@ from epicstaff_mcp.tools import (
     agents,
     auth,
     config,
+    flow_runtime,
     crews,
     flow_compiler,
     flows,
@@ -320,6 +321,9 @@ mcp.tool(config.get_quickstart)
 
 # Auth / API keys
 mcp.tool(auth.create_api_key)
+
+# Runnable gate
+mcp.tool(flow_runtime.smoke_test_flow)
 
 
 def main() -> None:

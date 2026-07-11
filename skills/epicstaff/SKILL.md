@@ -49,7 +49,8 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 | `delete_node(flow_id, name_or_id, sync_metadata=True)` | Remove a node — auto-syncs metadata |
 | `delete_edge(flow_id, edge_id, sync_metadata=True)` | Remove a connection — auto-syncs metadata |
 | `init_flow_metadata(flow_id)` | Re-lay-out and re-style all nodes — called automatically by the tools above; run manually only after `sync_metadata=False` batches |
-| `test_flow(flow_id)` | Structural check: connectivity, required fields |
+| `test_flow(flow_id)` | Structural check only: connectivity, required fields (does NOT run the flow) |
+| `smoke_test_flow(flow_id, variables=…, execute=True)` | **Runnable gate.** Static `_validate_graph` + one live run; verdict `{runnable, reached_end, holes, node_errors, …}`. Use this — not `test_flow` — to prove a built/edited flow is ready to test. `execute=False` = static-only. |
 | `copy_flow(flow_id)` | Duplicate a flow |
 | `save_flow(flow_id, ..., sync_metadata=True)` | Persist flow state — auto-syncs metadata |
 | `export_flow(flow_id)` | Export flow as JSON |

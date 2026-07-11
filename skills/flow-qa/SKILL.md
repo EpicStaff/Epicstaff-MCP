@@ -162,17 +162,23 @@ Tie back to `flow-ddd`:
 - Node names describe responsibilities in business language ("Fetch Weather", not "Node 1").
 - CDT group names are short and distinctive — they become port roles (`decision-out-<group_name>`), so renaming them later breaks canvas wiring.
 
-### 8. Runtime smoke test (if feasible)
+### 8. Runtime smoke test (the runnable gate — if feasible)
 
-If inputs can be synthesized:
+Prefer the one-call gate, which combines the static `_validate_graph` check with a single
+live run and a structured verdict:
 ```
-run_session_and_wait(flow_id, variables=<minimal synthetic input>, timeout=60)
-inspect_session(session_id)
+smoke_test_flow(flow_id, variables=<minimal synthetic input>)
 ```
-Confirm:
-- Session status is `finished`.
-- Every expected node appears in the trace.
-- End node produces the expected keys.
+PASS requires `runnable: true`. Inspect the verdict fields:
+- `reached_end` is true, `node_errors` is empty, `holes` is empty (a `"not found"` hole =
+  an end `output_map` path that did not resolve — a real defect, not a warning).
+- `null_outputs` is a soft warning (end value came back `null`); note it but it does not
+  fail the gate on its own.
+- On `runnable: false`, `summary` + `holes`/`node_errors` name the failing node — hand to
+  `flow-debugger`.
+
+(Under the hood this uses `run_session` + `inspect_session`; call those directly only when
+you need the full per-node trace.)
 
 Skip this step only if the flow requires external triggers (Telegram, a real inbound webhook) that cannot be synthesized. Note that as a limitation in the report.
 
@@ -191,7 +197,7 @@ Do the checks in order. Stop and write up findings if a blocker surfaces early; 
 7. Port legality pass over each edge.
 8. Per-node correctness pass (uses CDT detail from step 5).
 9. Error handling and side-effect review.
-10. (If feasible) Runtime smoke: `run_session_and_wait` + `inspect_session`.
+10. (If feasible) Runnable gate: `smoke_test_flow(flow_id, variables=...)` → require `runnable: true`.
 
 Do NOT patch in the middle of QA. Collect findings, then either report or hand off to `flow-debugger` with a specific symptom.
 

@@ -80,6 +80,20 @@ Build immediately via MCP tools (Phase 3 below). User reviews the result live in
 
 ## Phase 3 — Build (Steps 0–9)
 
+**Build strategy — prefer build-locally, push-once over incremental.** Design the whole
+flow in your head/plan first, then materialize it in as few round-trips as possible:
+- **New flow:** author a single `FlowSpec` and call `create_flow_from_spec` (validates
+  offline + materializes atomically, then rolls back the shell on any error). See
+  `get_flow_spec_schema`. Steps 3–8 below are the incremental fallback for node types the
+  spec does not cover (conditional edges, plain DT, note/realtime nodes).
+- **Editing an existing flow:** `get_flow` (read full state) → mutate the node lists locally
+  → `save_flow` once. `save_flow` is an atomic bulk **upsert** — nodes keep their `id`
+  (identity preserved), new nodes use `temp_id`, removals go in `deleted`, guarded by
+  `save_version` (409 → re-read and retry). Reserve per-node `add_node`/`patch_*` calls for a
+  genuinely trivial one-field tweak.
+
+Either way, Step 9 (the runnable gate) is mandatory before declaring done.
+
 ### Step 0 — Read / verify intent
 - If plan path: confirm the approved DDD contract table is complete and has no open questions.
 - If direct path: confirm the interview summary is complete and all ambiguities are resolved.
@@ -179,11 +193,23 @@ patch_start_variables(flow_id, variables=<full DDD dict from Step 1>)
 ```
 Every path any downstream `input_map` reads must be present, even as `null`.
 
-### Step 9 — Structural check
+### Step 9 — Runnable gate (mandatory before declaring done)
 ```
-test_flow(flow_id)
+smoke_test_flow(flow_id, variables=<one representative input>)
 ```
-Confirm connectivity and required fields. Fix any issues before declaring done. Then hand off to `flow-qa` for the final validation pass.
+`smoke_test_flow` is the "ready to test" gate. It runs `test_flow`'s static checks
+(`_validate_graph`) AND then executes the flow once, confirming it reached the end node
+with no node errors and no `"not found"` output holes. `test_flow(flow_id)` alone is
+static only — it passes on flows that silently return `"not found"`; do not treat it as
+proof of runnability.
+
+- Pass a representative `variables` input (e.g. a real chat message) to exercise the
+  meaningful path; omit it to run with the start node's declared defaults.
+- `runnable: true` → hand off. `runnable: false` → the `summary` + `holes`/`node_errors`
+  name the failing node; fix and re-run.
+- `execute=false` gives a fast static-only pass (zero token cost) for a quick check.
+
+Then hand off to `flow-qa` for the final validation pass.
 
 ---
 
@@ -226,11 +252,13 @@ If you catch yourself doing any of the following, stop immediately:
 ## Done Criteria
 
 The build is done when:
-1. `test_flow(flow_id)` passes
+1. `smoke_test_flow(flow_id, variables=...)` returns `runnable: true` (this subsumes the
+   static `test_flow` check AND proves one happy path actually runs end-to-end)
 2. Every node exists with code + libraries + `input_map` + `output_variable_path` set
 3. Every edge from the plan exists
 4. CDT routing targets all resolve
 5. Start variables contain every path referenced by any `input_map`
 6. `init_flow_metadata` has been run after the last structural change
 
-Then hand off to `flow-qa` for the final validation pass.
+Never declare a flow done on a static check alone — run the runnable gate. Then hand off
+to `flow-qa` for the final validation pass.
