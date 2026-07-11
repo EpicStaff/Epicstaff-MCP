@@ -1,0 +1,8 @@
+{
+  "id": "cdt-route-by-name",
+  "title": "CDT condition group routes by node name instead of integer next_node_id",
+  "category": "cdt-branch",
+  "fixture": "fixtures/cdt_route_by_name.json",
+  "should_pass": false,
+  "expected_codes": ["cdt_route_by_name"]
+}

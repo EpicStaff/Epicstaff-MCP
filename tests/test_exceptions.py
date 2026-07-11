@@ -19,6 +19,16 @@ def test_api_error_carries_status_and_detail():
     assert err.status_code == 422
     assert "422" in str(err)
     assert "Validation failed" in str(err)
+    assert err.remediation is None
+
+
+def test_api_error_appends_remediation_to_message():
+    err = EpicStaffAPIError(
+        status_code=400, detail="Bad input", remediation="Do X instead."
+    )
+    assert err.remediation == "Do X instead."
+    assert "Bad input" in str(err)
+    assert "Remediation: Do X instead." in str(err)
 
 
 def test_not_found_error_default_message():

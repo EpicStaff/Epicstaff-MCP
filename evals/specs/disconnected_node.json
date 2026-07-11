@@ -1,0 +1,8 @@
+{
+  "id": "disconnected-node",
+  "title": "Python node has no incoming or outgoing edge and is not a trigger/CDT/DT target",
+  "category": "connectivity",
+  "fixture": "fixtures/disconnected_node.json",
+  "should_pass": false,
+  "expected_codes": ["disconnected_node"]
+}

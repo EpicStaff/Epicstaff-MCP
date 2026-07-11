@@ -22,6 +22,13 @@ Commit `d1f9da9` — three more:
 8. `add_node` supports `classificationdecisiontablenode` (CDT); `patch_cdt_node` exposes `default_next_node_id`/`next_error_node_id`.
 9. `patch_dt_node` / `patch_cdt_node` strip the read-only `next_node` name from groups (mitigates the backend crash in #B).
 
+Phase 2 (self-correcting tools) — five more:
+10. `update_agent`'s `tool_ids` is no longer destructive by omission: it always fetches the agent's current tools first, merges them with any `tool_ids` you pass (deduplicated union) unless `replace_tool_ids=True`, and preserves them untouched when `tool_ids` is omitted entirely — closing the gap where even a role-only update wiped all tools (see `AgentWriteSerializer.update()`: `tool_ids = validated_data.pop("tool_ids", [])` defaults to an unconditional wipe whenever the key is absent from the PATCH body).
+11. `patch_cdt_node` / `patch_dt_node` now **reject** (400, before any network call) a `condition_group` that sets `next_node` (a name) without an integer `next_node_id` — previously this was silently stripped, leaving the group unrouted with no signal. `patch_cdt_node` additionally rejects a group carrying `conditions` or `group_type` (DT-only fields `ClassificationConditionGroup` doesn't have — see #F) instead of letting it reach the backend.
+12. `add_node`/`delete_node`/`add_edge`/`delete_edge`/`save_flow` now run `init_flow_metadata` automatically after a successful write (opt out per-call with `sync_metadata=False` when batching).
+13. `patch_python_node`/`patch_webhook_node`'s `libraries` merge-not-wipe semantics (fetch-then-preserve when omitted) were already in place; documented here for completeness alongside the tool_ids fix — same principle, different field.
+14. `client._raise_for_status` now attaches a `remediation` string (via `epicstaff_mcp/error_remediation.py`) to `EpicStaffAPIError` for three verified signatures: `GraphEntryPointException` ("No node connected to start node", 400), the agent-update RAG-required `ValidationError` (400), and the generic unhandled-`TypeError` 500 (`custom_exception_handler`'s production fallback). Deliberately narrow — an unmatched error passes through with `remediation=None` rather than guessing.
+
 ---
 
 ## Backend bugs (require a fix in EpicStaff `src/` — MCP can only mitigate)

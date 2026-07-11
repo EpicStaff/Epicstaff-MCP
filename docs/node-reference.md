@@ -222,8 +222,13 @@ Routes execution based on a Python expression.
 
 The `save_flow` tool posts all node lists and edges in a single atomic request. Any list omitted is treated as empty (no-op for that type).
 
+`save_version` is the flow's current version number (optimistic lock — a mismatch returns 409). `save_flow` fetches it automatically when not passed.
+
+CDT/DT nodes may route to nodes created in the same request via `default_next_node_temp_id`, `next_error_node_temp_id`, and per-group `next_node_temp_id` — the same temp-UUID mechanism edges use.
+
 ```json
 {
+  "save_version": 1,
   "start_node_list": [...],
   "end_node_list": [...],
   "crew_node_list": [...],
@@ -233,8 +238,13 @@ The `save_flow` tool posts all node lists and edges in a single atomic request. 
   "file_extractor_node_list": [...],
   "audio_transcription_node_list": [...],
   "decision_table_node_list": [...],
+  "classification_decision_table_node_list": [...],
   "telegram_trigger_node_list": [...],
   "webhook_trigger_node_list": [...],
+  "schedule_trigger_node_list": [...],
+  "agent_node_list": [...],
+  "task_node_list": [...],
+  "graph_note_list": [...],
   "edge_list": [...],
   "conditional_edge_list": [...],
   "deleted": {
@@ -245,6 +255,10 @@ The `save_flow` tool posts all node lists and edges in a single atomic request. 
   }
 }
 ```
+
+### One-shot alternative: `create_flow_from_spec`
+
+Instead of hand-assembling this payload, author a declarative spec (nodes, edges, and CDT routing by node NAME) and call `create_flow_from_spec`. The compiler resolves names to temp_ids, runs the full `validate_flow` check suite locally, and only materializes (one graph-shell POST + one bulk save) when there are zero error-severity findings. Call `get_flow_spec_schema` for the schema, authoring notes, and a complete example.
 
 ---
 

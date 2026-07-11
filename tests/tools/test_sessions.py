@@ -118,3 +118,6 @@ async def test_run_session_and_wait_terminates_on_end_status():
     result = await run_session_and_wait(flow_id=1, timeout=5, poll_interval=1)
     assert result["status"] == "end"
     assert "error" not in result
+    # Regression: the terminal result must carry the session id so the caller
+    # can inspect the finished run — get-updates itself omits it.
+    assert result["session_id"] == 42

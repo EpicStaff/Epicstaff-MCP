@@ -1,0 +1,8 @@
+{
+  "id": "missing-entrypoint",
+  "title": "Python node code has no top-level def main(...)",
+  "category": "python-node",
+  "fixture": "fixtures/missing_entrypoint.json",
+  "should_pass": false,
+  "expected_codes": ["missing_entrypoint"]
+}

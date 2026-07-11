@@ -101,6 +101,7 @@ async def update_agent(
     fcm_llm_config: int | None = None,
     knowledge_collection: int | None = None,
     tool_ids: list[str] | None = None,
+    replace_tool_ids: bool = False,
     max_iter: int | None = None,
     max_rpm: int | None = None,
     max_execution_time: int | None = None,
@@ -115,6 +116,21 @@ async def update_agent(
     rag_id: int | None = None,
 ) -> dict[str, Any]:
     """Update one or more fields of an existing agent. Only provided fields are updated.
+
+    tool_ids is CRITICAL and handled specially. The backend PATCH is
+    unconditionally destructive: AgentWriteSerializer.update() defaults
+    tool_ids to [] whenever the key is absent from the request body at all
+    (not just when explicitly empty), then always deletes and resyncs every
+    tool relation from that value. Concretely: EVERY update_agent call — even
+    one that never mentions tools — would otherwise silently wipe the agent's
+    tools. To prevent that, this tool ALWAYS fetches the agent's current
+    tools first and re-sends them, regardless of what you pass:
+      - tool_ids=None (default): existing tools are preserved untouched.
+      - tool_ids=[...] with replace_tool_ids=False (default): MERGED with the
+        agent's existing tools as a deduplicated union — the safe choice for
+        "add a tool without touching the rest".
+      - tool_ids=[...] with replace_tool_ids=True: existing tools are REPLACED
+        with EXACTLY the ids you pass — use this to remove a tool.
 
     To (re)attach knowledge, pass knowledge_collection together with rag_type
     ("naive" | "graph") + rag_id — the backend requires `rag` when a collection is set.
@@ -132,8 +148,6 @@ async def update_agent(
         payload["fcm_llm_config"] = fcm_llm_config
     if knowledge_collection is not None:
         payload["knowledge_collection"] = knowledge_collection
-    if tool_ids is not None:
-        payload["tool_ids"] = tool_ids
     if max_iter is not None:
         payload["max_iter"] = max_iter
     if max_rpm is not None:
@@ -157,6 +171,18 @@ async def update_agent(
     if rag_type is not None and rag_id is not None:
         payload["rag"] = {"rag_type": rag_type, "rag_id": rag_id}
     async with get_client() as client:
+        current = await client.get(f"/api/agents/{agent_id}/")
+        existing_tool_ids = [
+            tool["unique_name"]
+            for tool in current.get("tools", [])
+            if "unique_name" in tool
+        ]
+        if tool_ids is None:
+            payload["tool_ids"] = existing_tool_ids
+        elif replace_tool_ids:
+            payload["tool_ids"] = tool_ids
+        else:
+            payload["tool_ids"] = list(dict.fromkeys([*existing_tool_ids, *tool_ids]))
         return await client.patch(f"/api/agents/{agent_id}/", json=payload)
 
 

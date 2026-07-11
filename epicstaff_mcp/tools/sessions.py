@@ -145,6 +145,9 @@ async def run_session_and_wait(
         status = update.get("status", "")
         if status in _TERMINAL_STATUSES:
             update["elapsed_seconds"] = time.monotonic() - start_time
+            # Surface the session id so callers can inspect the finished run
+            # (inspect_session / get_session_trace) — get-updates omits it.
+            update.setdefault("session_id", session_id)
             return update
 
         await asyncio.sleep(poll_interval)

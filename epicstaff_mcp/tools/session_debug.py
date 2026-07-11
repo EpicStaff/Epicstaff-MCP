@@ -164,21 +164,34 @@ async def get_session_crew_input(session_id: int) -> dict[str, Any]:
 
 
 async def get_flow_persistent_vars(graph_id: int) -> dict[str, Any]:
-    """Get the persistent variables stored for a flow (graph organization state)."""
+    """The flow's own cross-session persistence declaration.
+
+    A flow declares persistence on its own graph (``/api/graphs/{id}/``):
+
+    * ``persistent_variables`` (bool) — whether the flow opts into persistence.
+    * the start node's ``variables`` — when persistence is on it is stored wrapped
+      as ``{"variables": {<namespace>}, "persistent_variables": {"organization":
+      [...], "user": [...]}}``. Those path lists are the actual declaration.
+
+    An earlier version read ``/api/graph-organizations/`` instead, which holds the
+    per-organization *runtime* values (empty until a session writes them) — so it
+    returned ``{}`` for a freshly-built persistent flow. That endpoint is a
+    different concept (org runtime state), not the flow's declaration.
+    """
     async with get_client() as client:
-        response = await client.get(
-            "/api/graph-organizations/",
-            params={"graph": graph_id},
-        )
+        graph = await client.get(f"/api/graphs/{graph_id}/")
 
-    items = response if isinstance(response, list) else response.get("results", [])
+    declared: dict[str, Any] = {}
+    for node in graph.get("start_node_list") or []:
+        variables = node.get("variables")
+        if isinstance(variables, dict) and isinstance(
+            variables.get("persistent_variables"), dict
+        ):
+            declared = variables["persistent_variables"]
+            break
 
-    for item in items:
-        if item.get("graph") == graph_id:
-            return {
-                "graph_id": graph_id,
-                "persistent_variables": item.get("persistent_variables") or {},
-                "organization_id": item.get("id"),
-            }
-
-    return {"graph_id": graph_id, "persistent_variables": {}, "organization_id": None}
+    return {
+        "graph_id": graph_id,
+        "enabled": bool(graph.get("persistent_variables")),
+        "persistent_variables": declared,
+    }

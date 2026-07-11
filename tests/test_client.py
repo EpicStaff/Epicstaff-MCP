@@ -87,6 +87,23 @@ async def test_422_raises_api_error():
         with pytest.raises(EpicStaffAPIError) as exc_info:
             await client.post("/api/agents/", json={})
     assert exc_info.value.status_code == 422
+    assert exc_info.value.remediation is None
+
+
+@respx.mock
+async def test_error_with_known_signature_carries_remediation():
+    respx.post(f"{BASE}api/graph_runs/").mock(
+        return_value=httpx.Response(
+            400, json={"detail": "No node connected to start node"}
+        )
+    )
+    client = EpicStaffClient(make_settings())
+    async with client:
+        with pytest.raises(EpicStaffAPIError) as exc_info:
+            await client.post("/api/graph_runs/", json={})
+    assert exc_info.value.remediation is not None
+    assert "__start__" in exc_info.value.remediation
+    assert "Remediation:" in str(exc_info.value)
 
 
 @respx.mock

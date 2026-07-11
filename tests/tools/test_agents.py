@@ -98,6 +98,9 @@ async def test_create_agent_sends_correct_payload():
 
 @respx.mock
 async def test_update_agent():
+    respx.get(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=AGENT_PAYLOAD)
+    )
     updated = {**AGENT_PAYLOAD, "role": "Senior Researcher"}
     respx.patch(f"{BASE_URL}api/agents/1/").mock(
         return_value=httpx.Response(200, json=updated)
@@ -135,6 +138,9 @@ async def test_create_agent_forwards_rag_object():
 
 @respx.mock
 async def test_update_agent_forwards_rag_object():
+    respx.get(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=AGENT_PAYLOAD)
+    )
     respx.patch(f"{BASE_URL}api/agents/1/").mock(
         return_value=httpx.Response(200, json=AGENT_PAYLOAD)
     )
@@ -144,3 +150,73 @@ async def test_update_agent_forwards_rag_object():
 
     body = json.loads(route.calls.last.request.content)
     assert body["rag"] == {"rag_type": "naive", "rag_id": 7}
+
+
+# ---------------------------------------------------------------------------
+# update_agent tool_ids merge-vs-replace semantics (Fix #2)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_update_agent_preserves_tools_when_tool_ids_omitted():
+    """The backend's PATCH wipes tool_ids whenever the key is absent from the
+    request body — update_agent must always re-send the agent's existing
+    tools even when the caller never mentions tool_ids."""
+    existing = {
+        **AGENT_PAYLOAD,
+        "tools": [
+            {"unique_name": "mcp-tool:1", "data": {}},
+            {"unique_name": "python-code-tool:2", "data": {}},
+        ],
+    }
+    respx.get(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=existing)
+    )
+    route = respx.patch(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=existing)
+    )
+    await update_agent(agent_id=1, role="Senior Researcher")
+    import json
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["tool_ids"] == ["mcp-tool:1", "python-code-tool:2"]
+
+
+@respx.mock
+async def test_update_agent_merges_tool_ids_by_default():
+    existing = {
+        **AGENT_PAYLOAD,
+        "tools": [{"unique_name": "mcp-tool:1", "data": {}}],
+    }
+    respx.get(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=existing)
+    )
+    route = respx.patch(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=existing)
+    )
+    await update_agent(agent_id=1, tool_ids=["configured-tool:3"])
+    import json
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["tool_ids"] == ["mcp-tool:1", "configured-tool:3"]
+
+
+@respx.mock
+async def test_update_agent_replace_tool_ids_drops_existing():
+    existing = {
+        **AGENT_PAYLOAD,
+        "tools": [{"unique_name": "mcp-tool:1", "data": {}}],
+    }
+    respx.get(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=existing)
+    )
+    route = respx.patch(f"{BASE_URL}api/agents/1/").mock(
+        return_value=httpx.Response(200, json=existing)
+    )
+    await update_agent(
+        agent_id=1, tool_ids=["configured-tool:3"], replace_tool_ids=True
+    )
+    import json
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["tool_ids"] == ["configured-tool:3"]

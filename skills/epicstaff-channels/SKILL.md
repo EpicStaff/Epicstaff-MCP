@@ -114,7 +114,7 @@ A tap re-fires the whole flow with `callback_query.data == "/context"` → your 
 
 ## Webhooks
 
-- Node type `webhooktriggernode`; config `webhook_trigger.path` (NOT `webhook_path`) + a `python_code` handler.
+- Node type `webhooktriggernode`; config `webhook_trigger.path` (NOT `webhook_path`) + a `python_code` handler. In a `FlowSpec` (create_flow_from_spec), set the webhook node's `path` field — the compiler places it on the nested `webhook_trigger.path` for you.
 - The handler receives the request body as `trigger_payload` and returns a dict that merges into `variables`. Its `output_variable_path` is forced to `"variables"` by the runtime — do not override it.
 - Register with `register_webhooks()`. Dual-wire `__start__` + the trigger node into the first real node.
 

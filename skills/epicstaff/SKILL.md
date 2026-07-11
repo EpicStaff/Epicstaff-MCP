@@ -32,11 +32,11 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 
 | Tool | Purpose |
 |---|---|
-| `patch_python_node(flow_id, name_or_id, code, libraries)` | Update Python node — always pass `libraries` |
-| `patch_webhook_node(flow_id, name_or_id, code, libraries)` | Update Webhook handler — always pass `libraries` |
+| `patch_python_node(flow_id, name_or_id, code, libraries)` | Update Python node — `libraries` optional, preserved when omitted |
+| `patch_webhook_node(flow_id, name_or_id, code, libraries)` | Update Webhook handler — `libraries` optional, preserved when omitted |
 | `patch_code_agent_node(flow_id, name_or_id, system_prompt, stream_handler_code, libraries, llm_config_id)` | Update Code Agent |
-| `patch_cdt_node(flow_id, name_or_id, pre_computation_code, post_computation_code, prompts, condition_groups)` | Update CDT |
-| `patch_dt_node(flow_id, name_or_id, condition_groups)` | Update DT groups |
+| `patch_cdt_node(flow_id, name_or_id, pre_computation_code, post_computation_code, prompts, condition_groups)` | Update CDT — rejects a `next_node`-without-`next_node_id` group, or a `conditions`/`group_type` key, with a 400 |
+| `patch_dt_node(flow_id, name_or_id, condition_groups)` | Update DT groups — rejects a `next_node`-without-`next_node_id` group with a 400; `conditions: []` auto-filled |
 | `patch_node_libraries(flow_id, name_or_id, libraries)` | Update libraries only |
 | `patch_start_variables(flow_id, variables)` | Set start node variable definitions |
 
@@ -44,14 +44,14 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 
 | Tool | Purpose |
 |---|---|
-| `add_node(flow_id, node_type, node_name, ...)` | Add a node |
-| `add_edge(flow_id, start_node_name, end_node_name)` | Connect two nodes |
-| `delete_node(flow_id, name_or_id)` | Remove a node |
-| `delete_edge(flow_id, edge_id)` | Remove a connection |
-| `init_flow_metadata(flow_id)` | **MANDATORY after any structural change** |
+| `add_node(flow_id, node_type, node_name, ..., sync_metadata=True)` | Add a node — auto-syncs metadata unless `sync_metadata=False` |
+| `add_edge(flow_id, start_node_name, end_node_name, sync_metadata=True)` | Connect two nodes — auto-syncs metadata |
+| `delete_node(flow_id, name_or_id, sync_metadata=True)` | Remove a node — auto-syncs metadata |
+| `delete_edge(flow_id, edge_id, sync_metadata=True)` | Remove a connection — auto-syncs metadata |
+| `init_flow_metadata(flow_id)` | Re-lay-out and re-style all nodes — called automatically by the tools above; run manually only after `sync_metadata=False` batches |
 | `test_flow(flow_id)` | Structural check: connectivity, required fields |
 | `copy_flow(flow_id)` | Duplicate a flow |
-| `save_flow(flow_id)` | Persist flow state |
+| `save_flow(flow_id, ..., sync_metadata=True)` | Persist flow state — auto-syncs metadata |
 | `export_flow(flow_id)` | Export flow as JSON |
 | `import_flow(payload)` | Import flow from JSON |
 
@@ -91,21 +91,21 @@ All flow and session operations go through MCP tools. Never write raw HTTP calls
 
 These rules encode hard-won lessons from production issues. Violating any causes silent failures or data loss.
 
-1. **`init_flow_metadata` is MANDATORY after adding or deleting any node or edge — no exceptions.** Without it new nodes render as black dots, connections are missing, and routing breaks silently.
+1. **`init_flow_metadata` runs automatically after `add_node`/`delete_node`/`add_edge`/`delete_edge`/`save_flow`.** Each of those tools takes a `sync_metadata: bool = True` param — leave it default and you never need to think about black-dot nodes. Only pass `sync_metadata=False` when batching several structural writes back-to-back, and call `init_flow_metadata(flow_id)` yourself once at the end.
 
 2. **Node IDs change on every UI save.** The frontend deletes and recreates nodes. Never hardcode numeric DB IDs — always look up nodes by name using `name_or_id`.
 
-3. **`patch_python_node` and `patch_webhook_node` MUST always include `libraries`.** Omitting `libraries` wipes the existing list, causing silent import failures at runtime.
+3. **`patch_python_node` and `patch_webhook_node` preserve `libraries` when you omit them.** Both tools fetch the node's current `libraries` first and re-send them if you don't pass a new list — omitting the parameter is safe. Pass `libraries` explicitly only when you actually want to change the set.
 
-4. **CDT/DT routing is metadata-based, NOT edge-based.** `add_edge` on a CDT/DT output does nothing. Wire each group by its target's **numeric `next_node_id`** via `patch_cdt_node` (CDT) or `patch_dt_node` (DT), and set `default_next_node_id` + `next_error_node_id`. Passing a `next_node` **name** instead crashes the backend (500 / server disconnect) — always route by id.
+4. **CDT/DT routing is metadata-based, NOT edge-based.** `add_edge` on a CDT/DT output does nothing. Wire each group by its target's **numeric `next_node_id`** via `patch_cdt_node` (CDT) or `patch_dt_node` (DT), and set `default_next_node_id` + `next_error_node_id`. Both tools now **reject** (with a 400 telling you exactly what to send) a group that sets `next_node` (a name) without an integer `next_node_id`, instead of silently stripping it and leaving the group unrouted.
 
 5. **CDT `prompts` must be a dict, not a list.** `converter_service.py` calls `.items()` — passing a list crashes the crew at runtime.
 
 6. **Non-CDT node `ports` must be `null`, not `[]`.** The frontend auto-generates ports only when `ports === null`; an empty array suppresses port generation.
 
-7. **Agent `tool_ids` PATCH is a destructive replace.** When calling `update_agent`, always include ALL existing tool IDs alongside any new ones — partial lists drop tools.
+7. **`update_agent`'s `tool_ids` is safe by default.** The backend PATCH is unconditionally destructive server-side (omitting `tool_ids` from the request wipes all tools), so `update_agent` always fetches the agent's current tools first: `tool_ids=None` (default) preserves them untouched; `tool_ids=[...]` **merges** with the existing set unless you pass `replace_tool_ids=True`, which replaces them exactly (use that to remove a tool).
 
-8. **Every CDT `condition_group` must include `"conditions": []`.** The viewset calls `pop("conditions")` — a missing key causes a silent rollback.
+8. **Every plain DT `condition_group` must include `"conditions": []`.** `patch_dt_node` injects this automatically — omitting it in your call is safe. (This key does NOT exist on CDT groups — see rule 12.)
 
 9. **Python nodes require `def main(...)` as the entrypoint.** The crew executor calls it with `input_map` keys as kwargs. Code without `def main` fails with `name 'main' is not defined`.
 
@@ -113,7 +113,7 @@ These rules encode hard-won lessons from production issues. Violating any causes
 
 11. **CDT expressions use dot-notation against `variables`, NOT subscript.** `variables.routing.category == "hr"` works; `variables['routing']['category']` raises `'types.SimpleNamespace' object is not subscriptable` at runtime.
 
-12. **CDT condition groups must NOT include a `group_type` field.** The viewset rejects unknown keys and crashes. Send only `group_name`, `expression`, `next_node_id` (plus `conditions: []`).
+12. **CDT condition groups must NOT include `group_type` or `conditions` fields (those are DT-only).** `patch_cdt_node` now rejects a group carrying either with a 400 before it reaches the backend, instead of letting it crash the viewset. Send only `group_name`, `order`, `expression`, `prompt_id`, `manipulation`, `continue_flag`, `next_node_id`, `dock_visible`, `field_expressions`, `field_manipulations`, `route_code`, `section`.
 
 13. **A conditional edge's `main()` must return the string `"NodeName #id"`** (e.g. `"Escalation #76"`). A bare name silently routes to graph end; an int errors with "output should be a string".
 
@@ -199,12 +199,15 @@ To branch execution from one source to two downstream nodes: use a CDT or condit
 
 ```
 1. create_flow("Flow Name")
-2. add_node(flow_id, "<node_type>", "NodeName", ...)   # include code and libraries
-3. add_edge(flow_id, "__start__", "NodeName")
-4. init_flow_metadata(flow_id)                         # MANDATORY
-5. patch_start_variables(flow_id, [...])
-6. test_flow(flow_id)
+2. add_node(flow_id, "<node_type>", "NodeName", ...)   # metadata syncs automatically
+3. add_edge(flow_id, "__start__", "NodeName")          # metadata syncs automatically
+4. patch_start_variables(flow_id, [...])
+5. test_flow(flow_id)
 ```
+
+Pass `sync_metadata=False` to `add_node`/`add_edge`/`delete_node`/`delete_edge`/`save_flow`
+when batching several structural writes, then call `init_flow_metadata(flow_id)`
+yourself once at the end.
 
 **Trigger node dual-wiring:**
 ```

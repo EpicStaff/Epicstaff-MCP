@@ -1,0 +1,7 @@
+{
+  "id": "known-good-weather-flow",
+  "title": "Start -> Python (weather lookup) -> End, fully wired",
+  "category": "python-node",
+  "fixture": "fixtures/known_good_weather_flow.json",
+  "should_pass": true
+}

@@ -15,6 +15,7 @@ from tenacity import (
 )
 
 from epicstaff_mcp.config import AuthMode, Settings, get_settings
+from epicstaff_mcp.error_remediation import find_remediation
 from epicstaff_mcp.exceptions import (
     EpicStaffAPIError,
     EpicStaffConnectionError,
@@ -196,7 +197,12 @@ class EpicStaffClient:
                 detail = str(response.json())
             except Exception:
                 detail = response.text
-            raise EpicStaffAPIError(status_code=response.status_code, detail=detail)
+            remediation = find_remediation(response.status_code, detail)
+            raise EpicStaffAPIError(
+                status_code=response.status_code,
+                detail=detail,
+                remediation=remediation,
+            )
 
     async def _request(
         self,

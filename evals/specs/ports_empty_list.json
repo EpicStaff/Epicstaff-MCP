@@ -1,0 +1,8 @@
+{
+  "id": "ports-empty-list",
+  "title": "Crew node has ports: [] instead of null, suppressing FE port auto-generation",
+  "category": "flow-editor-metadata",
+  "fixture": "fixtures/ports_empty_list.json",
+  "should_pass": false,
+  "expected_codes": ["ports_empty_list"]
+}

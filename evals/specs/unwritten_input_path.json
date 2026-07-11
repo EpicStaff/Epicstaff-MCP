@@ -1,0 +1,8 @@
+{
+  "id": "unwritten-input-path",
+  "title": "Python node reads a variables.* path nothing upstream writes",
+  "category": "data-flow",
+  "fixture": "fixtures/unwritten_input_path.json",
+  "should_pass": false,
+  "expected_codes": ["unwritten_input_path"]
+}

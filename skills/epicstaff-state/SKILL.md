@@ -19,6 +19,15 @@ To persist, you must **attach a durable folder to the graph** (a `GraphStorageFi
 
 ---
 
+## One-shot via create_flow_from_spec
+
+A `FlowSpec` builds a storage-backed flow in one call: set `use_storage: true` on
+each python node that touches storage, and list the durable folder(s) in
+top-level `storage_paths` (e.g. `["chat_memory/"]`). The build creates the
+folder(s) if missing and attaches them as `GraphStorageFile`s, so persistence
+works on the first run — no separate create/attach step. The manual sequence
+below is still the way when adding storage to a flow that already exists.
+
 ## Setup — attach a folder (once)
 
 ```

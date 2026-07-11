@@ -1,0 +1,49 @@
+{
+  "id": 101,
+  "name": "Weather Lookup",
+  "metadata": {},
+  "crew_node_list": [],
+  "python_node_list": [
+    {
+      "id": 3,
+      "node_name": "Fetch Weather",
+      "metadata": {"position": {"x": 200, "y": 0}},
+      "input_map": {"city": "variables.request.city"},
+      "output_variable_path": "variables.weather",
+      "python_code": {
+        "code": "import json\n\n\ndef main(city):\n    return {'city': city}",
+        "libraries": []
+      },
+      "ports": null
+    }
+  ],
+  "start_node_list": [
+    {
+      "id": 1,
+      "node_name": "__start__",
+      "metadata": {"position": {"x": 0, "y": 0}},
+      "variables": {"request": {"city": "Kyiv"}}
+    }
+  ],
+  "end_node_list": [
+    {
+      "id": 2,
+      "node_name": "__end__",
+      "metadata": {"position": {"x": 400, "y": 0}},
+      "output_map": {"weather": "variables.weather"}
+    }
+  ],
+  "subgraph_node_list": [],
+  "code_agent_node_list": [],
+  "file_extractor_node_list": [],
+  "audio_transcription_node_list": [],
+  "decision_table_node_list": [],
+  "classification_decision_table_node_list": [],
+  "telegram_trigger_node_list": [],
+  "webhook_trigger_node_list": [],
+  "edge_list": [
+    {"id": 10, "start_node_id": 1, "end_node_id": 3},
+    {"id": 11, "start_node_id": 3, "end_node_id": 2}
+  ],
+  "conditional_edge_list": []
+}

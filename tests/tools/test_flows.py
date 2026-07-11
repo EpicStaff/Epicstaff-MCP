@@ -19,6 +19,7 @@ from epicstaff_mcp.tools.flows import (
     delete_edge,
     delete_node,
     get_cdt_prompts,
+    get_cdt_route_map,
     get_flow,
     get_flow_connections,
     get_flow_nodes,
@@ -31,6 +32,7 @@ from epicstaff_mcp.tools.flows import (
     patch_cdt_node,
     patch_dt_node,
     restore_graph_version,
+    save_flow,
     save_graph_version,
     update_flow_metadata,
     update_graph_version,
@@ -104,6 +106,57 @@ async def test_get_flow_returns_full_flow():
     assert "crew_node_list" in result
 
 
+def _flow_with_cdt_routing() -> dict:
+    return {
+        **FULL_FLOW,
+        "python_node_list": [{"id": 20, "node_name": "Urgent Branch"}],
+        "end_node_list": [{"id": 2, "node_name": "__end_node__"}],
+        "classification_decision_table_node_list": [
+            {
+                "id": 4,
+                "node_name": "Router",
+                # Backend returns the routing by id but the NAME fields null.
+                "default_next_node_id": 2,
+                "default_next_node": None,
+                "next_error_node_id": 2,
+                "next_error_node": None,
+                "condition_groups": [
+                    {
+                        "group_name": "urgent",
+                        "next_node_id": 20,
+                        "next_node": None,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@respx.mock
+async def test_get_flow_backfills_cdt_routing_names():
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=_flow_with_cdt_routing())
+    )
+    result = await get_flow(flow_id=1)
+    cdt = result["classification_decision_table_node_list"][0]
+    assert cdt["condition_groups"][0]["next_node"] == "Urgent Branch"
+    assert cdt["default_next_node"] == "__end_node__"
+    assert cdt["next_error_node"] == "__end_node__"
+
+
+@respx.mock
+async def test_get_cdt_route_map_includes_resolved_names():
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=_flow_with_cdt_routing())
+    )
+    result = await get_cdt_route_map(graph_id=1)
+    (entry,) = result["routing"]
+    assert entry["routing"] == {"urgent": 20}
+    assert entry["routing_names"] == {"urgent": "Urgent Branch"}
+    assert entry["default"] == 2 and entry["default_name"] == "__end_node__"
+    assert entry["error"] == 2 and entry["error_name"] == "__end_node__"
+
+
 @respx.mock
 async def test_create_flow():
     respx.post(f"{BASE_URL}api/graphs/").mock(
@@ -141,7 +194,9 @@ async def test_add_node_crewnode():
     respx.post(f"{BASE_URL}api/crewnodes/").mock(
         return_value=httpx.Response(201, json=CREW_NODE)
     )
-    result = await add_node(flow_id=1, node_type="crewnode", config={"crew_id": 2})
+    result = await add_node(
+        flow_id=1, node_type="crewnode", config={"crew_id": 2}, sync_metadata=False
+    )
     assert result["id"] == 10
 
 
@@ -150,7 +205,9 @@ async def test_add_node_sends_graph_id():
     route = respx.post(f"{BASE_URL}api/crewnodes/").mock(
         return_value=httpx.Response(201, json=CREW_NODE)
     )
-    await add_node(flow_id=1, node_type="crewnode", config={"crew_id": 2})
+    await add_node(
+        flow_id=1, node_type="crewnode", config={"crew_id": 2}, sync_metadata=False
+    )
     body = json.loads(route.calls.last.request.content)
     assert body["graph"] == 1
     assert body["crew_id"] == 2
@@ -177,6 +234,7 @@ async def test_add_node_tasknode_posts_to_tasknodes():
             "input_map": {"question": "variables.intake.question"},
             "output_variable_path": "variables.order",
         },
+        sync_metadata=False,
     )
     body = json.loads(route.calls.last.request.content)
     assert body["graph"] == 3
@@ -210,6 +268,7 @@ async def test_add_node_agentnode_sends_inline_tasks():
         flow_id=3,
         node_type="agentnode",
         config={"agent_definition": 5, "surface_list": [8, 9], "tasks": tasks},
+        sync_metadata=False,
     )
     body = json.loads(route.calls.last.request.content)
     assert body["graph"] == 3
@@ -222,7 +281,12 @@ async def test_add_node_agent_definition_id_alias():
     route = respx.post(f"{BASE_URL}api/tasknodes/").mock(
         return_value=httpx.Response(201, json={"id": 22})
     )
-    await add_node(flow_id=3, node_type="tasknode", config={"agent_definition_id": 7})
+    await add_node(
+        flow_id=3,
+        node_type="tasknode",
+        config={"agent_definition_id": 7},
+        sync_metadata=False,
+    )
     body = json.loads(route.calls.last.request.content)
     assert body["agent_definition"] == 7
     assert "agent_definition_id" not in body
@@ -245,6 +309,7 @@ async def test_add_node_scheduletriggernode_sends_schedule_block():
         node_type="scheduletriggernode",
         node_name="Daily Digest",
         config={"is_active": True, "schedule": schedule},
+        sync_metadata=False,
     )
     body = json.loads(route.calls.last.request.content)
     assert body["graph"] == 3
@@ -290,7 +355,9 @@ async def test_update_node():
 @respx.mock
 async def test_delete_node():
     respx.delete(f"{BASE_URL}api/crewnodes/10/").mock(return_value=httpx.Response(204))
-    result = await delete_node(flow_id=1, node_id=10, node_type="crewnode")
+    result = await delete_node(
+        flow_id=1, node_id=10, node_type="crewnode", sync_metadata=False
+    )
     assert "deleted" in result["message"]
     assert "10" in result["message"]
 
@@ -314,14 +381,16 @@ async def test_add_edge():
     respx.post(f"{BASE_URL}api/edges/").mock(
         return_value=httpx.Response(201, json=EDGE)
     )
-    result = await add_edge(flow_id=1, start_node_id=10, end_node_id=11)
+    result = await add_edge(
+        flow_id=1, start_node_id=10, end_node_id=11, sync_metadata=False
+    )
     assert result["id"] == 20
 
 
 @respx.mock
 async def test_delete_edge():
     respx.delete(f"{BASE_URL}api/edges/20/").mock(return_value=httpx.Response(204))
-    result = await delete_edge(flow_id=1, edge_id=20)
+    result = await delete_edge(flow_id=1, edge_id=20, sync_metadata=False)
     assert "deleted" in result["message"]
 
 
@@ -330,7 +399,9 @@ async def test_delete_conditional_edge():
     respx.delete(f"{BASE_URL}api/conditionaledges/5/").mock(
         return_value=httpx.Response(204)
     )
-    result = await delete_edge(flow_id=1, edge_id=5, conditional=True)
+    result = await delete_edge(
+        flow_id=1, edge_id=5, conditional=True, sync_metadata=False
+    )
     assert "deleted" in result["message"]
 
 
@@ -593,7 +664,12 @@ async def test_add_node_cdt_maps_to_classification_endpoint():
     route = respx.post(f"{BASE_URL}api/classification-decision-table-node/").mock(
         return_value=httpx.Response(201, json={"id": 60, "graph": 1})
     )
-    await add_node(flow_id=1, node_type="classificationdecisiontablenode", config={})
+    await add_node(
+        flow_id=1,
+        node_type="classificationdecisiontablenode",
+        config={},
+        sync_metadata=False,
+    )
     assert route.called
     assert json.loads(route.calls.last.request.content)["graph"] == 1
 
@@ -649,3 +725,244 @@ async def test_patch_dt_node_strips_next_node_name():
     assert "next_node" not in grp
     assert grp["next_node_id"] == 74
     assert grp["conditions"] == []
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight rejection of known CDT/DT condition_group crashers (Fix #3)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_patch_cdt_node_rejects_next_node_without_id():
+    # No route mocked for the CDT lookup/patch — validation must reject before
+    # any network call, so an unmocked respx route would fail loudly if hit.
+    with pytest.raises(EpicStaffAPIError, match="next_node_id"):
+        await patch_cdt_node(
+            graph_id=1,
+            name_or_id=40,
+            condition_groups=[{"group_name": "g1", "next_node": "Escalation #76"}],
+        )
+
+
+@respx.mock
+async def test_patch_cdt_node_rejects_stray_conditions_key():
+    with pytest.raises(EpicStaffAPIError, match="conditions"):
+        await patch_cdt_node(
+            graph_id=1,
+            name_or_id=40,
+            condition_groups=[
+                {"group_name": "g1", "next_node_id": 5, "conditions": []}
+            ],
+        )
+
+
+@respx.mock
+async def test_patch_cdt_node_rejects_stray_group_type_key():
+    with pytest.raises(EpicStaffAPIError, match="group_type"):
+        await patch_cdt_node(
+            graph_id=1,
+            name_or_id=40,
+            condition_groups=[
+                {"group_name": "g1", "next_node_id": 5, "group_type": "simple"}
+            ],
+        )
+
+
+@respx.mock
+async def test_patch_dt_node_rejects_next_node_without_id():
+    with pytest.raises(EpicStaffAPIError, match="next_node_id"):
+        await patch_dt_node(
+            graph_id=1,
+            name_or_id=50,
+            condition_groups=[{"group_name": "g1", "next_node": "Live Lookup #74"}],
+        )
+
+
+@respx.mock
+async def test_patch_dt_node_allows_group_type_field():
+    """group_type is REQUIRED on plain DT groups (ConditionGroup.group_type,
+    blank=False) — pre-flight validation must not reject it (only CDT groups
+    forbid it)."""
+    dt_node = {"id": 50, "graph": 1, "node_name": "dt_1"}
+    graph = {
+        **FULL_FLOW,
+        "decision_table_node_list": [dt_node],
+        "classification_decision_table_node_list": [],
+    }
+    respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=graph)
+    )
+    route = respx.patch(f"{BASE_URL}api/decision-table-node/50/").mock(
+        return_value=httpx.Response(200, json=dt_node)
+    )
+    await patch_dt_node(
+        graph_id=1,
+        name_or_id=50,
+        condition_groups=[
+            {"group_name": "g1", "group_type": "simple", "next_node_id": 74}
+        ],
+    )
+    grp = json.loads(route.calls.last.request.content)["condition_groups"][0]
+    assert grp["group_type"] == "simple"
+
+
+# ---------------------------------------------------------------------------
+# Metadata auto-sync after structural writes (Fix #4)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_add_node_syncs_metadata_by_default():
+    respx.post(f"{BASE_URL}api/crewnodes/").mock(
+        return_value=httpx.Response(201, json=CREW_NODE)
+    )
+    graph_route = respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=FULL_FLOW)
+    )
+    await add_node(flow_id=1, node_type="crewnode", config={"crew_id": 2})
+    assert graph_route.called
+
+
+@respx.mock
+async def test_add_node_sync_metadata_false_skips_sync():
+    respx.post(f"{BASE_URL}api/crewnodes/").mock(
+        return_value=httpx.Response(201, json=CREW_NODE)
+    )
+    # No /api/graphs/1/ route mocked: if init_flow_metadata ran anyway, respx
+    # would raise for the unmocked GET, failing this test.
+    result = await add_node(
+        flow_id=1, node_type="crewnode", config={"crew_id": 2}, sync_metadata=False
+    )
+    assert result["id"] == 10
+
+
+@respx.mock
+async def test_delete_node_syncs_metadata_by_default():
+    respx.delete(f"{BASE_URL}api/crewnodes/10/").mock(return_value=httpx.Response(204))
+    graph_route = respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=FULL_FLOW)
+    )
+    await delete_node(flow_id=1, node_id=10, node_type="crewnode")
+    assert graph_route.called
+
+
+@respx.mock
+async def test_delete_node_sync_metadata_false_skips_sync():
+    respx.delete(f"{BASE_URL}api/crewnodes/10/").mock(return_value=httpx.Response(204))
+    result = await delete_node(
+        flow_id=1, node_id=10, node_type="crewnode", sync_metadata=False
+    )
+    assert "deleted" in result["message"]
+
+
+@respx.mock
+async def test_add_edge_syncs_metadata_by_default():
+    respx.post(f"{BASE_URL}api/edges/").mock(
+        return_value=httpx.Response(201, json=EDGE)
+    )
+    graph_route = respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=FULL_FLOW)
+    )
+    await add_edge(flow_id=1, start_node_id=10, end_node_id=11)
+    assert graph_route.called
+
+
+@respx.mock
+async def test_delete_edge_syncs_metadata_by_default():
+    respx.delete(f"{BASE_URL}api/edges/20/").mock(return_value=httpx.Response(204))
+    graph_route = respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=FULL_FLOW)
+    )
+    await delete_edge(flow_id=1, edge_id=20)
+    assert graph_route.called
+
+
+@respx.mock
+async def test_save_flow_syncs_metadata_by_default():
+    respx.post(f"{BASE_URL}api/graphs/1/save/").mock(
+        return_value=httpx.Response(200, json={"crew_node_list": []})
+    )
+    graph_route = respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json=FULL_FLOW)
+    )
+    result = await save_flow(flow_id=1, crew_node_list=[{"graph": 1}])
+    assert graph_route.called
+    assert result == {"crew_node_list": []}
+
+
+@respx.mock
+async def test_save_flow_sync_metadata_false_skips_sync():
+    # save_version passed explicitly + sync_metadata=False -> the single POST
+    # is the ONLY request (no GET for version resolution, no metadata sync).
+    save_route = respx.post(f"{BASE_URL}api/graphs/1/save/").mock(
+        return_value=httpx.Response(200, json={"crew_node_list": []})
+    )
+    result = await save_flow(
+        flow_id=1, crew_node_list=[{"graph": 1}], save_version=1, sync_metadata=False
+    )
+    assert result == {"crew_node_list": []}
+    assert len(respx.calls) == 1
+    payload = json.loads(save_route.calls[0].request.content)
+    assert payload["save_version"] == 1
+
+
+@respx.mock
+async def test_save_flow_resolves_save_version_when_not_provided():
+    graph_route = respx.get(f"{BASE_URL}api/graphs/1/").mock(
+        return_value=httpx.Response(200, json={**FULL_FLOW, "save_version": 7})
+    )
+    save_route = respx.post(f"{BASE_URL}api/graphs/1/save/").mock(
+        return_value=httpx.Response(200, json={"crew_node_list": []})
+    )
+    await save_flow(flow_id=1, crew_node_list=[{"graph": 1}], sync_metadata=False)
+    assert graph_route.called
+    payload = json.loads(save_route.calls[0].request.content)
+    assert payload["save_version"] == 7
+
+
+@respx.mock
+async def test_save_flow_payload_includes_all_node_list_keys():
+    save_route = respx.post(f"{BASE_URL}api/graphs/1/save/").mock(
+        return_value=httpx.Response(200, json={"crew_node_list": []})
+    )
+    await save_flow(
+        flow_id=1,
+        classification_decision_table_node_list=[{"graph": 1, "node_name": "Router"}],
+        agent_node_list=[{"graph": 1, "node_name": "Agent"}],
+        task_node_list=[{"graph": 1, "node_name": "Task"}],
+        schedule_trigger_node_list=[{"graph": 1, "node_name": "Nightly"}],
+        graph_note_list=[{"graph": 1, "content": "note"}],
+        save_version=1,
+        sync_metadata=False,
+    )
+    payload = json.loads(save_route.calls[0].request.content)
+    for key in (
+        "crew_node_list",
+        "python_node_list",
+        "start_node_list",
+        "end_node_list",
+        "subgraph_node_list",
+        "code_agent_node_list",
+        "file_extractor_node_list",
+        "audio_transcription_node_list",
+        "decision_table_node_list",
+        "classification_decision_table_node_list",
+        "telegram_trigger_node_list",
+        "webhook_trigger_node_list",
+        "schedule_trigger_node_list",
+        "agent_node_list",
+        "task_node_list",
+        "graph_note_list",
+        "edge_list",
+        "conditional_edge_list",
+        "deleted",
+    ):
+        assert key in payload
+    assert payload["classification_decision_table_node_list"] == [
+        {"graph": 1, "node_name": "Router"}
+    ]
+    assert payload["agent_node_list"] == [{"graph": 1, "node_name": "Agent"}]
+    assert payload["task_node_list"] == [{"graph": 1, "node_name": "Task"}]
+    assert payload["schedule_trigger_node_list"] == [
+        {"graph": 1, "node_name": "Nightly"}
+    ]

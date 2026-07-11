@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epicstaff-mcp"
-version = "3.1.9"
+version = "3.1.20"
 description = "Modular MCP server for EpicStaff flow management"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,6 +23,14 @@ epicstaff-mcp-organizations = "epicstaff_mcp.servers.organizations_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["epicstaff_mcp"]
+
+# loguru is only used by evals/ (the offline eval harness for maintainers) —
+# nothing in the shipped epicstaff_mcp/ runtime package logs. Kept out of the
+# distributed plugin's dependency footprint.
+[dependency-groups]
+dev = [
+    "loguru>=0.7.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

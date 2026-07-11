@@ -7,8 +7,10 @@ from fastmcp import FastMCP
 from epicstaff_mcp.tools import (
     agent_definitions,
     agents,
+    auth,
     config,
     crews,
+    flow_compiler,
     flows,
     knowledge,
     llm_configs,
@@ -71,6 +73,7 @@ mcp.tool(flows.copy_flow)
 mcp.tool(flows.save_flow)
 mcp.tool(flows.delete_flow)
 mcp.tool(flows.test_flow)
+mcp.tool(flows.validate_flow)
 mcp.tool(flows.get_graph_run_status)
 mcp.tool(flows.get_schedule_trigger_node)
 # Flow node patch helpers
@@ -104,6 +107,10 @@ mcp.tool(flows.create_graph_from_version)
 mcp.tool(flows.export_flow)
 mcp.tool(flows.bulk_export_flows)
 mcp.tool(flows.import_flow)
+
+# Flow compiler (spec -> local validation -> one atomic bulk save)
+mcp.tool(flow_compiler.create_flow_from_spec)
+mcp.tool(flow_compiler.get_flow_spec_schema)
 
 # Sessions
 mcp.tool(sessions.list_sessions)
@@ -310,6 +317,9 @@ mcp.tool(config.update_default_crew_config)
 mcp.tool(config.get_default_tool_config)
 mcp.tool(config.update_default_tool_config)
 mcp.tool(config.get_quickstart)
+
+# Auth / API keys
+mcp.tool(auth.create_api_key)
 
 
 def main() -> None:

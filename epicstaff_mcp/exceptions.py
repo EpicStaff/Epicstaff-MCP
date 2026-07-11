@@ -16,12 +16,23 @@ class EpicStaffAPIError(EpicStaffError):
     """Raised on HTTP 4xx/5xx responses from the EpicStaff API.
 
     Use EpicStaffNotFoundError for 404 responses.
+
+    remediation: optional actionable next-step text. `client._raise_for_status`
+    populates this for error signatures recognized by
+    `epicstaff_mcp.error_remediation`; callers that raise this directly
+    (pre-flight validation in tools/*.py) may also pass one.
     """
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(
+        self, status_code: int, detail: str, remediation: str | None = None
+    ) -> None:
         self.status_code = status_code
         self.detail = detail
-        super().__init__(f"EpicStaff API error {status_code}: {detail}")
+        self.remediation = remediation
+        message = f"EpicStaff API error {status_code}: {detail}"
+        if remediation:
+            message = f"{message}\nRemediation: {remediation}"
+        super().__init__(message)
 
 
 class EpicStaffNotFoundError(EpicStaffAPIError):

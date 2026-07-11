@@ -135,7 +135,7 @@ Map the exact error to its likely root cause. Apply the fix, then re-run.
 | Empty output from end node, everything looks right | `output_map` references a `variables.<path>` that was never written — `map_variables_to_input(set_missing_variables=True)` returned literal `"not found"`. | Confirm the writer actually sets the path (inspect the session), or fix the `output_map` path. |
 | Code Agent never starts / response timeout | Underlying AI instance unhealthy, wrong `llm_config_id`, or API key missing on the LLM config. | Verify `llm_config_id` resolves to a healthy provider and has a valid API key. Ask an operator to restart the code instance if stuck. |
 | Code Agent behaves as old prompt after UI edit | `system_prompt` only applies to NEW sessions. | Start a fresh session — the running/old ones keep the previous prompt. |
-| Crew node hangs | Crew's agent `tool_ids` were partially replaced (destructive PATCH). | Re-set the agent's `tool_ids` with the full list via `update_agent`. |
+| Crew node hangs | Crew's agent lost a tool it depends on — usually from a prior `update_agent(..., replace_tool_ids=True)` that didn't include it. | Re-check the agent's tools (`get_agent`) and re-add the missing one via `update_agent(tool_ids=[...])` (merges by default). |
 | `condition_group` expressions evaluate to non-bool | CDT expression returned a truthy non-bool (string, int). Runtime asserts `isinstance(result, bool)`. | Wrap with `bool(...)` or rewrite as an explicit boolean. |
 | `session_id=` filter returns wrong data | Code used `session=` instead of `session_id=` on the session messages endpoint. | Use `session_id=` — the other silently returns all rows. |
 | Python node returns non-dict | Output write target is a DotDict but executor needs a dict to merge. | Return a `dict`. |
@@ -189,12 +189,13 @@ Single fix: `init_flow_metadata(flow_id)`. If that doesn't resolve, the metadata
 
 Every patch tool has constraints. Follow them exactly.
 
-- `patch_python_node`, `patch_webhook_node` — **always** include `libraries`. Omit → libraries wiped.
+- `patch_python_node`, `patch_webhook_node` — `libraries` is optional; omitting it now preserves the node's existing list (fetched and re-sent for you). Pass it explicitly only to change the set.
 - `patch_code_agent_node` — include `libraries` when passing code-like fields. Updating `system_prompt` does not affect running sessions.
-- `patch_dt_node` — every group object needs `"conditions": []` even if the group is complex with zero conditions. Missing key → silent rollback.
-- `update_agent`'s `tool_ids` — destructive replace. Always include every existing tool ID plus new ones.
+- `patch_dt_node` — `"conditions": []` is auto-filled per group if you omit it. A group with `next_node` (a name) and no integer `next_node_id` is now rejected with a 400 before any network call, telling you to resolve the target's id.
+- `patch_cdt_node` — same `next_node`-without-`next_node_id` rejection as `patch_dt_node`, plus a group carrying `conditions` or `group_type` (DT-only fields) is rejected with a 400 instead of crashing the backend.
+- `update_agent`'s `tool_ids` — no longer destructive: the tool always fetches the agent's current tools first. `tool_ids=None` preserves them; `tool_ids=[...]` merges with the existing set by default; pass `replace_tool_ids=True` to replace exactly.
 - Renaming a node: edges use integer IDs under the hood, so they follow the rename automatically — but metadata still holds the old name until you re-run `init_flow_metadata`. If the rename MCP tool is unavailable, delete + re-create the node (preserving code, libraries, input_map, output_variable_path) and re-wire its edges.
-- Any structural change (add/delete node or edge) MUST be followed by `init_flow_metadata(flow_id)` before running the next session.
+- Any structural change (add/delete node or edge, or `save_flow`) auto-runs `init_flow_metadata(flow_id)` unless you passed `sync_metadata=False` to batch — in which case run it yourself once before the next session.
 
 ---
 

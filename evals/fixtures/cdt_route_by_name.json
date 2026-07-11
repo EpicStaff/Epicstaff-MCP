@@ -1,0 +1,50 @@
+{
+  "id": 104,
+  "name": "CDT Routes By Name",
+  "metadata": {},
+  "crew_node_list": [],
+  "python_node_list": [],
+  "start_node_list": [
+    {
+      "id": 1,
+      "node_name": "__start__",
+      "metadata": {"position": {}},
+      "variables": {}
+    }
+  ],
+  "end_node_list": [
+    {
+      "id": 2,
+      "node_name": "__end__",
+      "metadata": {"position": {}},
+      "output_map": {}
+    }
+  ],
+  "subgraph_node_list": [],
+  "code_agent_node_list": [],
+  "file_extractor_node_list": [],
+  "audio_transcription_node_list": [],
+  "decision_table_node_list": [],
+  "classification_decision_table_node_list": [
+    {
+      "id": 3,
+      "node_name": "Router",
+      "metadata": {"position": {}},
+      "condition_groups": [
+        {
+          "group_name": "g1",
+          "next_node": "__end__ #2",
+          "next_node_id": null
+        }
+      ],
+      "default_next_node_id": 2,
+      "next_error_node_id": 2
+    }
+  ],
+  "telegram_trigger_node_list": [],
+  "webhook_trigger_node_list": [],
+  "edge_list": [
+    {"id": 10, "start_node_id": 1, "end_node_id": 3}
+  ],
+  "conditional_edge_list": []
+}
