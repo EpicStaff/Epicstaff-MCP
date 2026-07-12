@@ -8,9 +8,33 @@ description: Use when a user wants to design, plan, or build an EpicStaff flow f
 Full pipeline for building EpicStaff flows: idea → interview → optional plan review → build.
 
 Companion skills (load when you hit the topic they cover):
+- `epicstaff-solution` — the **front door**. Classifies the request *before* you build (see Phase 0).
 - `epicstaff` — every MCP tool this workflow calls, node type reference
+- `epicstaff-cdt` — the preferred brancher; how to wire routing by `next_node_id` (see Step 6)
 - `flow-ddd` — DDD variable design principles (`variables` namespace, `input_map`, `output_variable_path`)
 - `flow-qa` — pre-submit validation after build
+- `epicstaff-app` — the custom UI shell, for **app-shaped** requests (see Phase 0)
+
+---
+
+## Phase 0 — Classify before you build (do NOT skip)
+
+**EpicStaff is a component, not always the whole deliverable.** The classic failure is tunnel
+vision — building a flow and stopping when the user actually wanted a working product with a UI.
+If you arrived here directly from a "build a flow / build a bot / build an app" request, run the
+`epicstaff-solution` front door first:
+
+- **ES-only** (no end-user UI: "a team of agents that does X", "a flow that processes Y",
+  "modify this node") → continue this pipeline. Done when the runnable gate (Step 9) passes.
+- **App-shaped** (a named audience *interacts* with it: "customers", "users", "a bot they talk
+  to") → build the EpicStaff backend with this pipeline, **then** hand to `epicstaff-app` for the
+  UI shell. A flow with no UI is an *unfinished* app-shaped request.
+
+**Deterministic-first (applies to every build):** math, pricing, parsing, formatting, lookups,
+and **every number** go in a `pythonnode` — never an LLM/agent. Agents decide and converse;
+Python computes. If deterministic output is worse under EpicStaff, that's a defect to fix inside
+the flow, not a reason to move logic out. (See `flow-ddd` and the Platform Capabilities section
+of the `epicstaff` skill.)
 
 ---
 
@@ -141,15 +165,20 @@ MCP `node_type` values and required fields:
 | node_type | Required fields |
 |---|---|
 | `pythonnode` | `code`, `libraries`, `input_map`, `output_variable_path` |
-| `webhooktriggernode` | `code`, `libraries`, `webhook_path` (no `input_map`/`output_variable_path` — runtime forces `__all__`/`variables`) |
-| `codeagentnode` | `system_prompt`, `stream_handler_code`, `libraries`, `llm_config_id`, `agent_mode` (`build`/`plan`), `input_map`, `output_variable_path`, optionally `output_schema` |
-| `crewnode` | `crew_id`, `input_map`, `output_variable_path` (crew must exist — create via `create_crew`/`create_agent`/`create_task` first) |
+| `webhooktriggernode` | `code`, `libraries`, and the path on **`webhook_trigger.path`** (nested — a flat `webhook_path` is *silently dropped*). No `input_map`/`output_variable_path` — runtime forces `__all__`/`variables`. In a `FlowSpec`, set the node's `path` field and the compiler nests it. |
+| `agentnode` | `agent_definition`, `tasks[]` (ordered), `input_map`, `output_variable_path`, optional `surface_list`/`inline_surface`. **Preferred agent node.** Never send `ports`. |
+| `tasknode` | `agent_definition`, `instructions`, `input_map`, `output_variable_path`, optional `output_schema`/`surface_list`. Single-task variant. |
 | `subgraphnode` | `subgraph_id`, `input_map`, `output_variable_path` |
-| `decisiontablenode` | `condition_groups`, `default_next_node`, `next_error_node` (each group needs `"conditions": []` — missing key causes silent rollback) |
+| `classificationdecisiontablenode` (CDT) | `condition_groups[]` (each `expression` + integer `next_node_id` + non-null `route_code`), `default_next_node_id`, `next_error_node_id`; optional `prompts`. **Preferred brancher** — wire via `patch_cdt_node` (Step 6), not `add_edge`. |
 | `fileextractornode` | `input_map`, `output_variable_path` |
 | `audiotranscriptionnode` | `input_map`, `output_variable_path` |
 | `endnode` | `output_map` mapping response keys to `variables.<path>` |
 | `telegramtriggernode` | `telegram_bot_api_key`, `fields[]` |
+
+> **Deprecated — do not reach for these on a new build:** `codeagentnode` (Code Agent) and
+> `crewnode` (Project/Crew) still run but are slated for removal — prefer `agentnode`/`tasknode`.
+> Plain `decisiontablenode` (DT) is superseded by CDT — prefer `classificationdecisiontablenode`.
+> Both DT and CDT route by integer `next_node_id`, never a node **name** (see Step 6).
 
 Node placement: X increases left to right (~400–500px per step), Y increases top to bottom (~60px between stacked nodes). Trigger nodes go far left, offset in Y to avoid overlap with `__start__`.
 
@@ -164,19 +193,35 @@ Call `add_edge(flow_id, start_node_name, end_node_name)` for every non-CDT edge.
   ```
 - NEVER use `add_edge` from a CDT node's outputs — CDT routing is metadata only (Step 6).
 
-### Step 6 — Wire CDT routing (if CDT nodes exist)
-For each `decisiontablenode`, call:
+### Step 6 — Wire brancher routing (if CDT/DT nodes exist)
+Prefer a **CDT** (`classificationdecisiontablenode`) — a deterministic superset of the plain DT.
+Routing is **metadata, not edges** — `add_edge` on a CDT output does nothing. Wire each branch
+by its target's **integer `next_node_id`** (look ids up with `get_flow_nodes` /
+`get_flow_connections`). Full recipe and gotchas are in the `epicstaff-cdt` skill.
+
 ```
-patch_dt_node(flow_id, name_or_id="<cdt name>",
-              condition_groups=[
-                {"group_name": "...", "group_type": "simple" | "complex",
-                 "expression": <str or null>, "conditions": [],
-                 "manipulation": <str or null>, "next_node": "<target node name>"},
-                ...
-              ],
-              default_next_node="<name>", next_error_node="<name>")
+patch_cdt_node(flow_id, name_or_id="<cdt name>",
+               condition_groups=[
+                 {"group_name": "is_order", "order": 0,
+                  "expression": "variables.routing.intent == 'order'",
+                  "next_node_id": 108, "route_code": "is_order"},
+                 ...
+               ],
+               default_next_node_id=101,   # no group matched
+               next_error_node_id=101)      # evaluation raised
 ```
-Every group object MUST include `"conditions": []` — the viewset calls `pop("conditions")` and silently rolls back if missing.
+
+**Critical (verified against the MCP source):**
+- Route by integer **`next_node_id`** / `default_next_node_id` / `next_error_node_id` — **never a
+  node name.** `patch_cdt_node`/`patch_dt_node` **reject** a group that sets `next_node` (a name)
+  without an integer `next_node_id` with a 400. (Sending a stray name used to crash the backend.)
+- CDT `expression` uses **dot-notation** against `variables` (`variables.routing.intent == 'order'`),
+  never subscript (`variables['routing']` raises `'SimpleNamespace' object is not subscriptable`).
+- Every CDT group needs a **non-null, unique `route_code`** (default it to `group_name`) or the
+  branch routes correctly at runtime but draws no connector in the UI.
+- **Never send `group_type` or `conditions` on a CDT group** — those are DT-only and are rejected.
+- Plain DT (`patch_dt_node`) is the legacy path: it auto-fills each group's `"conditions": []`, but
+  still routes by `next_node_id`. Prefer CDT for anything new.
 
 ### Step 7 — `init_flow_metadata` (mandatory)
 ```
@@ -219,7 +264,8 @@ If you catch yourself doing any of the following, stop immediately:
 
 - Creating a `pythonnode`, `webhooktriggernode`, or `codeagentnode` without `libraries` — they get wiped on later patches
 - Wiring a trigger node's input — triggers have no input port
-- Using `add_edge` for CDT outputs — CDT routing is metadata only, use `patch_dt_node`
+- Using `add_edge` for CDT outputs — CDT routing is metadata only, use `patch_cdt_node`
+- Routing a CDT/DT group by a node **name** (`next_node`) instead of an integer `next_node_id` — rejected with a 400
 - Skipping `init_flow_metadata` after structural changes — nodes render as black dots
 - Writing Python without `def main(...)` — the crew executor calls `main()`
 - Flattening `variables` into a bag of keys — always use DDD domain dicts
