@@ -240,7 +240,10 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         await writeLock(flow_dir, lock);
 
         const graphPusher = new GraphPusher(context);
-        const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, { force });
+        const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, {
+          force,
+          persistLock: (partial) => writeLock(flow_dir, partial),
+        });
         lock = graphResult.lock;
         await writeLock(flow_dir, lock);
 

@@ -157,4 +157,59 @@ flow:
     expect(xs[0]!).toBeLessThan(xs[1]!);
     expect(xs[1]!).toBeLessThan(xs[2]!);
   });
+
+  it('rejects more than one end node (unique_graph_end_node)', async () => {
+    writeFlow(`
+meta: { name: two-ends }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish_a: { type: end }
+    finish_b: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish_a }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.some((diagnostic) => /at most one end node/i.test(diagnostic.message))).toBe(true);
+  });
+
+  it('classification-decision-table categories emit a route_code so the route resolves', async () => {
+    writeFlow(`
+meta: { name: cdt-routes }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    classify:
+      type: classification-decision-table
+      llm_config: default
+      categories:
+        - { name: yes, next_node: work }
+      default_next_node: finish
+    work: { type: agent, agent: a1, tasks: [{ instructions: do it }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: classify }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const cdt = artifact.graph.nodes.find((node) => node.type === 'classification-decision-table');
+    const group = (cdt as { data: { table: { condition_groups: Array<{ route_code?: string; next_node?: string }> } } })
+      .data.table.condition_groups[0]!;
+    // route_code must be set (the bulk-save mapper only resolves next_node when it is)
+    // and next_node must point at the target node's uuid.
+    expect(group.route_code).toBeTruthy();
+    expect(group.next_node).toBeTruthy();
+  });
 });

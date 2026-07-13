@@ -43,6 +43,9 @@ export class GraphPusher {
             currentLock = { ...currentLock, graphId: remoteDto.id };
             createdGraph = true;
             logger.info(`Created graph "${artifact.flowName}" (#${remoteDto.id})`);
+            // Persist the shell id immediately so a bulk-save failure below is recoverable
+            // (the next push reuses this graph instead of colliding on the unique name).
+            await options.persistLock?.(currentLock);
         }
         else {
             remoteDto = await this.graphs.get(currentLock.graphId);

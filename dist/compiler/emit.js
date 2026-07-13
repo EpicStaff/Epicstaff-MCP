@@ -614,6 +614,10 @@ async function buildGraph(source, flowDir, registry, diagnostics) {
                                 group_name: category.name,
                                 order: index + 1,
                                 expression: null,
+                                // The bulk-save mapper (and the frontend's payload builder) only
+                                // resolve a category's next_node when route_code is set — it is the
+                                // routing key. Mirror the frontend fallback ("Route code for <name>").
+                                route_code: `Route code for ${category.name}`,
                                 next_node: uuidOf(category.next_node),
                             })),
                             prompts: {},

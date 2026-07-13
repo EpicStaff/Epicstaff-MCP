@@ -287,6 +287,24 @@ function validateTopology(source: FlowSource, diagnostics: Diagnostic[]): void {
     );
   }
 
+  // A graph may hold at most one start node and one end node
+  // (backend constraints unique_graph_start_node / unique_graph_end_node).
+  for (const singletonType of ['start', 'end'] as const) {
+    const named = Object.entries(nodes).filter(([, node]) => node.type === singletonType);
+    if (named.length > 1) {
+      const names = named.map(([name]) => `'${name}'`).join(', ');
+      for (const [nodeName] of named.slice(1)) {
+        diagnostics.push(
+          makeError(
+            `flow.nodes.${nodeName}`,
+            `a flow may have at most one ${singletonType} node, but found ${named.length}: ${names}. ` +
+              `Merge the extra ${singletonType} node(s) — route converging paths into a single ${singletonType}.`,
+          ),
+        );
+      }
+    }
+  }
+
   source.flow.edges.forEach((edge, index) => {
     const edgePath = `flow.edges[${index}]`;
     const fromNode = nodes[edge.from];

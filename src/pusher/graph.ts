@@ -47,7 +47,15 @@ export class GraphPusher {
     artifact: BuildArtifact,
     lock: FlowLock,
     idMap: Map<string, number>,
-    options: { force?: boolean } = {},
+    options: {
+      force?: boolean;
+      /**
+       * Persist the lockfile the moment the graph shell is created, before bulk-save.
+       * Without it, a bulk-save failure orphans the shell (its id is lost and the next
+       * push hits a name-uniqueness conflict). Supplied by the push_flow tool.
+       */
+      persistLock?: (lock: FlowLock) => Promise<void>;
+    } = {},
   ): Promise<GraphPushResult> {
     let currentLock = lock;
 
@@ -72,6 +80,9 @@ export class GraphPusher {
       currentLock = { ...currentLock, graphId: remoteDto.id };
       createdGraph = true;
       logger.info(`Created graph "${artifact.flowName}" (#${remoteDto.id})`);
+      // Persist the shell id immediately so a bulk-save failure below is recoverable
+      // (the next push reuses this graph instead of colliding on the unique name).
+      await options.persistLock?.(currentLock);
     } else {
       remoteDto = await this.graphs.get(currentLock.graphId);
       // 3. Optimistic-lock conflict check against the lockfile's last-known version.

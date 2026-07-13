@@ -192,7 +192,10 @@ export function registerFlowTools(server, context) {
         // Persist entity progress immediately — a later graph failure must not orphan created entities.
         await writeLock(flow_dir, lock);
         const graphPusher = new GraphPusher(context);
-        const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, { force });
+        const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, {
+            force,
+            persistLock: (partial) => writeLock(flow_dir, partial),
+        });
         lock = graphResult.lock;
         await writeLock(flow_dir, lock);
         return {
