@@ -1,14 +1,13 @@
 {
-  "name": "epicstaff",
-  "description": "EpicStaff plugins for Claude Code — MCP tools and skills for building, running, and debugging EpicStaff flows.",
+  "name": "epicstaff-marketplace",
   "owner": {
-    "name": "EpicStaff"
+    "name": "EpicStaff team"
   },
   "plugins": [
     {
-      "name": "epicstaff-mcp",
+      "name": "epicstaff-flow-dev",
       "source": "./",
-      "description": "EpicStaff MCP — flow building/debugging tools + skills for interview, DDD design, build, QA, debug, and EpicChat output."
+      "description": "Develop EpicStaff flows like code: write, build, push, run, debug from Claude Code."
     }
   ]
 }

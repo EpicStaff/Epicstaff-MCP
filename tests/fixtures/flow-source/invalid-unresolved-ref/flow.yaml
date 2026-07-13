@@ -1,0 +1,24 @@
+# Loads clean, but resolution fails: 'missing_surface' is not defined anywhere.
+meta:
+  name: unresolved-ref-example
+
+llm_configs:
+  default:
+    model: gpt-4o
+
+agents:
+  researcher:
+    instructions: You are a researcher.
+    llm_config: default
+    default_surfaces:
+      - missing_surface
+
+flow:
+  nodes:
+    start:
+      type: start
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: finish

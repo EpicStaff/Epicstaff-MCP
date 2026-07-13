@@ -1,0 +1,18 @@
+# Invalid: node type 'llm' is legacy and never accepted.
+meta:
+  name: llm-node-example
+
+flow:
+  nodes:
+    start:
+      type: start
+    analyze:
+      type: llm
+      prompt: Summarize the input.
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: analyze
+    - from: analyze
+      to: finish

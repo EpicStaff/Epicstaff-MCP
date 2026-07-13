@@ -1,0 +1,4 @@
+agents:
+  researcher:
+    instructions: Second definition of the same symbolic name.
+    llm_config: { existing: "org-default" }

@@ -1,0 +1,18 @@
+# Invalid: agents.researcher is also defined in extra.flow.yaml.
+meta:
+  name: duplicate-name-example
+
+agents:
+  researcher:
+    instructions: First definition.
+    llm_config: { existing: "org-default" }
+
+flow:
+  nodes:
+    start:
+      type: start
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: finish

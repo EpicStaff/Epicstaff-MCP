@@ -1,0 +1,18 @@
+# Invalid: knowledge document path does not exist in the flow directory.
+meta:
+  name: missing-document-example
+
+knowledge:
+  docs:
+    documents:
+      - docs/nope.md
+
+flow:
+  nodes:
+    start:
+      type: start
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: finish

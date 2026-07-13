@@ -1,16 +1,13 @@
 {
-  "epicstaff": {
-    "type": "stdio",
-    "command": "uv",
-    "args": [
-      "run",
-      "--project",
-      "${CLAUDE_PLUGIN_ROOT}",
-      "epicstaff-mcp"
-    ],
-    "env": {
-      "EPICSTAFF_BASE_URL": "${EPICSTAFF_BASE_URL}",
-      "EPICSTAFF_API_TOKEN": "${EPICSTAFF_API_TOKEN}"
+  "mcpServers": {
+    "epicstaff": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+      "env": {
+        "ES_URL": "${ES_URL}",
+        "ES_EMAIL": "${ES_EMAIL}",
+        "ES_PASSWORD": "${ES_PASSWORD}"
+      }
     }
   }
 }

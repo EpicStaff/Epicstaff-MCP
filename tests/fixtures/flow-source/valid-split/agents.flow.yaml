@@ -1,0 +1,4 @@
+agents:
+  helper:
+    instructions: You greet people warmly.
+    llm_config: default

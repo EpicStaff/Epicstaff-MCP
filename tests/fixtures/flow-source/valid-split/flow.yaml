@@ -1,0 +1,22 @@
+# Split-file flow: agents live in agents.flow.yaml and merge in.
+meta:
+  name: split-example
+
+llm_configs:
+  default:
+    model: gpt-4o-mini
+
+flow:
+  nodes:
+    start:
+      type: start
+    greet:
+      type: agent
+      agent: helper
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: greet
+    - from: greet
+      to: finish

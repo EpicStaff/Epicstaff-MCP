@@ -1,0 +1,81 @@
+# Complete valid flow: start → agent → task → end.
+meta:
+  name: research-and-write
+  description: Research a topic on the web, then write a summary report.
+
+llm_configs:
+  default:
+    model: gpt-4o
+    provider: openai
+    temperature: 0.2
+
+tools:
+  python_code_tools:
+    fetch_page:
+      description: Fetch a web page and return its text content.
+      code: |
+        import urllib.request
+
+        def main(url: str) -> str:
+            with urllib.request.urlopen(url) as response:
+                return response.read().decode("utf-8")
+
+knowledge:
+  docs:
+    description: Team handbook used as a writing-style reference.
+    documents:
+      - docs/handbook.md
+    rag:
+      strategy: naive
+      chunk_size: 800
+      chunk_overlap: 100
+
+surfaces:
+  web_research:
+    instructions: Prefer primary sources. Cite the URL for every claim.
+    python_tools:
+      - fetch_page
+    knowledge:
+      - collection: docs
+
+agents:
+  researcher:
+    description: Web researcher.
+    instructions: You are a meticulous researcher. Verify claims across sources.
+    llm_config: default
+    fcm_llm_config: { existing: "org-default-fcm" }
+    max_iter: 10
+    default_surfaces:
+      - surface: web_research
+        place: all
+
+flow:
+  nodes:
+    start:
+      type: start
+      initial_state:
+        topic: EpicStaff flow language
+    research:
+      type: agent
+      agent: researcher
+      surfaces: [web_research]
+      input_map:
+        topic: variables.topic
+      output_variable_path: variables.research_result
+    write:
+      type: task
+      agent: researcher
+      task: Write a two-paragraph summary of the research result.
+      expected_output: A two-paragraph markdown summary.
+      input_map:
+        research: variables.research_result
+      output_variable_path: variables.summary
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: research
+    - from: research
+      to: write
+    - from: write
+      to: finish
