@@ -1,5 +1,6 @@
 {
   "name": "epicstaff-marketplace",
+  "description": "EpicStaff developer tooling for Claude Code.",
   "owner": {
     "name": "EpicStaff team"
   },
