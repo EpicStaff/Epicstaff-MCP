@@ -14,6 +14,7 @@ import path from 'node:path';
 import { hasErrors } from '../flow-source/diagnostics.js';
 import { loadFlowDirectory } from '../flow-source/loader.js';
 import { resolveFlow } from '../flow-source/resolver.js';
+import { validateDataflow } from './dataflow.js';
 import { emitFlow } from './emit.js';
 import { validateFlow } from './validate.js';
 export * from './artifact.js';
@@ -49,6 +50,7 @@ export async function compileFlow(flowDir) {
         return diagnosticsOnlyArtifact(flowName, diagnostics, description);
     }
     diagnostics.push(...validateFlow(loaded.source, resolved));
+    diagnostics.push(...validateDataflow(loaded.source));
     if (hasErrors(diagnostics)) {
         return diagnosticsOnlyArtifact(flowName, diagnostics, description);
     }

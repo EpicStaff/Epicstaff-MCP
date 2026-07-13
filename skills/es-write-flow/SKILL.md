@@ -20,6 +20,11 @@ Define locally only what doesn't exist — and tell the user what will be create
    `flows/<kebab-name>/` in the user's workspace).
 2. Edit `flow.yaml` to express the user's intent. Structure:
    - `meta` — name, description.
+   - `variables` — declared flow-state variables (names + defaults; optional). Data flows between
+     nodes through `variables` via `input_map` (reads) and `output_variable_path` (writes), NOT
+     along edges. `build_flow` checks every read resolves: a read of a variable no node produces and
+     that isn't declared is an **error** (a typo); a read only set on some branches is a **warning**.
+     To make a maybe-unset read OK, declare it with a default or add a `|default` suffix to the read.
    - `llm_configs` — model by name (e.g. `model: gpt-4o`); reuse `{ existing: ... }` when possible.
    - `tools` — `python_code_tools` / `mcp_tools` / `tool_configs` the agents need.
    - `knowledge` — collections with `documents:` (paths relative to the flow dir; put the

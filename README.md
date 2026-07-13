@@ -47,6 +47,10 @@ meta:
   name: research-and-write
   description: Research a topic, then write a summary.
 
+variables:                                # declared flow-state variables (names + defaults)
+  topic: "AI agents"                      # bare value = default
+  summary: { default: "", description: "Final summary." }
+
 llm_configs:
   default: { model: gpt-4o, temperature: 0.2 }
 
@@ -92,6 +96,29 @@ Node types: `start`, `agent`, `task`, `python`, `end`, `note`, `file-extractor`,
 `webhook-trigger`, `telegram-trigger`, `schedule-trigger`, `decision-table`,
 `classification-decision-table`, `audio-to-text` (+ `crew`, deprecated).
 `llm` and `code-agent` node types are rejected (legacy/deprecated in EpicStaff).
+
+## The data layer — `variables:` and dataflow checks
+
+Data moves between nodes through a shared **`variables`** state, not along edges: a node
+**reads** with `input_map` (`{ arg: variables.some.path }`) and **writes** with
+`output_variable_path` (`variables.some.path`). Edges are control flow; `variables` is data flow.
+
+The `variables:` section declares state variables — names + initial values (the runtime state is
+untyped, so declarations carry no types). Declaring is **optional**: any node's
+`output_variable_path` also counts as producing a variable.
+
+`build_flow` validates the wiring (**may-reach** policy):
+
+| Situation | Result |
+|---|---|
+| read root isn't `variables`, or malformed path | **error** (the runtime rejects it) |
+| read produced by no node anywhere and not declared (a typo) | **error** |
+| read produced somewhere, but not on a path that reaches the reader | **warning** |
+| read produced on ≥1 reaching path, or declared in `variables:` | ok |
+| `variables.shared[…]`, a `\|default` suffix, or `input_map: "__all__"` | ok, unchecked |
+
+To silence a read that's only set on *some* branches, declare it with a default
+(`variables: { escalation_id: { default: "" } }`) — it's then seeded everywhere.
 
 ## Identity & sync — `flow.lock.json`
 

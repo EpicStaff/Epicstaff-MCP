@@ -225,7 +225,9 @@ describe('decompileFlow', () => {
     expect(Object.keys(flow.flow.nodes)).toEqual(['start', 'research', 'write', 'end', 'My_Node']);
 
     const start = flow.flow.nodes['start']!;
-    expect(start).toMatchObject({ type: 'start', initial_state: { topic: 'ai' } });
+    expect(start).toMatchObject({ type: 'start' });
+    // Seeded values are surfaced as a top-level variables: section.
+    expect(flow.variables).toEqual({ topic: 'ai' });
 
     const research = flow.flow.nodes['research']!;
     expect(research).toMatchObject({

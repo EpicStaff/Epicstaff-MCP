@@ -17,7 +17,7 @@ import { hasErrors, joinPath, makeError, makeWarning, } from './diagnostics.js';
 import { flowSourceSchema } from './schema/index.js';
 const ROOT_FILE_PATTERN = /^flow\.(ya?ml|json)$/;
 const SPLIT_FILE_PATTERN = /\.flow\.(ya?ml|json)$/;
-const NAMED_MAP_SECTIONS = ['llm_configs', 'knowledge', 'surfaces', 'agents'];
+const NAMED_MAP_SECTIONS = ['variables', 'llm_configs', 'knowledge', 'surfaces', 'agents'];
 const TOOL_SUBSECTIONS = ['tool_configs', 'python_code_tools', 'mcp_tools'];
 export async function loadFlowDirectory(flowDir) {
     const diagnostics = [];

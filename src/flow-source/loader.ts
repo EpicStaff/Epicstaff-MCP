@@ -40,7 +40,7 @@ export interface FlowLoadResult {
 const ROOT_FILE_PATTERN = /^flow\.(ya?ml|json)$/;
 const SPLIT_FILE_PATTERN = /\.flow\.(ya?ml|json)$/;
 
-const NAMED_MAP_SECTIONS = ['llm_configs', 'knowledge', 'surfaces', 'agents'] as const;
+const NAMED_MAP_SECTIONS = ['variables', 'llm_configs', 'knowledge', 'surfaces', 'agents'] as const;
 const TOOL_SUBSECTIONS = ['tool_configs', 'python_code_tools', 'mcp_tools'] as const;
 
 type RawObject = Record<string, unknown>;

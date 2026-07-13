@@ -146,11 +146,17 @@ export async function decompileFlow(
   const plainEdges = buildPlainEdges(dto, registry, warnings);
   const conditional = buildConditionalEdges(dto, registry, warnings);
 
+  // Surface the start node's seeded values as a top-level `variables:` section
+  // (bare value = default). Round-trips: the compiler re-seeds them into the start
+  // node, and the dataflow validator treats them as declared/available.
+  const startVariables = (dto.start_node_list?.[0]?.variables ?? {}) as Record<string, unknown>;
+
   const document: YamlObject = {
     meta: {
       name: dto.name,
       ...(dto.description ? { description: dto.description } : {}),
     },
+    ...(Object.keys(startVariables).length > 0 ? { variables: startVariables } : {}),
     flow: {
       nodes,
       edges: [...plainEdges, ...conditional.map((edge) => edge.edge)],
@@ -583,14 +589,10 @@ function buildNodeBody(
   const atPath = `flow.nodes.${name}`;
 
   switch (entry.type) {
-    case 'start': {
-      const variables = entry.dto.variables ?? {};
-      return {
-        type: 'start',
-        position,
-        ...(Object.keys(variables).length > 0 ? { initial_state: variables } : {}),
-      };
-    }
+    case 'start':
+      // The start node's seeded values are surfaced as a top-level `variables:`
+      // section (see the document assembly), not inline on the node.
+      return { type: 'start', position };
 
     case 'agent': {
       const remoteTasks = [...(entry.dto.tasks ?? [])].sort((a, b) => a.order - b.order);

@@ -66,6 +66,7 @@ import type {
   InlineSurfaceSource,
   KnowledgeCollectionSource,
 } from '../flow-source/schema/index.js';
+import { declarationDefault } from '../flow-source/schema/variables.js';
 import type {
   AgentGraphNodeData,
   GraphEdgeState,
@@ -580,9 +581,20 @@ async function buildGraph(
     };
 
     switch (node.type) {
-      case 'start':
-        nodes.push({ ...base, type: 'start', data: { initialState: node.initial_state } });
+      case 'start': {
+        // Seed declared variables (their defaults) into the start state, with any
+        // inline start.initial_state overriding a declared default of the same name.
+        const declaredDefaults: Record<string, unknown> = {};
+        for (const [name, declaration] of Object.entries(source.variables ?? {})) {
+          declaredDefaults[name] = declarationDefault(declaration);
+        }
+        nodes.push({
+          ...base,
+          type: 'start',
+          data: { initialState: { ...declaredDefaults, ...node.initial_state } },
+        });
         break;
+      }
 
       case 'agent': {
         const data: AgentGraphNodeData = {

@@ -1,0 +1,43 @@
+import { z } from 'zod';
+/**
+ * `variables:` section — declares the flow's state variables (names + initial values).
+ *
+ * EpicStaff's flow state is an untyped `DotDict`, so declarations are **names-only**:
+ * there is no type to enforce. A declaration exists to (a) seed an initial value into
+ * the start node's state and (b) give the dataflow validator an authoritative set of
+ * "always-available" variables so a read that nothing produces isn't a false error.
+ *
+ * A declaration is either a bare value (used directly as the default) or an object with
+ * an explicit `default` plus an optional `description`:
+ *
+ *   variables:
+ *     topic: "AI agents"                 # bare value → default
+ *     retries: 0
+ *     escalation_id: { default: "", description: "Set on the urgent branch only." }
+ */
+export const variableDeclarationSchema = z.union([
+    z
+        .strictObject({
+        default: z.unknown().describe('Initial value seeded into the flow state.'),
+        description: z.string().optional().describe('What this variable holds.'),
+    })
+        .describe('Explicit variable declaration.'),
+    // Any bare JSON value is taken as the default. Kept last so the object form wins first.
+    z.unknown().describe('Bare value — used directly as the variable default.'),
+]);
+export const variablesSectionSchema = z
+    .record(z.string(), variableDeclarationSchema)
+    .default({})
+    .describe('Flow state variables, keyed by name. Declaring is optional (open model) — any node ' +
+    "output_variable_path also counts as producing a variable. Declared variables are seeded " +
+    'into the start node and are treated as available everywhere by the dataflow validator.');
+/** The default value a declaration seeds into the start-node state. */
+export function declarationDefault(declaration) {
+    if (typeof declaration === 'object' &&
+        declaration !== null &&
+        !Array.isArray(declaration) &&
+        'default' in declaration) {
+        return declaration.default;
+    }
+    return declaration;
+}

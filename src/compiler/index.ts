@@ -16,6 +16,7 @@ import { hasErrors, type Diagnostic } from '../flow-source/diagnostics.js';
 import { loadFlowDirectory } from '../flow-source/loader.js';
 import { resolveFlow } from '../flow-source/resolver.js';
 import type { BuildArtifact } from './artifact.js';
+import { validateDataflow } from './dataflow.js';
 import { emitFlow } from './emit.js';
 import { validateFlow } from './validate.js';
 
@@ -61,6 +62,7 @@ export async function compileFlow(flowDir: string): Promise<BuildArtifact> {
   }
 
   diagnostics.push(...validateFlow(loaded.source, resolved));
+  diagnostics.push(...validateDataflow(loaded.source));
   if (hasErrors(diagnostics)) {
     return diagnosticsOnlyArtifact(flowName, diagnostics, description);
   }

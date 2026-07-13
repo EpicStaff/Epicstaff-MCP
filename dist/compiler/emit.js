@@ -58,6 +58,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { makeWarning } from '../flow-source/diagnostics.js';
 import { contentHash, entityKey } from '../flow-source/lockfile.js';
+import { declarationDefault } from '../flow-source/schema/variables.js';
 import { mintTempId } from '../graph/temp-id.js';
 import { CANVAS_START_X, CANVAS_START_Y, DISCONNECTED_MARGIN, HORIZONTAL_GAP, LAYOUT_NODE_TYPES, computeAutoArrangePositions, snapToGrid, } from './layout.js';
 // ---------------------------------------------------------------------------
@@ -429,9 +430,20 @@ async function buildGraph(source, flowDir, registry, diagnostics) {
                 : null,
         };
         switch (node.type) {
-            case 'start':
-                nodes.push({ ...base, type: 'start', data: { initialState: node.initial_state } });
+            case 'start': {
+                // Seed declared variables (their defaults) into the start state, with any
+                // inline start.initial_state overriding a declared default of the same name.
+                const declaredDefaults = {};
+                for (const [name, declaration] of Object.entries(source.variables ?? {})) {
+                    declaredDefaults[name] = declarationDefault(declaration);
+                }
+                nodes.push({
+                    ...base,
+                    type: 'start',
+                    data: { initialState: { ...declaredDefaults, ...node.initial_state } },
+                });
                 break;
+            }
             case 'agent': {
                 const data = {
                     // SymbolicRef in a numeric position — substituted by the pusher (artifact.ts).

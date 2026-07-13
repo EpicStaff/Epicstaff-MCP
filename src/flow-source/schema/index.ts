@@ -17,6 +17,7 @@ import { knowledgeSectionSchema } from './knowledge.js';
 import { llmConfigsSectionSchema } from './llm-configs.js';
 import { surfacesSectionSchema } from './surfaces.js';
 import { toolsSectionSchema } from './tools.js';
+import { variablesSectionSchema } from './variables.js';
 
 export const metaSchema = z
   .strictObject({
@@ -33,6 +34,7 @@ export type FlowMetaSource = z.infer<typeof metaSchema>;
 export const flowSourceSchema = z
   .strictObject({
     meta: metaSchema,
+    variables: variablesSectionSchema,
     llm_configs: llmConfigsSectionSchema,
     tools: toolsSectionSchema,
     knowledge: knowledgeSectionSchema,
@@ -51,3 +53,4 @@ export * from './knowledge.js';
 export * from './surfaces.js';
 export * from './agents.js';
 export * from './flow.js';
+export * from './variables.js';
