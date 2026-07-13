@@ -13,6 +13,8 @@ flow:
     greet:
       type: agent
       agent: helper
+      tasks:
+        - instructions: Greet the user warmly.
     finish:
       type: end
   edges:

@@ -595,6 +595,14 @@ async function buildGraph(
             node.inline_surface !== undefined
               ? mapInlineSurface(node.inline_surface, `${nodePath}.inline_surface`, registry, diagnostics)
               : null,
+          // Runtime contract: an AgentNode executes its ordered task list.
+          tasks: node.tasks.map((task, order) => ({
+            tempId: mintTempId(),
+            name: task.name ?? `task-${order + 1}`,
+            instructions: task.instructions,
+            output_schema: task.output_schema,
+            contextRefs: [],
+          })),
         };
         nodes.push({ ...base, type: 'agent', data });
         break;

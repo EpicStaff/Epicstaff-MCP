@@ -58,6 +58,8 @@ flow:
     research:
       type: agent
       agent: researcher
+      tasks:
+        - instructions: Research the topic thoroughly using the available tools.
       surfaces: [web_research]
       input_map:
         topic: variables.topic

@@ -3,7 +3,14 @@ import { join } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import { AgentDefinitionsApi } from '../api/agent-definitions.js';
+import { GraphsApi } from '../api/graphs.js';
+import { KnowledgeApi } from '../api/knowledge.js';
+import { LlmApi } from '../api/llm.js';
+import { SurfacesApi } from '../api/surfaces.js';
+import { ToolsApi } from '../api/tools.js';
 import { compileFlow } from '../compiler/index.js';
+import { decompileFlow } from '../flow-source/decompiler.js';
 import { hasErrors } from '../flow-source/diagnostics.js';
 import { createLock, getEntity, readLock, writeLock } from '../flow-source/lockfile.js';
 import { EntityPusher } from '../pusher/entities.js';
@@ -245,6 +252,49 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           nodes: graphResult.nodeActions,
           openInEditor: `${context.config.apiUrl.replace(/\/api\/$/, '')}/flows/${graphResult.graphId}`,
           next: 'Open the flow in the EpicStaff editor to inspect it, or run_flow to execute it.',
+        };
+      }),
+  );
+
+  server.registerTool(
+    'pull_flow',
+    {
+      title: 'Pull a remote flow into local flow source',
+      description:
+        'Import an existing EpicStaff flow (graph) into a local flow-source directory so it can be edited and ' +
+        'repushed: writes flow.yaml with every node, edge and pinned canvas position, plus a seeded flow.lock.json ' +
+        'so push_flow updates the same graph in place. Referenced entities (agents, surfaces, llm configs, tools, ' +
+        'knowledge collections) are written as {existing: "<name>"} references — they stay owned by the backend. ' +
+        'Refuses to overwrite an existing flow source.',
+      inputSchema: {
+        graph_id: z.number().int().describe('Backend id of the graph to pull (see list output of graph-light)'),
+        target_dir: z
+          .string()
+          .describe('Absolute path of the flow directory to create — must not already contain a flow source'),
+      },
+    },
+    async ({ graph_id, target_dir }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        context.org.requireActiveOrg();
+
+        const { files, warnings } = await decompileFlow(
+          {
+            graphs: new GraphsApi(context.client),
+            agentDefinitions: new AgentDefinitionsApi(context.client),
+            surfaces: new SurfacesApi(context.client),
+            llm: new LlmApi(context.client),
+            tools: new ToolsApi(context.client),
+            knowledge: new KnowledgeApi(context.client),
+          },
+          graph_id,
+          target_dir,
+        );
+
+        return {
+          files,
+          warnings,
+          next: 'Run diff_flow to verify a no-op baseline, then edit with es-write-flow.',
         };
       }),
   );

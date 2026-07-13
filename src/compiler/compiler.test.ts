@@ -41,7 +41,7 @@ agents:
 flow:
   nodes:
     start: { type: start }
-    work: { type: agent, agent: a1 }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
     finish: { type: end }
   edges:
     - { from: start, to: work }
@@ -62,7 +62,7 @@ agents:
 flow:
   nodes:
     start: { type: start }
-    work: { type: agent, agent: a1 }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
     finish: { type: end }
   edges:
     - { from: start, to: work }
@@ -84,7 +84,7 @@ agents:
 flow:
   nodes:
     start: { type: start }
-    work: { type: agent, agent: a1 }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
     finish: { type: end }
   edges:
     - { from: start, to: work }
@@ -109,7 +109,7 @@ agents:
 flow:
   nodes:
     start: { type: start }
-    work: { type: agent, agent: a1 }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
     finish: { type: end }
   edges:
     - { from: start, to: work }
@@ -139,7 +139,7 @@ agents:
 flow:
   nodes:
     start: { type: start }
-    work: { type: agent, agent: a1 }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
     finish: { type: end }
   edges:
     - { from: start, to: work }

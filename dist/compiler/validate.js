@@ -55,6 +55,12 @@ function validateSurfaceBodies(source, diagnostics) {
         if ((node.type === 'agent' || node.type === 'task') && node.inline_surface !== undefined) {
             validateSurfaceBody(source, node.inline_surface, `flow.nodes.${nodeName}.inline_surface`, diagnostics);
         }
+        // Runtime contract: an AgentNode without tasks fails at execution with
+        // "AgentNode '<name>' has no tasks to execute" — catch it at build time.
+        if (node.type === 'agent' && node.tasks.length === 0) {
+            diagnostics.push(makeError(`flow.nodes.${nodeName}.tasks`, `agent node '${nodeName}' has no tasks — the runtime requires at least one. ` +
+                `Add a tasks: list (instructions), or use a 'task' node instead.`));
+        }
     }
 }
 function validateSurfaceBody(source, surface, basePath, diagnostics) {

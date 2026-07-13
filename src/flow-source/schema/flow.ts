@@ -58,10 +58,26 @@ export const startNodeSchema = z.strictObject({
     .describe('Initial flow-state variables available to downstream nodes.'),
 });
 
+export const agentNodeTaskSchema = z.strictObject({
+  name: z.string().optional().describe('Task name; defaults to "task-<order>".'),
+  instructions: z.string().min(1).describe('What the agent must do in this task.'),
+  output_schema: z
+    .record(z.string(), z.unknown())
+    .default({})
+    .describe('Optional JSON schema for the task output; {} means free-form.'),
+});
+
 export const agentNodeSchema = z.strictObject({
   type: z.literal('agent'),
   position: positionField,
   agent: entityRef('The AgentDefinition this node runs.'),
+  tasks: z
+    .array(agentNodeTaskSchema)
+    .default([])
+    .describe(
+      'Ordered tasks the agent executes at this node. The runtime requires at least one — ' +
+        'an agent node without tasks fails with "has no tasks to execute".',
+    ),
   surfaces: z
     .array(entityRefSchema)
     .default([])
