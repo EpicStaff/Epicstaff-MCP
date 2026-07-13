@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
+    "compile": "tsx scripts/compile.ts",
     "build": "tsc -p .",
     "start": "node dist/index.js",
     "test": "vitest run",
