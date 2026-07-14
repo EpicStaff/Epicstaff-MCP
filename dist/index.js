@@ -28907,7 +28907,11 @@ async function runTool(work) {
       return toContent(
         err(error2.message, {
           validationErrors: error2.validationErrors,
-          hint: hintFor(error2)
+          hint: hintFor(error2),
+          status: error2.status,
+          url: error2.url,
+          // Only useful when the failure wasn't already decoded into validationErrors.
+          ...error2.validationErrors?.length ? {} : { bodyExcerpt: error2.bodyExcerpt }
         })
       );
     }
@@ -29045,15 +29049,37 @@ var KnowledgeApi = class {
     }
     return this.client.post(`documents/source-collection/${collectionId}/upload/`, { formData });
   }
+  /**
+   * Create (or idempotently update) the naive RAG for a collection and return
+   * its backend id. The endpoint is `create_or_update` server-side, so a repeat
+   * call for the same collection returns the same row rather than duplicating.
+   */
   async createNaiveRag(collectionId, embedderId) {
-    return this.client.post(`naive-rag/collections/${collectionId}/naive-rag/`, {
-      body: { embedder_id: embedderId }
-    });
+    const response = await this.client.post(
+      `naive-rag/collections/${collectionId}/naive-rag/`,
+      { body: { embedder_id: embedderId } }
+    );
+    const id = response.naive_rag?.naive_rag_id;
+    if (id === void 0) {
+      throw new Error(
+        `naive-rag creation did not return a naive_rag_id (got: ${JSON.stringify(response)}).`
+      );
+    }
+    return id;
   }
+  /** Create (or idempotently update) the graph RAG for a collection; returns its backend id. */
   async createGraphRag(collectionId, embedderId, llmId) {
-    return this.client.post(`graph-rag/collections/${collectionId}/graph-rag/`, {
-      body: { embedder_id: embedderId, llm_id: llmId }
-    });
+    const response = await this.client.post(
+      `graph-rag/collections/${collectionId}/graph-rag/`,
+      { body: { embedder_id: embedderId, llm_id: llmId } }
+    );
+    const id = response.graph_rag?.graph_rag_id;
+    if (id === void 0) {
+      throw new Error(
+        `graph-rag creation did not return a graph_rag_id (got: ${JSON.stringify(response)}).`
+      );
+    }
+    return id;
   }
   /** Kick off async indexing; readiness is checked via get_collection_status. */
   async startIndexing(ragId, ragType) {
@@ -30437,6 +30463,32 @@ function sortRecord(record2) {
   return sorted;
 }
 
+// src/compiler/variable-domain.ts
+function producedTopLevelNames(source) {
+  const names = /* @__PURE__ */ new Set();
+  for (const node of Object.values(source.flow.nodes)) {
+    const writePath = node.output_variable_path;
+    if (typeof writePath !== "string" || writePath.trim() === "") continue;
+    const parsed = parseVarPath(writePath);
+    if (isVarPathError(parsed) || parsed.isShared) continue;
+    const [root] = parsed.segments;
+    if (root !== void 0) names.add(root);
+  }
+  return [...names];
+}
+var CONVENTIONAL_DOMAIN_VARIABLES = { context: null };
+function buildStartVariableDomain(source, startInitialState) {
+  const domain = { ...CONVENTIONAL_DOMAIN_VARIABLES };
+  for (const name of producedTopLevelNames(source)) {
+    domain[name] = null;
+  }
+  for (const [name, declaration] of Object.entries(source.variables ?? {})) {
+    domain[name] = declarationDefault(declaration);
+  }
+  Object.assign(domain, startInitialState);
+  return domain;
+}
+
 // src/graph/temp-id.ts
 import { randomUUID } from "node:crypto";
 
@@ -31439,7 +31491,7 @@ function buildRagPlan(collection, registry2) {
   if (rag.strategy === "naive") {
     return {
       strategy: "naive",
-      embedder: rag.embedder !== void 0 ? { $ref: `embedders.existing:${rag.embedder}` } : { $ref: "embedders.default" }
+      embedder: rag.embedder !== void 0 ? { $ref: `embedders.${rag.embedder}` } : { $ref: "embedders.default" }
     };
   }
   return {
@@ -31600,14 +31652,10 @@ async function buildGraph(source, flowDir, registry2, diagnostics) {
     };
     switch (node.type) {
       case "start": {
-        const declaredDefaults = {};
-        for (const [name, declaration] of Object.entries(source.variables ?? {})) {
-          declaredDefaults[name] = declarationDefault(declaration);
-        }
         nodes.push({
           ...base,
           type: "start",
-          data: { initialState: { ...declaredDefaults, ...node.initial_state } }
+          data: { initialState: buildStartVariableDomain(source, node.initial_state ?? {}) }
         });
         break;
       }
@@ -32171,6 +32219,24 @@ function validateTopology(source, diagnostics) {
       continue;
     }
     namesByLowercase.set(lower, nodeName);
+  }
+  const plainOutgoing = /* @__PURE__ */ new Map();
+  for (const edge of source.flow.edges) {
+    if (edge.to === void 0) continue;
+    const targets = plainOutgoing.get(edge.from) ?? [];
+    targets.push(edge.to);
+    plainOutgoing.set(edge.from, targets);
+  }
+  for (const [fromNode, targets] of plainOutgoing) {
+    if (targets.length > 1) {
+      const isStart = nodes[fromNode]?.type === "start";
+      diagnostics.push(
+        makeError(
+          `flow.nodes.${fromNode}`,
+          `node '${fromNode}' has ${targets.length} outgoing edges (to ${targets.map((t) => `'${t}'`).join(", ")}) \u2014 parallel fan-out is not supported: the runtime runs one active path and concurrent branches crash on shared state${isStart ? " (and the start node keeps only its first edge)" : ""}. Sequence the work into one path, or branch with a decision-table / conditional edge (each routes to a single node).`
+        )
+      );
+    }
   }
   const hasTrigger = Object.values(nodes).some((node) => TRIGGER_NODE_TYPES.has(node.type));
   if (!hasTrigger) {
@@ -33264,9 +33330,13 @@ var EntityPusher = class {
       case "mcp_tool":
         return (await this.tools.createMcpTool(payload)).id;
       case "knowledge_collection": {
-        const collection = await this.knowledge.createCollection(
-          payload.collection_name ?? plan.name
-        );
+        const collectionName = payload.collection_name ?? plan.name;
+        const existingId = await this.lookupByName(plan, collectionName);
+        if (existingId !== void 0) {
+          logger.info(`Reusing existing collection "${collectionName}" (#${existingId})`);
+          return existingId;
+        }
+        const collection = await this.knowledge.createCollection(collectionName);
         const id = collection.collection_id ?? collection.id;
         if (id === void 0) {
           throw new Error("Backend did not return an id for the created collection.");
@@ -33336,12 +33406,10 @@ var EntityPusher = class {
         const embedderId = await this.resolveRagRef(plan.rag.embedder, idMap);
         let ragId;
         if (plan.rag.strategy === "naive") {
-          const created = await this.knowledge.createNaiveRag(collectionId, embedderId);
-          ragId = created.rag_id ?? created.id;
+          ragId = await this.knowledge.createNaiveRag(collectionId, embedderId);
         } else {
           const llmId = await this.resolveRagRef(plan.rag.llm ?? 0, idMap);
-          const created = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
-          ragId = created.rag_id ?? created.id;
+          ragId = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
         }
         await this.knowledge.startIndexing(ragId, plan.rag.strategy);
         logger.info(`Attached ${plan.rag.strategy} RAG (#${ragId}) to collection #${collectionId}; indexing started`);
@@ -33358,23 +33426,48 @@ var EntityPusher = class {
     const resolved = idMap.get(ref.$ref);
     if (resolved !== void 0) return resolved;
     if (ref.$ref.startsWith("embedders.")) {
-      const embedderName = ref.$ref.slice("embedders.".length);
+      const embedderName = ref.$ref.slice("embedders.".length).replace(/^existing:/, "");
       const configs = await this.llm.listEmbeddingConfigs();
       if (embedderName === "default") {
-        const defaultConfig = await this.context.client.get("default-embedding-config/").catch(() => void 0);
-        const id = defaultConfig?.id ?? configs[0]?.id;
-        if (id !== void 0) return id;
-        throw new Error(
-          "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder)."
-        );
+        return this.resolveDefaultEmbedderId(configs);
       }
       const named = configs.find(
         (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === embedderName.toLowerCase()
       );
       if (named) return named.id;
-      throw new Error(`Embedding config "${embedderName}" not found in the organization.`);
+      const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+      throw new Error(
+        `Embedding config "${embedderName}" not found in the organization. Available embedding configs: ${available || "(none)"}. Fix knowledge.<name>.rag.embedder, or omit it to use the org default.`
+      );
     }
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
+  }
+  /**
+   * Resolve "the org default embedder" to a concrete EmbeddingConfig id.
+   *
+   * `default-embedding-config/` is NOT a pointer to a selectable EmbeddingConfig
+   * row — it returns only `{model, task_type, api_key}` (no id). So we resolve by
+   * matching that default's embedding *model* to a config that uses it; if that is
+   * ambiguous or absent we fall back to the sole config, and only error when the
+   * choice is genuinely undecidable.
+   */
+  async resolveDefaultEmbedderId(configs) {
+    if (configs.length === 0) {
+      throw new Error(
+        "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder)."
+      );
+    }
+    const defaultConfig = await this.context.client.get("default-embedding-config/").catch(() => void 0);
+    const defaultModelId = defaultConfig?.model;
+    if (defaultModelId !== void 0) {
+      const byModel = configs.find((config2) => config2.model === defaultModelId);
+      if (byModel) return byModel.id;
+    }
+    if (configs.length === 1) return configs[0].id;
+    const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+    throw new Error(
+      `Cannot pick a default embedding config: the organization has several and none matches the configured default embedding model. Set knowledge.<name>.rag.embedder to one of: ${available}.`
+    );
   }
 };
 function isSymbolicRefLike(value) {
@@ -34478,11 +34571,20 @@ var SessionsApi = class {
     this.client = client;
   }
   client;
-  /** POST run-session/ — multipart, exactly like the frontend RunGraphService.runGraph(). */
+  /**
+   * POST run-session/ — multipart.
+   *
+   * The seed variables MUST be sent under the form field `variables`: the backend
+   * `RunSessionSerializer` only reads `variables` (a JSONField) and ignores everything else.
+   * The EpicStaff web `RunGraphService` posts this as `initial_state`, which the backend
+   * silently drops — so per-run input never reaches the graph and it falls back to the graph's
+   * persistent/start-node defaults. We deliberately diverge from the frontend here and post the
+   * field the backend actually consumes.
+   */
   async runGraph(graphId, initialState = {}) {
     const formData = new FormData();
     formData.append("graph_id", String(graphId));
-    formData.append("initial_state", JSON.stringify(initialState));
+    formData.append("variables", JSON.stringify(initialState));
     return this.client.post("run-session/", { formData });
   }
   async getSession(sessionId) {
@@ -34519,6 +34621,34 @@ var SessionsApi = class {
     return this.client.post("answer-to-llm/", { body: request });
   }
 };
+function summarizeMessages(messages) {
+  const out = [];
+  let finalVariables = null;
+  for (const message of messages) {
+    const data = message.message_data ?? {};
+    const node = String(message.name ?? "");
+    const order = Number(message.execution_order ?? 0);
+    const state = data.state;
+    if (state?.variables && typeof state.variables === "object") {
+      finalVariables = state.variables;
+    }
+    const type = data.message_type;
+    if (type === "agent_node_stream" && data.event === "task_finish") {
+      out.push({ node, order, kind: "agent_reply", detail: String(data.data?.message ?? "") });
+    } else if (type === "python" && data.python_code_execution_data) {
+      const py = data.python_code_execution_data;
+      const detail = py.returncode === 0 ? String(py.result_data ?? "") : `error: ${py.stderr ?? py.result_data ?? ""}`;
+      out.push({ node, order, kind: "python_result", detail });
+    } else if (type === "error" || data.event === "error") {
+      out.push({ node, order, kind: "error", detail: JSON.stringify(data.data ?? data) });
+    } else if (type === "graph_end") {
+      out.push({ node: node || "__graph__", order, kind: "graph_end", detail: "" });
+    }
+  }
+  const reply = finalVariables?.reply;
+  const finalReply = typeof reply === "string" ? reply : reply == null ? null : JSON.stringify(reply);
+  return { count: out.length, messages: out, final_reply: finalReply, final_variables: finalVariables };
+}
 
 // src/tools/run.tools.ts
 function registerRunTools(server, context) {
@@ -34527,10 +34657,12 @@ function registerRunTools(server, context) {
     "run_flow",
     {
       title: "Run a flow",
-      description: "Start a run session for a pushed flow graph (POST run-session/). Returns the session_id to poll with get_session_updates and read with get_session_messages. initial_state seeds the graph state variables.",
+      description: "Start a run session for a pushed flow graph (POST run-session/). Returns the session_id to poll with get_session_updates and read with get_session_messages. initial_state seeds the graph state variables (sent to the backend as the `variables` field). For graphs with persistent_variables enabled the backend merges the previous ended session's variables as a base, so pass the FULL variables map you want (e.g. reset downstream fields to {} / null) to avoid stale carryover from an earlier run.",
       inputSchema: {
         graph_id: external_exports.number().int().describe("Backend graph id (from push_flow output or list_graphs)"),
-        initial_state: external_exports.record(external_exports.unknown()).optional().describe("Initial state variables for the run (JSON object). Defaults to {}.")
+        initial_state: external_exports.record(external_exports.unknown()).optional().describe(
+          'Initial state variables for the run, keyed by top-level variable name (e.g. {"chat": {"message": "..."}, "quote": {}, "reply": null}). Defaults to {}.'
+        )
       }
     },
     async ({ graph_id, initial_state }) => runTool(async () => {
@@ -34582,16 +34714,19 @@ function registerRunTools(server, context) {
     "get_session_messages",
     {
       title: "Read session messages",
-      description: "The full execution trace of a session \u2014 per-node messages, agent outputs, errors. The primary debugging surface after (or during) a run.",
+      description: "The execution trace of a session \u2014 per-node messages, agent outputs, errors. The primary debugging surface after (or during) a run. Defaults to view='concise': a compact timeline (agent replies, python results, errors) plus the terminal `final_reply` and `final_variables`, which is what you usually want and is far cheaper in tokens. Use view='full' for the raw paginated messages (large \u2014 includes per-message state snapshots).",
       inputSchema: {
         session_id: external_exports.number().int(),
-        limit: external_exports.number().int().min(1).max(500).optional().describe("Page size, default 100"),
+        view: external_exports.enum(["concise", "full"]).optional().describe("'concise' (default) collapses the trace and surfaces final_reply; 'full' returns raw messages."),
+        limit: external_exports.number().int().min(1).max(500).optional().describe("Page size for full view / fetch size, default 100"),
         offset: external_exports.number().int().min(0).optional()
       }
     },
-    async ({ session_id, limit, offset }) => runTool(async () => {
+    async ({ session_id, view, limit, offset }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      return sessions.getSessionMessages(session_id, limit ?? 100, offset ?? 0);
+      const page = await sessions.getSessionMessages(session_id, limit ?? 100, offset ?? 0);
+      if (view === "full") return page;
+      return summarizeMessages(page.results);
     })
   );
   server.registerTool(
@@ -34786,18 +34921,35 @@ function registerReferenceTools(server, context) {
     "list_llm_models",
     {
       title: "List LLM models and providers",
-      description: "List available LLM models with their providers \u2014 needed when creating a new llm_config.",
-      inputSchema: {}
+      description: "List available LLM models with their providers \u2014 needed when creating a new llm_config. The full catalog is large (thousands of models), so results are filtered and capped: pass `search` to match model name (case-insensitive substring) and/or `provider` to match provider name, and `limit` to cap the count (default 50). The response reports total matches and how many were returned so you can narrow the search.",
+      inputSchema: {
+        search: external_exports.string().optional().describe("Case-insensitive substring to match against the model name."),
+        provider: external_exports.string().optional().describe("Case-insensitive substring to match against the provider name."),
+        limit: external_exports.number().int().min(1).max(200).optional().describe("Max models to return (default 50).")
+      }
     },
-    async () => runTool(async () => {
+    async ({ search, provider, limit }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       const [providers, models] = await Promise.all([llm.listProviders(), llm.listModels()]);
-      const providerName = new Map(providers.map((provider) => [provider.id, provider.name]));
-      return models.map((model) => ({
+      const providerName = new Map(providers.map((p) => [p.id, p.name]));
+      const searchLower = search?.toLowerCase();
+      const providerLower = provider?.toLowerCase();
+      const cap = limit ?? 50;
+      const matches = models.map((model) => ({
         id: model.id,
         name: model.name,
-        provider: providerName.get(model.llm_provider) ?? model.llm_provider
-      }));
+        provider: providerName.get(model.llm_provider) ?? String(model.llm_provider)
+      })).filter((model) => {
+        if (searchLower && !model.name.toLowerCase().includes(searchLower)) return false;
+        if (providerLower && !model.provider.toLowerCase().includes(providerLower)) return false;
+        return true;
+      });
+      return {
+        total_matches: matches.length,
+        returned: Math.min(matches.length, cap),
+        truncated: matches.length > cap,
+        models: matches.slice(0, cap)
+      };
     })
   );
   server.registerTool(
@@ -34869,6 +35021,366 @@ function registerReferenceTools(server, context) {
   );
 }
 
+// src/tools/ui.tools.ts
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
+init_graphs();
+
+// src/ui/chat-ui.ts
+function resolveConfig(config2) {
+  return {
+    apiUrl: config2.apiUrl,
+    graphId: config2.graphId,
+    graphName: config2.graphName,
+    orgId: config2.orgId,
+    apiKey: config2.apiKey ?? "",
+    title: config2.title ?? config2.graphName,
+    subtitle: config2.subtitle ?? "EpicStaff chat agent",
+    inputPath: config2.inputPath ?? "chat.message",
+    replyPath: config2.replyPath ?? "reply",
+    resetVariables: config2.resetVariables ?? {},
+    welcome: config2.welcome ?? "Hi! How can I help you today?"
+  };
+}
+function escapeHtml(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function renderChatUi(config2) {
+  const resolved = resolveConfig(config2);
+  const configJson = JSON.stringify(resolved).replace(/<\//g, "<\\/");
+  const title = escapeHtml(resolved.title);
+  const subtitle = escapeHtml(resolved.subtitle);
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${title}</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1a1c1f; --muted: #6b7280;
+    --border: #e4e7ec; --accent: #4f46e5; --accent-text: #ffffff;
+    --user-bg: #4f46e5; --user-text: #ffffff; --bot-bg: #f0f1f4; --bot-text: #1a1c1f;
+    --error: #b42318; --error-bg: #fef3f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8ec; --muted: #9aa2b1;
+      --border: #262b35; --accent: #7c74ff; --accent-text: #0f1115;
+      --user-bg: #7c74ff; --user-text: #0f1115; --bot-bg: #222732; --bot-text: #e6e8ec;
+      --error: #ff8a80; --error-bg: #2a1a1a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); display: flex; justify-content: center;
+  }
+  .app { width: 100%; max-width: 720px; height: 100vh; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  header .avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--accent); color: var(--accent-text); display: flex; align-items: center; justify-content: center; font-weight: 700; flex: 0 0 auto; }
+  header .titles { flex: 1 1 auto; min-width: 0; }
+  header .titles h1 { font-size: 15px; margin: 0; line-height: 1.2; }
+  header .titles p { font-size: 12px; margin: 2px 0 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header button.gear { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; padding: 6px; border-radius: 8px; }
+  header button.gear:hover { background: var(--bot-bg); }
+  #messages { flex: 1 1 auto; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; }
+  .row.user { justify-content: flex-end; }
+  .bubble { max-width: 78%; padding: 10px 14px; border-radius: 16px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+  .row.user .bubble { background: var(--user-bg); color: var(--user-text); border-bottom-right-radius: 4px; }
+  .row.bot .bubble { background: var(--bot-bg); color: var(--bot-text); border-bottom-left-radius: 4px; }
+  .row.error .bubble { background: var(--error-bg); color: var(--error); font-size: 13px; }
+  .typing .bubble { display: inline-flex; gap: 4px; }
+  .typing .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: 0.5; animation: blink 1.2s infinite; }
+  .typing .dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing .dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
+  form#composer { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--border); }
+  #input { flex: 1 1 auto; resize: none; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; font: inherit; font-size: 14px; background: var(--bg); color: var(--text); max-height: 120px; }
+  #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button.send { background: var(--accent); color: var(--accent-text); border: none; border-radius: 12px; padding: 0 18px; font-weight: 600; cursor: pointer; }
+  button.send:disabled { opacity: 0.5; cursor: default; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; padding: 20px; }
+  .modal-backdrop.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: 100%; max-width: 420px; padding: 20px; }
+  .modal h2 { margin: 0 0 14px; font-size: 16px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .field input { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; background: var(--bg); color: var(--text); }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  .modal .actions button { border-radius: 8px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .modal .actions button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="avatar" id="avatar">ES</div>
+      <div class="titles"><h1>${title}</h1><p>${subtitle}</p></div>
+      <button class="gear" id="open-settings" title="Settings" aria-label="Settings">&#9881;</button>
+    </header>
+    <div id="messages"></div>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="Type your message..." autocomplete="off"></textarea>
+      <button type="submit" class="send" id="send">Send</button>
+    </form>
+  </div>
+
+  <div class="modal-backdrop" id="settings">
+    <div class="modal">
+      <h2>Connection settings</h2>
+      <div class="field"><label>API base URL</label><input id="s-apiUrl" type="text" /></div>
+      <div class="field"><label>API key</label><input id="s-apiKey" type="password" placeholder="ApiKey value" /></div>
+      <div class="field"><label>Organization id</label><input id="s-orgId" type="number" /></div>
+      <div class="field"><label>Graph id</label><input id="s-graphId" type="number" /></div>
+      <div class="actions">
+        <button type="button" id="s-cancel">Cancel</button>
+        <button type="button" class="primary" id="s-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+var ES_CONFIG = ${configJson};
+</script>
+<script>
+(function () {
+  var DEFAULTS = ES_CONFIG;
+  var LS_KEY = 'es_chat_ui:' + DEFAULTS.graphId;
+
+  function loadSettings() {
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch (e) { saved = {}; }
+    return {
+      apiUrl: saved.apiUrl || DEFAULTS.apiUrl,
+      apiKey: saved.apiKey || DEFAULTS.apiKey || '',
+      orgId: saved.orgId != null ? saved.orgId : DEFAULTS.orgId,
+      graphId: saved.graphId != null ? saved.graphId : DEFAULTS.graphId
+    };
+  }
+  function saveSettings(s) { localStorage.setItem(LS_KEY, JSON.stringify(s)); }
+
+  var settings = loadSettings();
+
+  var messagesEl = document.getElementById('messages');
+  var formEl = document.getElementById('composer');
+  var inputEl = document.getElementById('input');
+  var sendEl = document.getElementById('send');
+  var modalEl = document.getElementById('settings');
+
+  DEFAULTS.title = DEFAULTS.title || DEFAULTS.graphName;
+  document.getElementById('avatar').textContent = (DEFAULTS.title || 'ES').slice(0, 2).toUpperCase();
+
+  function headers() {
+    return { 'Authorization': 'ApiKey ' + settings.apiKey, 'X-Organization-Id': String(settings.orgId) };
+  }
+
+  function setPath(obj, path, value) {
+    var parts = path.split('.');
+    var cur = obj;
+    for (var i = 0; i < parts.length - 1; i++) {
+      if (typeof cur[parts[i]] !== 'object' || cur[parts[i]] === null) cur[parts[i]] = {};
+      cur = cur[parts[i]];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+  function getPath(obj, path) {
+    var parts = path.split('.'); var cur = obj;
+    for (var i = 0; i < parts.length; i++) { if (cur == null) return undefined; cur = cur[parts[i]]; }
+    return cur;
+  }
+
+  function addMessage(role, text) {
+    var row = document.createElement('div');
+    row.className = 'row ' + role;
+    var bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return row;
+  }
+
+  function addTyping() {
+    var row = document.createElement('div');
+    row.className = 'row bot typing';
+    row.id = 'typing';
+    var bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+    row.appendChild(bubble);
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  function removeTyping() {
+    var t = document.getElementById('typing');
+    if (t) t.parentNode.removeChild(t);
+  }
+
+  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function runTurn(text) {
+    var vars = JSON.parse(JSON.stringify(DEFAULTS.resetVariables || {}));
+    setPath(vars, DEFAULTS.inputPath, text);
+    var fd = new FormData();
+    fd.append('graph_id', String(settings.graphId));
+    fd.append('variables', JSON.stringify(vars));
+    return fetch(settings.apiUrl + 'run-session/', { method: 'POST', headers: headers(), body: fd })
+      .then(function (r) { if (!r.ok) throw new Error('run-session failed (' + r.status + ')'); return r.json(); })
+      .then(function (d) { return poll(d.session_id); });
+  }
+
+  function poll(sessionId) {
+    var terminal = { end: 1, error: 1, stop: 1, expired: 1 };
+    function step() {
+      return fetch(settings.apiUrl + 'sessions/' + sessionId + '/get-updates/', { headers: headers() })
+        .then(function (r) { return r.json(); })
+        .then(function (u) {
+          if (terminal[u.status]) return u.status;
+          return delay(800).then(step);
+        });
+    }
+    return step().then(function (status) { return fetchReply(sessionId, status); });
+  }
+
+  function fetchReply(sessionId, status) {
+    return fetch(settings.apiUrl + 'graph-session-messages/?session_id=' + sessionId + '&limit=500', { headers: headers() })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var results = d.results || [];
+        var finalVars = null, lastAgent = null;
+        for (var i = 0; i < results.length; i++) {
+          var md = results[i].message_data || {};
+          if (md.state && md.state.variables) finalVars = md.state.variables;
+          if (md.message_type === 'agent_node_stream' && md.event === 'task_finish' && md.data && md.data.message) lastAgent = md.data.message;
+        }
+        var reply = finalVars ? getPath(finalVars, DEFAULTS.replyPath) : null;
+        if (typeof reply !== 'string' || !reply) reply = lastAgent;
+        if (status === 'error' && !reply) reply = 'The flow ended with an error. Open the session in EpicStaff to see details.';
+        return reply || 'No reply was produced by the flow.';
+      });
+  }
+
+  function submit() {
+    var text = inputEl.value.trim();
+    if (!text) return;
+    if (!settings.apiKey) { openSettings(); return; }
+    addMessage('user', text);
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    sendEl.disabled = true;
+    addTyping();
+    runTurn(text)
+      .then(function (reply) { removeTyping(); addMessage('bot', reply); })
+      .catch(function (err) { removeTyping(); addMessage('error', String((err && err.message) || err)); })
+      .then(function () { sendEl.disabled = false; inputEl.focus(); });
+  }
+
+  formEl.addEventListener('submit', function (e) { e.preventDefault(); submit(); });
+  inputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+  });
+  inputEl.addEventListener('input', function () {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  });
+
+  function openSettings() {
+    document.getElementById('s-apiUrl').value = settings.apiUrl;
+    document.getElementById('s-apiKey').value = settings.apiKey;
+    document.getElementById('s-orgId').value = settings.orgId;
+    document.getElementById('s-graphId').value = settings.graphId;
+    modalEl.classList.add('open');
+  }
+  function closeSettings() { modalEl.classList.remove('open'); }
+
+  document.getElementById('open-settings').addEventListener('click', openSettings);
+  document.getElementById('s-cancel').addEventListener('click', closeSettings);
+  document.getElementById('s-save').addEventListener('click', function () {
+    settings = {
+      apiUrl: document.getElementById('s-apiUrl').value.trim() || DEFAULTS.apiUrl,
+      apiKey: document.getElementById('s-apiKey').value.trim(),
+      orgId: Number(document.getElementById('s-orgId').value) || DEFAULTS.orgId,
+      graphId: Number(document.getElementById('s-graphId').value) || DEFAULTS.graphId
+    };
+    if (settings.apiUrl.charAt(settings.apiUrl.length - 1) !== '/') settings.apiUrl += '/';
+    saveSettings(settings);
+    closeSettings();
+  });
+  modalEl.addEventListener('click', function (e) { if (e.target === modalEl) closeSettings(); });
+
+  if (DEFAULTS.welcome) addMessage('bot', DEFAULTS.welcome);
+  if (!settings.apiKey) openSettings();
+  inputEl.focus();
+})();
+</script>
+</body>
+</html>
+`;
+}
+
+// src/tools/ui.tools.ts
+function registerUiTools(server, context) {
+  const graphs = new GraphsApi(context.client);
+  server.registerTool(
+    "generate_chat_ui",
+    {
+      title: "Generate a chat UI",
+      description: "Generate a self-contained HTML chat UI (inline CSS/JS, no external assets) for a pushed flow graph. The page drives the graph via its run-session API, authenticating with the current API key + active organization (both CORS-allowed), so it works from file:// or any static host with no backend change. Configure how the user message maps into the flow via input_path, and where the reply is read from via reply_path. Set reset_variables to the downstream fields to clear each turn so persistent-variables graphs do not carry stale answers. Open the returned file path in a browser.",
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend graph id to drive (from push_flow / list_graphs)."),
+        output_path: external_exports.string().describe("Absolute path of the .html file to write."),
+        title: external_exports.string().optional().describe("Header title (defaults to the graph name)."),
+        subtitle: external_exports.string().optional().describe("Header subtitle / one-line description."),
+        input_path: external_exports.string().optional().describe('Dotted variable path that receives the user message. Default "chat.message".'),
+        reply_path: external_exports.string().optional().describe('Dotted variable path holding the reply in the final state. Default "reply".'),
+        reset_variables: external_exports.record(external_exports.unknown()).optional().describe('Variables sent fresh each turn before the message is written, e.g. {"extraction":{},"quote":{},"reply":null}.'),
+        welcome: external_exports.string().optional().describe("Greeting bubble shown before the first user message."),
+        embed_api_key: external_exports.boolean().optional().describe("Prefill the current API key into the page (default true). Set false to make the user enter it.")
+      }
+    },
+    async ({ graph_id, output_path, title, subtitle, input_path, reply_path, reset_variables, welcome, embed_api_key }) => runTool(async () => {
+      if (!isAbsolute(output_path)) {
+        throw new Error("output_path must be an absolute path to a .html file.");
+      }
+      const apiKey = await context.auth.ensureAuthenticated();
+      const orgId = context.org.requireActiveOrg();
+      const light = await graphs.listLight();
+      const graph = light.find((candidate) => candidate.id === graph_id);
+      if (!graph) {
+        throw new Error(`Graph ${graph_id} was not found in the active organization. Push it first.`);
+      }
+      const html = renderChatUi({
+        apiUrl: context.config.apiUrl,
+        graphId: graph_id,
+        graphName: graph.name,
+        orgId,
+        apiKey: embed_api_key === false ? "" : apiKey,
+        title,
+        subtitle: subtitle ?? (graph.description || void 0),
+        inputPath: input_path,
+        replyPath: reply_path,
+        resetVariables: reset_variables,
+        welcome
+      });
+      mkdirSync3(dirname(output_path), { recursive: true });
+      writeFileSync3(output_path, html);
+      return {
+        output_path,
+        open: `file://${output_path}`,
+        graph_id,
+        graph_name: graph.name,
+        bytes: html.length,
+        embedded_api_key: embed_api_key !== false,
+        next: "Open the file in a browser. Use the gear icon to change API base / key / org / graph id."
+      };
+    })
+  );
+}
+
 // src/tools/registry.ts
 function registerAllTools(server, config2) {
   const context = createContext(config2);
@@ -34876,6 +35388,7 @@ function registerAllTools(server, config2) {
   registerFlowTools(server, context);
   registerRunTools(server, context);
   registerReferenceTools(server, context);
+  registerUiTools(server, context);
 }
 
 // src/index.ts
@@ -34883,7 +35396,7 @@ async function main() {
   const config2 = loadConfig();
   const server = new McpServer({
     name: "epicstaff",
-    version: "0.1.0"
+    version: "0.2.0"
   });
   registerAllTools(server, config2);
   const transport = new StdioServerTransport();
