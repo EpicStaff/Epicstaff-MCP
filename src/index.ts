@@ -8,7 +8,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const server = new McpServer({
     name: 'epicstaff',
-    version: '0.1.0',
+    version: '0.2.0',
   });
 
   registerAllTools(server, config);
