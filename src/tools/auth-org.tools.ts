@@ -14,6 +14,10 @@ export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typ
         err(error.message, {
           validationErrors: error.validationErrors,
           hint: hintFor(error),
+          status: error.status,
+          url: error.url,
+          // Only useful when the failure wasn't already decoded into validationErrors.
+          ...(error.validationErrors?.length ? {} : { bodyExcerpt: error.bodyExcerpt }),
         }),
       );
     }

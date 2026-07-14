@@ -15,10 +15,11 @@
  *  - `existing:` refs:    `{$ref: "<section>.existing:<remoteName>"}` — matches
  *    the corresponding `resolve-existing` plan key. The `existing:` prefix
  *    prevents collisions between a local name and a remote name.
- *  - embedders:           `{$ref: "embedders.existing:<name>"}` or
+ *  - embedders:           `{$ref: "embedders.<name>"}` or
  *    `{$ref: "embedders.default"}`. There is NO EntityPlan for embedders (no
- *    `EntityKind` exists) — the pusher resolves these directly against the
- *    `embedding-configs/` list (default = the org default embedding config).
+ *    `EntityKind` exists) and no local/remote distinction (embedders are always
+ *    org-level), so there is no `existing:` prefix — the pusher resolves the name
+ *    directly against the `embedding-configs/` list (default = the org default).
  *  - subgraph flows:      `{$ref: "flows.<siblingFlowName>"}` or
  *    `{$ref: "flows.existing:<remoteName>"}`. Also no EntityPlan (no kind) —
  *    the pusher resolves flow names against the graphs list / sibling builds.
@@ -365,7 +366,7 @@ function buildRagPlan(collection: KnowledgeCollectionSource, registry: RefRegist
       strategy: 'naive',
       embedder:
         rag.embedder !== undefined
-          ? { $ref: `embedders.existing:${rag.embedder}` }
+          ? { $ref: `embedders.${rag.embedder}` }
           : { $ref: 'embedders.default' },
     };
   }

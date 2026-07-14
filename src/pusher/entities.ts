@@ -264,9 +264,17 @@ export class EntityPusher {
       case 'mcp_tool':
         return (await this.tools.createMcpTool(payload as never)).id;
       case 'knowledge_collection': {
-        const collection = await this.knowledge.createCollection(
-          (payload.collection_name as string | undefined) ?? plan.name,
-        );
+        const collectionName = (payload.collection_name as string | undefined) ?? plan.name;
+        // Collections have no unique-name constraint and the lockfile is only
+        // persisted after the whole entity walk succeeds, so a mid-push failure
+        // (e.g. a later RAG/indexing error) would otherwise create a fresh
+        // duplicate on every retry. Reuse an existing same-named collection.
+        const existingId = await this.lookupByName(plan, collectionName);
+        if (existingId !== undefined) {
+          logger.info(`Reusing existing collection "${collectionName}" (#${existingId})`);
+          return existingId;
+        }
+        const collection = await this.knowledge.createCollection(collectionName);
         const id = collection.collection_id ?? collection.id;
         if (id === undefined) {
           throw new Error('Backend did not return an id for the created collection.');
@@ -351,12 +359,10 @@ export class EntityPusher {
         const embedderId = await this.resolveRagRef(plan.rag.embedder, idMap);
         let ragId: number;
         if (plan.rag.strategy === 'naive') {
-          const created = await this.knowledge.createNaiveRag(collectionId, embedderId);
-          ragId = (created.rag_id ?? created.id) as number;
+          ragId = await this.knowledge.createNaiveRag(collectionId, embedderId);
         } else {
           const llmId = await this.resolveRagRef(plan.rag.llm ?? 0, idMap);
-          const created = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
-          ragId = (created.rag_id ?? created.id) as number;
+          ragId = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
         }
         await this.knowledge.startIndexing(ragId, plan.rag.strategy);
         logger.info(`Attached ${plan.rag.strategy} RAG (#${ragId}) to collection #${collectionId}; indexing started`);
@@ -379,27 +385,67 @@ export class EntityPusher {
     // `embedders.*` is a virtual section: embedding configs are org-level, not flow-source
     // entities. `embedders.default` = the org default; any other name = lookup by name.
     if (ref.$ref.startsWith('embedders.')) {
-      const embedderName = ref.$ref.slice('embedders.'.length);
+      // Tolerate a stray `existing:` prefix from older emitted artifacts — embedders
+      // have no local/remote distinction, so the prefix is never part of the real name.
+      const embedderName = ref.$ref.slice('embedders.'.length).replace(/^existing:/, '');
       const configs = await this.llm.listEmbeddingConfigs();
       if (embedderName === 'default') {
-        const defaultConfig = await this.context.client
-          .get<{ id?: number } | undefined>('default-embedding-config/')
-          .catch(() => undefined);
-        const id = defaultConfig?.id ?? (configs[0]?.id as number | undefined);
-        if (id !== undefined) return id;
-        throw new Error(
-          'No embedding config exists in this organization — create one in EpicStaff settings ' +
-            '(knowledge indexing needs an embedder).',
-        );
+        return this.resolveDefaultEmbedderId(configs);
       }
       const named = configs.find(
         (config) => String(config.custom_name ?? config.name ?? '').toLowerCase() === embedderName.toLowerCase(),
       );
       if (named) return named.id as number;
-      throw new Error(`Embedding config "${embedderName}" not found in the organization.`);
+      const available = configs
+        .map((config) => String(config.custom_name ?? config.name ?? ''))
+        .filter(Boolean)
+        .join(', ');
+      throw new Error(
+        `Embedding config "${embedderName}" not found in the organization. ` +
+          `Available embedding configs: ${available || '(none)'}. ` +
+          'Fix knowledge.<name>.rag.embedder, or omit it to use the org default.',
+      );
     }
 
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
+  }
+
+  /**
+   * Resolve "the org default embedder" to a concrete EmbeddingConfig id.
+   *
+   * `default-embedding-config/` is NOT a pointer to a selectable EmbeddingConfig
+   * row — it returns only `{model, task_type, api_key}` (no id). So we resolve by
+   * matching that default's embedding *model* to a config that uses it; if that is
+   * ambiguous or absent we fall back to the sole config, and only error when the
+   * choice is genuinely undecidable.
+   */
+  private async resolveDefaultEmbedderId(configs: Array<Record<string, unknown>>): Promise<number> {
+    if (configs.length === 0) {
+      throw new Error(
+        'No embedding config exists in this organization — create one in EpicStaff settings ' +
+          '(knowledge indexing needs an embedder).',
+      );
+    }
+
+    const defaultConfig = await this.context.client
+      .get<{ model?: number } | undefined>('default-embedding-config/')
+      .catch(() => undefined);
+    const defaultModelId = defaultConfig?.model;
+    if (defaultModelId !== undefined) {
+      const byModel = configs.find((config) => config.model === defaultModelId);
+      if (byModel) return byModel.id as number;
+    }
+
+    if (configs.length === 1) return configs[0]!.id as number;
+
+    const available = configs
+      .map((config) => String(config.custom_name ?? config.name ?? ''))
+      .filter(Boolean)
+      .join(', ');
+    throw new Error(
+      'Cannot pick a default embedding config: the organization has several and none matches the ' +
+        `configured default embedding model. Set knowledge.<name>.rag.embedder to one of: ${available}.`,
+    );
   }
 }
 

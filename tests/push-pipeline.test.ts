@@ -29,6 +29,9 @@ class MockBackend {
   private graphSaveVersion = 1;
   savedGraphPayloads: unknown[] = [];
   createdByPath = new Map<string, number[]>();
+  collections: Array<{ collection_id: number; collection_name: string }> = [];
+  /** When > 0, the next N calls to process-rag-indexing/ fail with 400 (simulates a mid-push failure). */
+  failIndexingTimes = 0;
 
   private id(): number {
     this.nextId += 1;
@@ -58,8 +61,13 @@ class MockBackend {
     if (key === 'GET /api/llm-configs/')
       return { status: 200, body: [{ id: 55, custom_name: 'org-default-fcm', model: 10 }] };
     if (key === 'GET /api/embedding-configs/')
-      return { status: 200, body: [{ id: 71, custom_name: 'default-embedder' }] };
-    if (key === 'GET /api/default-embedding-config/') return { status: 200, body: { id: 71 } };
+      return { status: 200, body: [{ id: 71, custom_name: 'default-embedder', model: 20 }] };
+    // Mirrors DefaultEmbeddingConfigSerializer: no id — only the embedding model + task/key.
+    if (key === 'GET /api/default-embedding-config/')
+      return { status: 200, body: { model: 20, task_type: 'RETRIEVAL_DOCUMENT', api_key: null } };
+
+    // collection listing — used by the reuse-before-create idempotency guard.
+    if (key === 'GET /api/source-collections/') return { status: 200, body: { results: this.collections } };
 
     // entity creates
     const creates: Record<string, string> = {
@@ -75,6 +83,10 @@ class MockBackend {
       track.push(id);
       this.createdByPath.set(creates[key]!, track);
       const base = typeof body === 'object' && body !== null ? body : {};
+      if (creates[key] === 'source-collections') {
+        const collectionName = String((base as { collection_name?: unknown }).collection_name ?? '');
+        this.collections.push({ collection_id: id, collection_name: collectionName });
+      }
       return {
         status: 201,
         body: { ...base, id, collection_id: id },
@@ -90,10 +102,19 @@ class MockBackend {
     }
     if (/^POST \/api\/documents\/source-collection\/\d+\/upload\/$/.test(key))
       return { status: 201, body: { uploaded: 1 } };
+    // Mirrors NaiveRagViewSet.create_or_update: wrapped envelope, id as naive_rag_id.
     if (/^POST \/api\/naive-rag\/collections\/\d+\/naive-rag\/$/.test(key))
-      return { status: 201, body: { rag_id: this.id() } };
-    if (key === 'POST /api/process-rag-indexing/')
+      return {
+        status: 200,
+        body: { message: 'NaiveRag configured successfully', naive_rag: { naive_rag_id: this.id() } },
+      };
+    if (key === 'POST /api/process-rag-indexing/') {
+      if (this.failIndexingTimes > 0) {
+        this.failIndexingTimes -= 1;
+        return { status: 400, body: { error: 'indexing rejected' } };
+      }
       return { status: 200, body: { detail: 'started', rag_id: 1, rag_type: 'naive' } };
+    }
 
     // graph
     if (key === 'POST /api/graphs/') {
@@ -312,6 +333,19 @@ describe('push pipeline (mock backend)', () => {
     expect(byKey.get('agents.researcher')).toBe('updated');
     expect(byKey.get('surfaces.web_research')).toBe('reused');
     expect(byKey.get('tools.python_code_tools.fetch_page')).toBe('reused');
+  });
+
+  it('a mid-push indexing failure does not duplicate the collection on retry', async () => {
+    // First attempt fails at the RAG indexing step, after the collection was created.
+    backend.failIndexingTimes = 1;
+    await expect(pushOnce()).rejects.toThrow();
+    expect(backend.createdByPath.get('source-collections')).toHaveLength(1);
+
+    // Retry succeeds and reuses the already-created collection instead of making a second one.
+    const { entityResult } = await pushOnce();
+    expect(entityResult.actions.some((action) => action.kind === 'knowledge_collection')).toBe(true);
+    expect(backend.createdByPath.get('source-collections')).toHaveLength(1);
+    expect(backend.received.some((r) => r.path === '/api/process-rag-indexing/' && r.method === 'POST')).toBe(true);
   });
 
   it('remote save_version drift is detected as a conflict', async () => {

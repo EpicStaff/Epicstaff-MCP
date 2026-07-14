@@ -52,6 +52,35 @@ flow:
     expect(errors.some((diagnostic) => /graph|naive|rag|strategy/i.test(diagnostic.message))).toBe(true);
   });
 
+  it('emits a named RAG embedder as a plain embedders.<name> ref (no existing: prefix)', async () => {
+    mkdirSync(join(flowDir, 'docs'), { recursive: true });
+    writeFileSync(join(flowDir, 'docs/a.md'), 'content');
+    writeFlow(`
+meta: { name: named-embedder }
+knowledge:
+  docs:
+    documents: [docs/a.md]
+    rag: { strategy: naive, embedder: marketing-embeddings }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors).toEqual([]);
+    const collection = artifact.entities.find((plan) => plan.kind === 'knowledge_collection');
+    expect(collection?.rag?.embedder).toEqual({ $ref: 'embedders.marketing-embeddings' });
+  });
+
   it('rejects an edge out of an end node', async () => {
     writeFlow(`
 meta: { name: edge-from-end }

@@ -18,6 +18,12 @@ export interface ToolErr {
   error: string;
   validationErrors?: ValidationIssue[];
   hint?: string;
+  /** HTTP status of the failed backend call, when the error came from the API. */
+  status?: number;
+  /** Endpoint that failed — makes multi-step pushes (entity → RAG → graph) diagnosable. */
+  url?: string;
+  /** First ~600 chars of the raw response body for non-validation-shaped errors. */
+  bodyExcerpt?: string;
 }
 
 export type ToolResult<T> = ToolOk<T> | ToolErr;
