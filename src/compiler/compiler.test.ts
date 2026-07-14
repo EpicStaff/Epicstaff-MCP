@@ -209,6 +209,75 @@ flow:
     expect(errors.some((diagnostic) => /at most one end node/i.test(diagnostic.message))).toBe(true);
   });
 
+  /** Read the emitted start node's variable domain (its `initialState`). */
+  function startDomain(artifact: Awaited<ReturnType<typeof compileFlow>>): Record<string, unknown> {
+    const start = artifact.graph.nodes.find((node) => node.type === 'start');
+    return (start as { data: { initialState: Record<string, unknown> } }).data.initialState;
+  }
+
+  it('forces a produced-only variable into the start-node domain even when undeclared', async () => {
+    // `result` is only ever produced via output_variable_path and never declared under
+    // `variables:`. It must still land in the start node domain (backend treats
+    // start_node.variables as the flow's variable domain), seeded null.
+    writeFlow(`
+meta: { name: produced-only-var }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work:
+      type: agent
+      agent: a1
+      tasks: [{ instructions: do the work }]
+      output_variable_path: variables.result
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const domain = startDomain(artifact);
+    expect(Object.keys(domain)).toContain('result');
+    expect(domain.result).toBeNull();
+  });
+
+  it('lets a declared default and inline initial_state win over the produced placeholder', async () => {
+    // `quote` is both declared (with a default) and produced; `topic` comes from inline
+    // start.initial_state. Neither should be clobbered by the produced-null placeholder.
+    writeFlow(`
+meta: { name: domain-precedence }
+variables:
+  quote: { default: {}, description: "pricing result" }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start:
+      type: start
+      initial_state: { topic: "pallets" }
+    work:
+      type: agent
+      agent: a1
+      tasks: [{ instructions: do the work }]
+      output_variable_path: variables.quote
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const domain = startDomain(artifact);
+    expect(domain.quote).toEqual({}); // declared default wins over produced null
+    expect(domain.topic).toBe('pallets'); // inline initial_state preserved
+  });
+
   it('classification-decision-table categories emit a route_code so the route resolves', async () => {
     writeFlow(`
 meta: { name: cdt-routes }

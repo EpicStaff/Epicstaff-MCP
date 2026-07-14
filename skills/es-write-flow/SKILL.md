@@ -25,6 +25,12 @@ Define locally only what doesn't exist — and tell the user what will be create
      along edges. `build_flow` checks every read resolves: a read of a variable no node produces and
      that isn't declared is an **error** (a typo); a read only set on some branches is a **warning**.
      To make a maybe-unset read OK, declare it with a default or add a `|default` suffix to the read.
+     The **start node's `variables` IS the flow's variable domain** — the backend rejects any
+     run/config `user_variables` / `persistent_variables` key not in it. `build_flow` force-completes
+     that domain: every top-level variable any node produces via `output_variable_path` is added
+     automatically (seeded `null`), so you never have to pre-declare produced variables just to
+     register them. Declare a variable only to give it an initial default, a description, or to make
+     an early read valid.
    - `llm_configs` — model by name (e.g. `model: gpt-4o`); reuse `{ existing: ... }` when possible.
    - `tools` — `python_code_tools` / `mcp_tools` / `tool_configs` the agents need.
    - `knowledge` — collections with `documents:` (paths relative to the flow dir; put the

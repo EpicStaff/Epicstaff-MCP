@@ -67,7 +67,7 @@ import type {
   InlineSurfaceSource,
   KnowledgeCollectionSource,
 } from '../flow-source/schema/index.js';
-import { declarationDefault } from '../flow-source/schema/variables.js';
+import { buildStartVariableDomain } from './variable-domain.js';
 import type {
   AgentGraphNodeData,
   GraphEdgeState,
@@ -583,16 +583,15 @@ async function buildGraph(
 
     switch (node.type) {
       case 'start': {
-        // Seed declared variables (their defaults) into the start state, with any
-        // inline start.initial_state overriding a declared default of the same name.
-        const declaredDefaults: Record<string, unknown> = {};
-        for (const [name, declaration] of Object.entries(source.variables ?? {})) {
-          declaredDefaults[name] = declarationDefault(declaration);
-        }
+        // The start node's variables ARE the flow's variable domain (backend contract —
+        // see variable-domain.ts). Force it complete: declared defaults + inline
+        // initial_state + every top-level variable any node produces via
+        // output_variable_path, so a produced-only variable is never missing from the
+        // domain the backend validates user/persistent variables against.
         nodes.push({
           ...base,
           type: 'start',
-          data: { initialState: { ...declaredDefaults, ...node.initial_state } },
+          data: { initialState: buildStartVariableDomain(source, node.initial_state ?? {}) },
         });
         break;
       }
