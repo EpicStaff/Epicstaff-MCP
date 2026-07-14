@@ -1,0 +1,100 @@
+meta:
+  name: cdt-triage
+  description: >-
+    Support-triage flow with THREE classification-decision-tables in sequence
+    (topic → urgency → resolution). Each CDT should route by classifying the
+    request; deterministic python markers on every branch let us read back which
+    path the variables actually took.
+variables:
+  request: { default: { text: "" }, description: "Customer message (input)." }
+flow:
+  nodes:
+    __start__:
+      type: start
+
+    # --- CDT 1: topic ---
+    Topic:
+      type: classification-decision-table
+      llm_config: { existing: "stress-4o-mini" }
+      input_map:
+        text: variables.request.text
+      categories:
+        - { name: account, description: "Account, login, password, profile.", next_node: T_account }
+        - { name: billing, description: "Invoices, payments, refunds, pricing.", next_node: T_billing }
+        - { name: technical, description: "Bugs, errors, how-to, integration.", next_node: T_technical }
+    T_account:
+      type: python
+      code: "def main():\n    return {'picked': 'account'}"
+      output_variable_path: variables.tier1
+    T_billing:
+      type: python
+      code: "def main():\n    return {'picked': 'billing'}"
+      output_variable_path: variables.tier1
+    T_technical:
+      type: python
+      code: "def main():\n    return {'picked': 'technical'}"
+      output_variable_path: variables.tier1
+
+    # --- CDT 2: urgency ---
+    Urgency:
+      type: classification-decision-table
+      llm_config: { existing: "stress-4o-mini" }
+      input_map:
+        text: variables.request.text
+      categories:
+        - { name: urgent, description: "Angry, blocked, time-critical, outage.", next_node: U_urgent }
+        - { name: normal, description: "Routine question, no time pressure.", next_node: U_normal }
+    U_urgent:
+      type: python
+      code: "def main():\n    return {'picked': 'urgent'}"
+      output_variable_path: variables.tier2
+    U_normal:
+      type: python
+      code: "def main():\n    return {'picked': 'normal'}"
+      output_variable_path: variables.tier2
+
+    # --- CDT 3: resolution ---
+    Resolution:
+      type: classification-decision-table
+      llm_config: { existing: "stress-4o-mini" }
+      input_map:
+        text: variables.request.text
+      categories:
+        - { name: refund, description: "Customer wants money back / cancel.", next_node: R_refund }
+        - { name: keep, description: "Customer wants to continue / fix.", next_node: R_keep }
+    R_refund:
+      type: python
+      code: "def main():\n    return {'picked': 'refund'}"
+      output_variable_path: variables.tier3
+    R_keep:
+      type: python
+      code: "def main():\n    return {'picked': 'keep'}"
+      output_variable_path: variables.tier3
+
+    Summarize:
+      type: python
+      code: |-
+        def main(t1, t2, t3, req):
+            return {
+                "path": [t1.get("picked"), t2.get("picked"), t3.get("picked")],
+                "request": req.get("text"),
+            }
+      input_map:
+        t1: variables.tier1
+        t2: variables.tier2
+        t3: variables.tier3
+        req: variables.request
+      output_variable_path: variables.summary
+
+    __end_node__:
+      type: end
+  edges:
+    - { from: __start__, to: Topic }
+    - { from: T_account, to: Urgency }
+    - { from: T_billing, to: Urgency }
+    - { from: T_technical, to: Urgency }
+    - { from: U_urgent, to: Resolution }
+    - { from: U_normal, to: Resolution }
+    - { from: R_refund, to: Summarize }
+    - { from: R_keep, to: Summarize }
+    - { from: Summarize, to: __end_node__ }

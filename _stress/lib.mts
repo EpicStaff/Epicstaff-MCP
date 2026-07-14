@@ -44,7 +44,12 @@ export async function compile(dir: string): Promise<CompileResult> {
   const start = artifact.graph.nodes.find((n) => n.type === 'start') as
     | { data: { initialState: Record<string, unknown> } }
     | undefined;
-  const startDomain = start ? start.data.initialState : null;
+  // Unwrap the native scheme {variables, persistent_variables} → the actual domain.
+  const rawStart = start ? start.data.initialState : null;
+  const startDomain =
+    rawStart && rawStart.variables && typeof rawStart.variables === 'object'
+      ? (rawStart.variables as Record<string, unknown>)
+      : rawStart;
   // Top-level roots any node writes via output_variable_path — must all be in the domain.
   const producedRoots = [
     ...new Set(
