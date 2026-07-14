@@ -38,8 +38,20 @@ export function producedTopLevelNames(source: FlowSource): string[] {
 }
 
 /**
+ * EpicStaff convention: every flow's variable domain carries `context`. The native
+ * editor seeds it into every start node, it is the default node output slot
+ * (`output_map` defaults to `{context: 'variables.context'}`), and downstream reads of
+ * `variables.context` assume its presence. The backend does not *require* it (a missing
+ * `context` fail-softs to `'not found'`), but emitting it keeps compiler-built flows
+ * consistent with natively-authored ones. It is the lowest-precedence seed — a
+ * declaration, an inline initial value, or a producer of `context` all override it.
+ */
+export const CONVENTIONAL_DOMAIN_VARIABLES: Readonly<Record<string, unknown>> = { context: null };
+
+/**
  * The complete `variables` object seeded into the start node. Precedence, lowest to
  * highest:
+ *  0. conventional variables (`context`) — always present, freely overridden;
  *  1. produced top-level variables — seeded `null` (a producer overwrites them before
  *     any legal read; the dataflow validator guarantees no read precedes production on a
  *     reaching path, so this placeholder is never observed in a clean-building flow);
@@ -50,7 +62,7 @@ export function buildStartVariableDomain(
   source: FlowSource,
   startInitialState: Record<string, unknown>,
 ): Record<string, unknown> {
-  const domain: Record<string, unknown> = {};
+  const domain: Record<string, unknown> = { ...CONVENTIONAL_DOMAIN_VARIABLES };
   for (const name of producedTopLevelNames(source)) {
     domain[name] = null;
   }

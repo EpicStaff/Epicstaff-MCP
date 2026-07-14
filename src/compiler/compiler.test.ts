@@ -215,6 +215,52 @@ flow:
     return (start as { data: { initialState: Record<string, unknown> } }).data.initialState;
   }
 
+  it('always seeds the conventional `context` variable into every start-node domain', async () => {
+    // No variables declared, no producers — the domain must still carry `context`.
+    writeFlow(`
+meta: { name: context-convention }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const domain = startDomain(artifact);
+    expect(Object.keys(domain)).toContain('context');
+    expect(domain.context).toBeNull();
+  });
+
+  it('lets a declaration override the conventional `context` seed', async () => {
+    writeFlow(`
+meta: { name: context-override }
+variables:
+  context: { default: { seeded: true } }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(startDomain(artifact).context).toEqual({ seeded: true });
+  });
+
   it('forces a produced-only variable into the start-node domain even when undeclared', async () => {
     // `result` is only ever produced via output_variable_path and never declared under
     // `variables:`. It must still land in the start node domain (backend treats
