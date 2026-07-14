@@ -6,7 +6,7 @@ EpicStaff (create/update the whole dependency tree + the graph), then run and de
 all through a bundled MCP server and skills.
 
 ```
-write (flow.yaml) → build (validate + layout) → push (entities + graph) → test (run + read + debug)
+write (flow.yaml) → build (validate + layout) → push (entities + graph) → test (run + read + debug) → ui (chat front-end)
 ```
 
 ## Install
@@ -28,12 +28,32 @@ several → pick with `set_active_organization`.
 
 | Skill | Responsibility |
 |---|---|
+| `es-deliver` | **Front door.** Classify the delivery shape (ES-only / ES + new app / ES + integration) and drive the pipeline + right wrapper to completion |
 | `es-connect` | Auth + organization selection |
 | `es-write-flow` | Author/edit flow source (reuse-first: discover existing entities before defining) |
 | `es-build-flow` | Local compile + interpret diagnostics |
 | `es-push-flow` | Diff, then materialize on EpicStaff |
 | `es-test-flow` | Run, poll, read messages, answer human input, iterate |
 | `es-pull-flow` | Import an existing remote flow into local source |
+
+Start with **es-deliver** for any build request: it decides whether the deliverable is the flow
+alone, the flow plus a new app/UI, or the flow integrated into an existing app — then runs the
+`es-connect → es-write-flow → es-build-flow → es-push-flow → es-test-flow` pipeline and the
+matching delivery tail.
+
+## Chat UI generation (one "ES + App" mechanism, for conversational flows)
+
+`generate_chat_ui` turns a pushed chat flow into a usable front-end: a single self-contained HTML
+file (inline CSS/JS, no external assets) that drives the graph through its run-session API. It
+authenticates with `Authorization: ApiKey` + `X-Organization-Id` — both CORS-allowed by the
+backend — so it works from `file://` or any static host with no backend change. Point it at a
+`graph_id`, tell it the `input_path` the user message lands in and the `reply_path` the answer is
+read from, and set `reset_variables` to clear downstream state each turn (so `persistent_variables`
+graphs don't carry a stale answer forward). Open the emitted file; the gear icon edits API base /
+key / org / graph id (persisted in `localStorage`). It is one option `es-deliver` reaches for when
+a flow's interaction shape is conversational; non-chat apps are built to fit their own shape (form,
+dashboard, batch runner, …) against the same run-session contract — which is also what
+"ES + Integration" wires into an existing app.
 
 ## Flow-source schema (by example)
 
