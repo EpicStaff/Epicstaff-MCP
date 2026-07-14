@@ -1,0 +1,48 @@
+meta:
+  name: stress-1-pipeline-nested
+  description: Linear python pipeline with deep nested variable paths; produced vars are undeclared to stress the forced domain.
+variables:
+  order: { default: { items: [], customer: { tier: "standard" } }, description: "Incoming order (input)." }
+flow:
+  nodes:
+    __start__:
+      type: start
+    Normalize:
+      type: python
+      code: |-
+        def main(order):
+            items = order.get("items", []) if isinstance(order, dict) else []
+            lines = [{"sku": str(it.get("sku")), "qty": int(it.get("qty", 1))} for it in items]
+            return {"lines": lines, "count": sum(l["qty"] for l in lines)}
+      input_map:
+        order: variables.order
+      output_variable_path: variables.normalized
+    Enrich:
+      type: python
+      code: |-
+        def main(count, tier):
+            rate = {"gold": 0.8, "silver": 0.9}.get(str(tier), 1.0)
+            unit = 10.0
+            subtotal = count * unit
+            total = round(subtotal * rate, 2)
+            return {"unit": unit, "subtotal": subtotal, "rate": rate, "total": total}
+      input_map:
+        count: variables.normalized.count
+        tier: variables.order.customer.tier
+      output_variable_path: variables.pricing
+    Summarize:
+      type: python
+      code: |-
+        def main(count, total):
+            return {"text": f"{count} items for a total of {total} EUR", "count": count, "total": total}
+      input_map:
+        count: variables.normalized.count
+        total: variables.pricing.total
+      output_variable_path: variables.summary
+    __end__:
+      type: end
+  edges:
+    - { from: __start__, to: Normalize }
+    - { from: Normalize, to: Enrich }
+    - { from: Enrich, to: Summarize }
+    - { from: Summarize, to: __end__ }

@@ -1,0 +1,32 @@
+{
+  "flowName": "stress-3-conditional-edge",
+  "graphId": 44,
+  "saveVersion": 2,
+  "entities": {
+    "conditional_edges.Assess": {
+      "backendId": 600,
+      "contentHash": "9817de15bc4a01cf4b0d8a76eb1fabe5732fd1c89f740ffb9168d70f66cad90c"
+    },
+    "nodes.Assess": {
+      "backendId": 595,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.AutoApprove": {
+      "backendId": 597,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Escalate": {
+      "backendId": 596,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__end__": {
+      "backendId": 599,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__start__": {
+      "backendId": 598,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  },
+  "documents": {}
+}

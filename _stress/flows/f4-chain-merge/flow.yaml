@@ -1,0 +1,42 @@
+meta:
+  name: stress-4-chain-merge
+  description: Linear chain where a final node merges several upstream-produced variables via input_map, plus an undeclared optional read via |default. Single active path (no parallel fan-out).
+variables:
+  seed: 0
+flow:
+  nodes:
+    __start__:
+      type: start
+    Left:
+      type: python
+      code: |-
+        def main(s):
+            return {"double": int(s) * 2}
+      input_map:
+        s: variables.seed
+      output_variable_path: variables.left
+    Right:
+      type: python
+      code: |-
+        def main(s):
+            return {"square": int(s) * int(s)}
+      input_map:
+        s: variables.seed
+      output_variable_path: variables.right
+    Merge:
+      type: python
+      code: |-
+        def main(l, r, hint):
+            return {"sum": l.get("double", 0) + r.get("square", 0), "hint": hint}
+      input_map:
+        l: variables.left
+        r: variables.right
+        hint: variables.note|default
+      output_variable_path: variables.merged
+    __end_node__:
+      type: end
+  edges:
+    - { from: __start__, to: Left }
+    - { from: Left, to: Right }
+    - { from: Right, to: Merge }
+    - { from: Merge, to: __end_node__ }

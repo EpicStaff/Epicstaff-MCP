@@ -1,0 +1,81 @@
+meta:
+  name: stress-5-agent-pipeline
+  description: Agent extract (JSON schema) -> python compute -> agent compose, with nested variable reads and task-placeholder input_map. Exercises agent-node variable wiring end-to-end.
+variables:
+  request: { default: { text: "" }, description: "Customer request text (input)." }
+agents:
+  stress_extractor:
+    description: Extracts a quantity and item name from free text.
+    instructions: >-
+      You extract a single integer quantity and an item name from a short user
+      message and return ONLY the structured object requested. No prose.
+    llm_config: { existing: "stress-4o-mini" }
+  stress_composer:
+    description: Writes a one-line friendly order summary.
+    instructions: >-
+      You write one short, friendly sentence confirming an order. Use ONLY the
+      numbers given to you; never invent figures.
+    llm_config: { existing: "stress-4o-mini" }
+flow:
+  nodes:
+    __start__:
+      type: start
+    Extract:
+      type: agent
+      agent: stress_extractor
+      tasks:
+        - name: extract
+          instructions: |-
+            The user wrote: "{text}"
+
+            Extract the integer quantity mentioned and the item name.
+            Return only the structured object.
+          output_schema:
+            type: object
+            required: [quantity, item]
+            properties:
+              quantity: { type: integer }
+              item: { type: string }
+            additionalProperties: false
+      input_map:
+        text: variables.request.text
+      output_variable_path: variables.extraction
+    Compute:
+      type: python
+      code: |-
+        def main(ext):
+            import json
+            if isinstance(ext, str):
+                try:
+                    ext = json.loads(ext)
+                except Exception:
+                    ext = {}
+            if not isinstance(ext, dict):
+                ext = {}
+            q = int(ext.get("quantity", 0) or 0)
+            return {"quantity": q, "item": ext.get("item"), "line_total": q * 25}
+      input_map:
+        ext: variables.extraction
+      output_variable_path: variables.calc
+    Compose:
+      type: agent
+      agent: stress_composer
+      tasks:
+        - name: compose
+          instructions: |-
+            Confirm this order in one friendly sentence.
+            Item: {item}
+            Quantity: {quantity}
+            Line total: {total} EUR
+      input_map:
+        item: variables.calc.item
+        quantity: variables.calc.quantity
+        total: variables.calc.line_total
+      output_variable_path: variables.reply
+    __end__:
+      type: end
+  edges:
+    - { from: __start__, to: Extract }
+    - { from: Extract, to: Compute }
+    - { from: Compute, to: Compose }
+    - { from: Compose, to: __end__ }

@@ -1,0 +1,51 @@
+meta:
+  name: dtest-diamond
+  description: Diamond fan-out/fan-in from a NON-start node to test whether parallel branches + join work.
+variables:
+  seed: 0
+flow:
+  nodes:
+    __start__:
+      type: start
+    Split:
+      type: python
+      code: |-
+        def main(s):
+            return {"base": int(s)}
+      input_map:
+        s: variables.seed
+      output_variable_path: variables.split
+    A:
+      type: python
+      code: |-
+        def main(split):
+            return {"double": int(split["base"]) * 2}
+      input_map:
+        split: variables.split
+      output_variable_path: variables.a
+    B:
+      type: python
+      code: |-
+        def main(split):
+            return {"square": int(split["base"]) ** 2}
+      input_map:
+        split: variables.split
+      output_variable_path: variables.b
+    Merge:
+      type: python
+      code: |-
+        def main(a, b):
+            return {"sum": a["double"] + b["square"]}
+      input_map:
+        a: variables.a
+        b: variables.b
+      output_variable_path: variables.merged
+    __end_node__:
+      type: end
+  edges:
+    - { from: __start__, to: Split }
+    - { from: Split, to: A }
+    - { from: Split, to: B }
+    - { from: A, to: Merge }
+    - { from: B, to: Merge }
+    - { from: Merge, to: __end_node__ }
