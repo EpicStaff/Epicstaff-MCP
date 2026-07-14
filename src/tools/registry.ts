@@ -5,6 +5,7 @@ import { registerAuthOrgTools } from './auth-org.tools.js';
 import { registerFlowTools } from './flow.tools.js';
 import { registerRunTools } from './run.tools.js';
 import { registerReferenceTools } from './reference.tools.js';
+import { registerUiTools } from './ui.tools.js';
 
 /**
  * Central tool registration. Each tool category module exports a
@@ -17,4 +18,5 @@ export function registerAllTools(server: McpServer, config: Config): void {
   registerFlowTools(server, context);
   registerRunTools(server, context);
   registerReferenceTools(server, context);
+  registerUiTools(server, context);
 }
