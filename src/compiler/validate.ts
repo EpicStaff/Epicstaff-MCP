@@ -277,6 +277,35 @@ function validateTopology(source: FlowSource, diagnostics: Diagnostic[]): void {
     namesByLowercase.set(lower, nodeName);
   }
 
+  // Parallel fan-out is unsupported at runtime: the crew's LangGraph State has no
+  // concurrent-update reducer, so two plain edges out of one node make both branches
+  // run in the same superstep and crash with INVALID_CONCURRENT_GRAPH_UPDATE ("Can
+  // receive only one value per step"). Fan-out from the start node additionally has its
+  // extra edges silently dropped by the Django converter (only the first becomes the
+  // entrypoint). Either way the flow's variables do not wire up. Branch with a
+  // decision-table / conditional edge (which route to a single node) instead.
+  const plainOutgoing = new Map<string, string[]>();
+  for (const edge of source.flow.edges) {
+    if (edge.to === undefined) continue; // conditional edge — routes to one node at run time
+    const targets = plainOutgoing.get(edge.from) ?? [];
+    targets.push(edge.to);
+    plainOutgoing.set(edge.from, targets);
+  }
+  for (const [fromNode, targets] of plainOutgoing) {
+    if (targets.length > 1) {
+      const isStart = nodes[fromNode]?.type === 'start';
+      diagnostics.push(
+        makeError(
+          `flow.nodes.${fromNode}`,
+          `node '${fromNode}' has ${targets.length} outgoing edges (to ${targets.map((t) => `'${t}'`).join(', ')}) — ` +
+            `parallel fan-out is not supported: the runtime runs one active path and concurrent branches ` +
+            `crash on shared state${isStart ? ' (and the start node keeps only its first edge)' : ''}. ` +
+            `Sequence the work into one path, or branch with a decision-table / conditional edge (each routes to a single node).`,
+        ),
+      );
+    }
+  }
+
   const hasTrigger = Object.values(nodes).some((node) => TRIGGER_NODE_TYPES.has(node.type));
   if (!hasTrigger) {
     diagnostics.push(

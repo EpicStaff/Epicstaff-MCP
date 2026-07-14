@@ -278,6 +278,56 @@ flow:
     expect(domain.topic).toBe('pallets'); // inline initial_state preserved
   });
 
+  it('rejects parallel fan-out (a node with two outgoing plain edges)', async () => {
+    writeFlow(`
+meta: { name: fan-out }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    split: { type: agent, agent: a1, tasks: [{ instructions: split }] }
+    left: { type: agent, agent: a1, tasks: [{ instructions: left }] }
+    right: { type: agent, agent: a1, tasks: [{ instructions: right }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: split }
+    - { from: split, to: left }
+    - { from: split, to: right }
+    - { from: left, to: finish }
+    - { from: right, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.some((diagnostic) => /parallel fan-out|outgoing edges/i.test(diagnostic.message))).toBe(true);
+  });
+
+  it('rejects fan-out directly from the start node', async () => {
+    writeFlow(`
+meta: { name: start-fan-out }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    a: { type: agent, agent: a1, tasks: [{ instructions: a }] }
+    b: { type: agent, agent: a1, tasks: [{ instructions: b }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: a }
+    - { from: start, to: b }
+    - { from: a, to: finish }
+    - { from: b, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.some((diagnostic) => /start node keeps only its first edge|parallel fan-out/i.test(diagnostic.message))).toBe(true);
+  });
+
   it('classification-decision-table categories emit a route_code so the route resolves', async () => {
     writeFlow(`
 meta: { name: cdt-routes }
