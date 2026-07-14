@@ -78,20 +78,24 @@ _TRIGGER_SPEC_TYPES = (
 
 # Canvas metadata per spec type, mirroring init_flow_metadata's styling so
 # compiler-materialized flows render identically to incrementally built ones.
-_NODE_STYLE: dict[type | str, tuple[str, str]] = {
-    "start": ("#22c55e", "play"),
-    "end": ("#ef4444", "stop"),
-    PythonNodeSpec: ("#3d4251", "code"),
-    CrewNodeSpec: ("#8b5cf6", "users"),
-    CdtNodeSpec: ("#f59e0b", "split"),
-    WebhookTriggerNodeSpec: ("#06b6d4", "webhook"),
-    TelegramTriggerNodeSpec: ("#06b6d4", "webhook"),
-    ScheduleTriggerNodeSpec: ("#06b6d4", "webhook"),
-    CodeAgentNodeSpec: ("#3b82f6", "bot"),
-    AgentNodeSpec: ("#3b82f6", "bot"),
-    TaskNodeSpec: ("#3b82f6", "bot"),
+# Values are (color, icon, width, height) taken verbatim from the frontend's
+# NODE_COLORS / NODE_ICONS (core/enums/node-config.ts) and getDefaultNodeSize
+# (core/helpers/node-size.util.ts) so MCP-built nodes look identical to ones
+# created by hand in the flow editor.
+_NODE_STYLE: dict[type | str, tuple[str, str, int, int]] = {
+    "start": ("#d3d3d3", "ti ti-player-play-filled", 125, 60),
+    "end": ("#d3d3d3", "ti ti-square-rounded", 330, 60),
+    PythonNodeSpec: ("#ffcf3f", "ti ti-brand-python", 330, 60),
+    CrewNodeSpec: ("#5672cd", "ti ti-folder", 330, 60),
+    CdtNodeSpec: ("#2a5bd7", "ti ti-table-options", 330, 60),
+    WebhookTriggerNodeSpec: ("#21f367ff", "ti ti-world", 330, 60),
+    TelegramTriggerNodeSpec: ("#229ED9", "ti ti-brand-telegram", 330, 60),
+    ScheduleTriggerNodeSpec: ("#FF5C00", "ti ti-calendar", 330, 60),
+    CodeAgentNodeSpec: ("#00e676", "ti ti-terminal-2", 330, 60),
+    AgentNodeSpec: ("#685fff", "ti ti-robot", 330, 60),
+    TaskNodeSpec: ("#2aba6b", "ti ti-circle-check", 330, 60),
 }
-_DEFAULT_STYLE = ("#3d4251", "node")
+_DEFAULT_STYLE = ("#dddddd", "ti ti-help", 330, 60)
 
 _LAYOUT_X_STEP = 400
 _LAYOUT_Y_STEP = 200
@@ -420,15 +424,23 @@ def _layout_positions(
     return positions
 
 
-def _metadata_for(style_key: type | str, position: dict[str, int]) -> dict[str, Any]:
-    color, icon = _NODE_STYLE.get(style_key, _DEFAULT_STYLE)
-    return {
+def _metadata_for(
+    style_key: type | str,
+    position: dict[str, int],
+    node_number: int | None = None,
+) -> dict[str, Any]:
+    color, icon, width, height = _NODE_STYLE.get(style_key, _DEFAULT_STYLE)
+    metadata: dict[str, Any] = {
         "position": position,
         "color": color,
         "icon": icon,
-        "size": {"width": 180, "height": 50},
-        "parentId": None,
+        "size": {"width": width, "height": height},
     }
+    # The frontend stamps a monotonic node number onto every hand-created node
+    # (toNodeMetadata, save/metadata.ts) but never onto __start__/__end__.
+    if node_number is not None:
+        metadata["nodeNumber"] = node_number
+    return metadata
 
 
 # ---------------------------------------------------------------------------
@@ -515,14 +527,16 @@ def _render_graph(
         }
     )
 
-    for node in spec.nodes:
+    for node_number, node in enumerate(spec.nodes, start=1):
         handle = handles[node.name]
         fields = _node_fields(node, resolver)
         graph[_SPEC_TYPE_TO_LIST_KEY[type(node)]].append(
             {
                 **resolver.identity(handle),
                 "node_name": node.name,
-                "metadata": _metadata_for(type(node), positions[node.name]),
+                "metadata": _metadata_for(
+                    type(node), positions[node.name], node_number
+                ),
                 **fields,
             }
         )
