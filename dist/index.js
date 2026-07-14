@@ -30488,6 +30488,12 @@ function buildStartVariableDomain(source, startInitialState) {
   Object.assign(domain, startInitialState);
   return domain;
 }
+function buildStartNodeVariables(source, startInitialState) {
+  return {
+    variables: buildStartVariableDomain(source, startInitialState),
+    persistent_variables: { user: [], organization: [] }
+  };
+}
 
 // src/graph/temp-id.ts
 import { randomUUID } from "node:crypto";
@@ -31655,7 +31661,7 @@ async function buildGraph(source, flowDir, registry2, diagnostics) {
         nodes.push({
           ...base,
           type: "start",
-          data: { initialState: buildStartVariableDomain(source, node.initial_state ?? {}) }
+          data: { initialState: buildStartNodeVariables(source, node.initial_state ?? {}) }
         });
         break;
       }
@@ -32464,7 +32470,9 @@ async function decompileFlow(deps, graphId, targetDir) {
   }
   const plainEdges = buildPlainEdges(dto, registry2, warnings);
   const conditional = buildConditionalEdges(dto, registry2, warnings);
-  const startVariables = dto.start_node_list?.[0]?.variables ?? {};
+  const rawStartVariables = dto.start_node_list?.[0]?.variables ?? {};
+  const inner = rawStartVariables["variables"];
+  const startVariables = inner && typeof inner === "object" && !Array.isArray(inner) ? inner : rawStartVariables;
   const document = {
     meta: {
       name: dto.name,
