@@ -59,11 +59,20 @@ export interface AnswerToLlmRequest {
 export class SessionsApi {
   constructor(private readonly client: EpicStaffClient) {}
 
-  /** POST run-session/ — multipart, exactly like the frontend RunGraphService.runGraph(). */
+  /**
+   * POST run-session/ — multipart.
+   *
+   * The seed variables MUST be sent under the form field `variables`: the backend
+   * `RunSessionSerializer` only reads `variables` (a JSONField) and ignores everything else.
+   * The EpicStaff web `RunGraphService` posts this as `initial_state`, which the backend
+   * silently drops — so per-run input never reaches the graph and it falls back to the graph's
+   * persistent/start-node defaults. We deliberately diverge from the frontend here and post the
+   * field the backend actually consumes.
+   */
   async runGraph(graphId: number, initialState: Record<string, unknown> = {}): Promise<{ session_id: number }> {
     const formData = new FormData();
     formData.append('graph_id', String(graphId));
-    formData.append('initial_state', JSON.stringify(initialState));
+    formData.append('variables', JSON.stringify(initialState));
     return this.client.post('run-session/', { formData });
   }
 
@@ -115,4 +124,59 @@ export class SessionsApi {
   async answerToLlm(request: AnswerToLlmRequest): Promise<unknown> {
     return this.client.post('answer-to-llm/', { body: request });
   }
+}
+
+export interface ConciseMessage {
+  node: string;
+  order: number;
+  kind: string;
+  detail: string;
+}
+
+export interface ConciseTrace {
+  count: number;
+  messages: ConciseMessage[];
+  /** The final composed reply, taken from the terminal state's `variables.reply` when present. */
+  final_reply: string | null;
+  final_variables: Record<string, unknown> | null;
+}
+
+/**
+ * Collapse the verbose per-message trace into a compact, token-cheap timeline.
+ * Full-state snapshots (which dominate the raw payload) are dropped; we keep only the
+ * meaningful signal per node — agent replies, python results, and errors — plus the
+ * terminal state's variables so the caller can read `variables.reply` without paging.
+ */
+export function summarizeMessages(messages: GraphMessage[]): ConciseTrace {
+  const out: ConciseMessage[] = [];
+  let finalVariables: Record<string, unknown> | null = null;
+
+  for (const message of messages) {
+    const data = (message.message_data ?? {}) as Record<string, any>;
+    const node = String((message as any).name ?? '');
+    const order = Number((message as any).execution_order ?? 0);
+
+    const state = data.state as Record<string, any> | undefined;
+    if (state?.variables && typeof state.variables === 'object') {
+      finalVariables = state.variables as Record<string, unknown>;
+    }
+
+    const type = data.message_type;
+    if (type === 'agent_node_stream' && data.event === 'task_finish') {
+      out.push({ node, order, kind: 'agent_reply', detail: String(data.data?.message ?? '') });
+    } else if (type === 'python' && data.python_code_execution_data) {
+      const py = data.python_code_execution_data;
+      const detail = py.returncode === 0 ? String(py.result_data ?? '') : `error: ${py.stderr ?? py.result_data ?? ''}`;
+      out.push({ node, order, kind: 'python_result', detail });
+    } else if (type === 'error' || data.event === 'error') {
+      out.push({ node, order, kind: 'error', detail: JSON.stringify(data.data ?? data) });
+    } else if (type === 'graph_end') {
+      out.push({ node: node || '__graph__', order, kind: 'graph_end', detail: '' });
+    }
+  }
+
+  const reply = finalVariables?.reply;
+  const finalReply = typeof reply === 'string' ? reply : reply == null ? null : JSON.stringify(reply);
+
+  return { count: out.length, messages: out, final_reply: finalReply, final_variables: finalVariables };
 }

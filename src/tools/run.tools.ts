@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { SessionsApi, TERMINAL_SESSION_STATUSES } from '../api/sessions.js';
+import { SessionsApi, TERMINAL_SESSION_STATUSES, summarizeMessages } from '../api/sessions.js';
 import { runTool } from './auth-org.tools.js';
 
 /**
@@ -17,13 +17,19 @@ export function registerRunTools(server: McpServer, context: AppContext): void {
       title: 'Run a flow',
       description:
         'Start a run session for a pushed flow graph (POST run-session/). Returns the session_id to poll with ' +
-        'get_session_updates and read with get_session_messages. initial_state seeds the graph state variables.',
+        'get_session_updates and read with get_session_messages. initial_state seeds the graph state variables ' +
+        '(sent to the backend as the `variables` field). For graphs with persistent_variables enabled the backend ' +
+        'merges the previous ended session\'s variables as a base, so pass the FULL variables map you want (e.g. ' +
+        'reset downstream fields to {} / null) to avoid stale carryover from an earlier run.',
       inputSchema: {
         graph_id: z.number().int().describe('Backend graph id (from push_flow output or list_graphs)'),
         initial_state: z
           .record(z.unknown())
           .optional()
-          .describe('Initial state variables for the run (JSON object). Defaults to {}.'),
+          .describe(
+            'Initial state variables for the run, keyed by top-level variable name ' +
+              '(e.g. {"chat": {"message": "..."}, "quote": {}, "reply": null}). Defaults to {}.',
+          ),
       },
     },
     async ({ graph_id, initial_state }) =>
@@ -85,18 +91,27 @@ export function registerRunTools(server: McpServer, context: AppContext): void {
     {
       title: 'Read session messages',
       description:
-        'The full execution trace of a session — per-node messages, agent outputs, errors. ' +
-        'The primary debugging surface after (or during) a run.',
+        'The execution trace of a session — per-node messages, agent outputs, errors. The primary ' +
+        "debugging surface after (or during) a run. Defaults to view='concise': a compact timeline " +
+        '(agent replies, python results, errors) plus the terminal `final_reply` and `final_variables`, ' +
+        "which is what you usually want and is far cheaper in tokens. Use view='full' for the raw " +
+        'paginated messages (large — includes per-message state snapshots).',
       inputSchema: {
         session_id: z.number().int(),
-        limit: z.number().int().min(1).max(500).optional().describe('Page size, default 100'),
+        view: z
+          .enum(['concise', 'full'])
+          .optional()
+          .describe("'concise' (default) collapses the trace and surfaces final_reply; 'full' returns raw messages."),
+        limit: z.number().int().min(1).max(500).optional().describe('Page size for full view / fetch size, default 100'),
         offset: z.number().int().min(0).optional(),
       },
     },
-    async ({ session_id, limit, offset }) =>
+    async ({ session_id, view, limit, offset }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        return sessions.getSessionMessages(session_id, limit ?? 100, offset ?? 0);
+        const page = await sessions.getSessionMessages(session_id, limit ?? 100, offset ?? 0);
+        if (view === 'full') return page;
+        return summarizeMessages(page.results);
       }),
   );
 

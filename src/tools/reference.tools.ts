@@ -152,19 +152,46 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
     'list_llm_models',
     {
       title: 'List LLM models and providers',
-      description: 'List available LLM models with their providers — needed when creating a new llm_config.',
-      inputSchema: {},
+      description:
+        'List available LLM models with their providers — needed when creating a new llm_config. ' +
+        'The full catalog is large (thousands of models), so results are filtered and capped: pass ' +
+        '`search` to match model name (case-insensitive substring) and/or `provider` to match provider ' +
+        'name, and `limit` to cap the count (default 50). The response reports total matches and how many ' +
+        'were returned so you can narrow the search.',
+      inputSchema: {
+        search: z.string().optional().describe('Case-insensitive substring to match against the model name.'),
+        provider: z.string().optional().describe('Case-insensitive substring to match against the provider name.'),
+        limit: z.number().int().min(1).max(200).optional().describe('Max models to return (default 50).'),
+      },
     },
-    async () =>
+    async ({ search, provider, limit }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         const [providers, models] = await Promise.all([llm.listProviders(), llm.listModels()]);
-        const providerName = new Map(providers.map((provider) => [provider.id, provider.name]));
-        return models.map((model) => ({
-          id: model.id,
-          name: model.name,
-          provider: providerName.get(model.llm_provider) ?? model.llm_provider,
-        }));
+        const providerName = new Map(providers.map((p) => [p.id, p.name]));
+
+        const searchLower = search?.toLowerCase();
+        const providerLower = provider?.toLowerCase();
+        const cap = limit ?? 50;
+
+        const matches = models
+          .map((model) => ({
+            id: model.id,
+            name: model.name,
+            provider: providerName.get(model.llm_provider) ?? String(model.llm_provider),
+          }))
+          .filter((model) => {
+            if (searchLower && !model.name.toLowerCase().includes(searchLower)) return false;
+            if (providerLower && !model.provider.toLowerCase().includes(providerLower)) return false;
+            return true;
+          });
+
+        return {
+          total_matches: matches.length,
+          returned: Math.min(matches.length, cap),
+          truncated: matches.length > cap,
+          models: matches.slice(0, cap),
+        };
       }),
   );
 
