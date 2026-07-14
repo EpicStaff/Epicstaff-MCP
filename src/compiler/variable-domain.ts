@@ -72,3 +72,25 @@ export function buildStartVariableDomain(
   Object.assign(domain, startInitialState);
   return domain;
 }
+
+/**
+ * The full value persisted to `start_node.variables`, in EpicStaff's native **wrapped**
+ * scheme. The native editor stores the domain under a `variables` key and pairs it with a
+ * `persistent_variables` map of `{user, organization}` path lists (the buckets that mark
+ * which domain variables persist per-user or per-org — read by the backend
+ * `PersistentVariablesService`). The runtime accepts a flat domain too (via
+ * `session_manager._get_actual_variables`, which falls back to the whole object), but
+ * emitting the wrapped envelope keeps compiler-built flows scheme-identical to native
+ * ones and gives them the persistence buckets. `variables_constants.py`:
+ * DOMAIN_VARIABLES_KEY="variables", DOMAIN_PERSISTENT_KEY="persistent_variables",
+ * DOMAIN_USER_KEY="user", DOMAIN_ORGANIZATION_KEY="organization".
+ */
+export function buildStartNodeVariables(
+  source: FlowSource,
+  startInitialState: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    variables: buildStartVariableDomain(source, startInitialState),
+    persistent_variables: { user: [], organization: [] },
+  };
+}

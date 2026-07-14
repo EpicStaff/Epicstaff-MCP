@@ -67,7 +67,7 @@ import type {
   InlineSurfaceSource,
   KnowledgeCollectionSource,
 } from '../flow-source/schema/index.js';
-import { buildStartVariableDomain } from './variable-domain.js';
+import { buildStartNodeVariables } from './variable-domain.js';
 import type {
   AgentGraphNodeData,
   GraphEdgeState,
@@ -584,14 +584,16 @@ async function buildGraph(
     switch (node.type) {
       case 'start': {
         // The start node's variables ARE the flow's variable domain (backend contract —
-        // see variable-domain.ts). Force it complete: declared defaults + inline
-        // initial_state + every top-level variable any node produces via
-        // output_variable_path, so a produced-only variable is never missing from the
-        // domain the backend validates user/persistent variables against.
+        // see variable-domain.ts). Emit the native WRAPPED scheme
+        // ({variables: <domain>, persistent_variables: {user, organization}}) with the
+        // domain force-completed: declared defaults + inline initial_state + every
+        // top-level variable any node produces via output_variable_path, so a
+        // produced-only variable is never missing from the domain the backend validates
+        // user/persistent variables against.
         nodes.push({
           ...base,
           type: 'start',
-          data: { initialState: buildStartVariableDomain(source, node.initial_state ?? {}) },
+          data: { initialState: buildStartNodeVariables(source, node.initial_state ?? {}) },
         });
         break;
       }

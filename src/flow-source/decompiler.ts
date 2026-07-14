@@ -149,7 +149,14 @@ export async function decompileFlow(
   // Surface the start node's seeded values as a top-level `variables:` section
   // (bare value = default). Round-trips: the compiler re-seeds them into the start
   // node, and the dataflow validator treats them as declared/available.
-  const startVariables = (dto.start_node_list?.[0]?.variables ?? {}) as Record<string, unknown>;
+  // The native/current scheme wraps the domain under a `variables` key alongside a
+  // `persistent_variables` map; older/flat flows store the domain directly. Unwrap the
+  // wrapped form so only the actual domain values become the `variables:` section.
+  const rawStartVariables = (dto.start_node_list?.[0]?.variables ?? {}) as Record<string, unknown>;
+  const inner = rawStartVariables['variables'];
+  const startVariables = (
+    inner && typeof inner === 'object' && !Array.isArray(inner) ? inner : rawStartVariables
+  ) as Record<string, unknown>;
 
   const document: YamlObject = {
     meta: {

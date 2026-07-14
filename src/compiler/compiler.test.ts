@@ -209,11 +209,39 @@ flow:
     expect(errors.some((diagnostic) => /at most one end node/i.test(diagnostic.message))).toBe(true);
   });
 
-  /** Read the emitted start node's variable domain (its `initialState`). */
-  function startDomain(artifact: Awaited<ReturnType<typeof compileFlow>>): Record<string, unknown> {
+  /** Read the emitted start node's raw `initialState` (the wrapped envelope). */
+  function startEnvelope(artifact: Awaited<ReturnType<typeof compileFlow>>): Record<string, unknown> {
     const start = artifact.graph.nodes.find((node) => node.type === 'start');
     return (start as { data: { initialState: Record<string, unknown> } }).data.initialState;
   }
+
+  /** Read the actual domain values (the inner `variables` of the wrapped envelope). */
+  function startDomain(artifact: Awaited<ReturnType<typeof compileFlow>>): Record<string, unknown> {
+    return startEnvelope(artifact).variables as Record<string, unknown>;
+  }
+
+  it('emits the native wrapped scheme: {variables, persistent_variables:{user,organization}}', async () => {
+    writeFlow(`
+meta: { name: wrapped-scheme }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const envelope = startEnvelope(artifact);
+    expect(Object.keys(envelope).sort()).toEqual(['persistent_variables', 'variables']);
+    expect(envelope.persistent_variables).toEqual({ user: [], organization: [] });
+    expect((envelope.variables as Record<string, unknown>).context).toBeNull();
+  });
 
   it('always seeds the conventional `context` variable into every start-node domain', async () => {
     // No variables declared, no producers — the domain must still carry `context`.
