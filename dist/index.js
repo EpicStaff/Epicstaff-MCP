@@ -29637,7 +29637,10 @@ var toolsSectionSchema = external_exports.strictObject({
 var variableDeclarationSchema = external_exports.union([
   external_exports.strictObject({
     default: external_exports.unknown().describe("Initial value seeded into the flow state."),
-    description: external_exports.string().optional().describe("What this variable holds.")
+    description: external_exports.string().optional().describe("What this variable holds."),
+    persist: external_exports.enum(["user", "organization"]).optional().describe(
+      'Carry this variable across sessions: "user" (per organization-user) or "organization" (per organization). Omit for a session-scoped variable.'
+    )
   }).describe("Explicit variable declaration."),
   // Any bare JSON value is taken as the default. Kept last so the object form wins first.
   external_exports.unknown().describe("Bare value \u2014 used directly as the variable default.")
@@ -29650,6 +29653,12 @@ function declarationDefault(declaration) {
     return declaration.default;
   }
   return declaration;
+}
+function declarationPersist(declaration) {
+  if (typeof declaration === "object" && declaration !== null && !Array.isArray(declaration) && "persist" in declaration) {
+    return declaration.persist;
+  }
+  return void 0;
 }
 
 // src/flow-source/schema/index.ts
@@ -30488,10 +30497,20 @@ function buildStartVariableDomain(source, startInitialState) {
   Object.assign(domain, startInitialState);
   return domain;
 }
+function persistentVariableBuckets(source) {
+  const buckets = { user: [], organization: [] };
+  for (const [name, declaration] of Object.entries(source.variables ?? {})) {
+    const bucket = declarationPersist(declaration);
+    if (bucket !== void 0) {
+      buckets[bucket].push(name);
+    }
+  }
+  return buckets;
+}
 function buildStartNodeVariables(source, startInitialState) {
   return {
     variables: buildStartVariableDomain(source, startInitialState),
-    persistent_variables: { user: [], organization: [] }
+    persistent_variables: persistentVariableBuckets(source)
   };
 }
 
@@ -32472,7 +32491,16 @@ async function decompileFlow(deps, graphId, targetDir) {
   const conditional = buildConditionalEdges(dto, registry2, warnings);
   const rawStartVariables = dto.start_node_list?.[0]?.variables ?? {};
   const inner = rawStartVariables["variables"];
-  const startVariables = inner && typeof inner === "object" && !Array.isArray(inner) ? inner : rawStartVariables;
+  const domainValues = inner && typeof inner === "object" && !Array.isArray(inner) ? inner : rawStartVariables;
+  const persistent = rawStartVariables["persistent_variables"] ?? {};
+  const persistOf = /* @__PURE__ */ new Map();
+  for (const name of persistent.user ?? []) persistOf.set(name, "user");
+  for (const name of persistent.organization ?? []) persistOf.set(name, "organization");
+  const startVariables = {};
+  for (const [name, value] of Object.entries(domainValues)) {
+    const bucket = persistOf.get(name);
+    startVariables[name] = bucket ? { default: value, persist: bucket } : value;
+  }
   const document = {
     meta: {
       name: dto.name,
