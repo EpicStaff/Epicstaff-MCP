@@ -1,0 +1,20 @@
+{
+  "flowName": "persist-check",
+  "graphId": 52,
+  "saveVersion": 2,
+  "entities": {
+    "nodes.Echo": {
+      "backendId": 641,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__end_node__": {
+      "backendId": 643,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__start__": {
+      "backendId": 642,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  },
+  "documents": {}
+}
