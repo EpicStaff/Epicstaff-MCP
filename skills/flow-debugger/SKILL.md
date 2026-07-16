@@ -38,9 +38,16 @@ Every debug session follows the same shape:
 2. **Scope** — which node or edge is implicated. Narrow from the whole flow down to one place.
 3. **Suspect** — specific cause grounded in the code / config, not speculation.
 4. **Fix** — smallest change that addresses the suspect, via a patch tool.
-5. **Verify** — re-run (if possible) and confirm the symptom is gone without new ones.
+5. **Verify** — confirm the symptom is gone with **one** re-run using minimal inputs. If
+   the fix was purely structural (wiring, metadata, a missing path), a static re-check
+   (`smoke_test_flow(flow_id, execute=False)` or `test_flow`) proves it with no session
+   at all — reserve a live re-run for behavioral fixes.
 
-Do not skip steps. Do not "just try things" — each change must be tied to a specific suspect.
+Do not skip steps. Do not "just try things" — each change must be tied to a specific
+suspect formed from **existing** session data (the read-only ladder below), NOT from a
+fresh live run. Never re-run the flow once per hypothesis: every live run is a full graph
+execution that leaves a session behind, and firing several per bug is what piles up 20–30
+test sessions and stretches build time. One live verification per **confirmed** fix.
 
 ---
 
@@ -204,11 +211,12 @@ Every patch tool has constraints. Follow them exactly.
 ## Verification After a Fix
 
 Once you apply a patch:
-1. `test_flow(flow_id)` — structural check.
-2. If the patched node was python/webhook/code-agent: run the simplest possible session that exercises only that path:
+1. `test_flow(flow_id)` (or `smoke_test_flow(flow_id, execute=False)`) — structural check, no session. If the fix was structural, this alone is sufficient verification — stop here.
+2. Only if the patched node was python/webhook/code-agent AND the defect was behavioral, run ONE session that exercises just that path:
    ```
    run_session_and_wait(flow_id, variables=<minimal inputs>, timeout=60)
    ```
+   One run per confirmed fix — do not re-run to "double-check" a pass.
 3. `inspect_session(new_session_id)` — confirm the previously-failing node now shows expected input and output.
 4. If more than one bug fell out in the process, resist chaining fixes — verify each independently before proceeding.
 

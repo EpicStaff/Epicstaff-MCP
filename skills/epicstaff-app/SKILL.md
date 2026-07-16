@@ -76,6 +76,42 @@ labels. (`GET /api/sessions/<id>/get-updates/` gives status only — messages ca
 
 ---
 
+## Acceptance testing — keep it session-thrifty
+
+Acceptance testing (proving the app handles its real scenarios) is a **separate phase** from
+the build-iteration gate — and it is where session counts explode. Each `run-session` call is
+a full live graph execution that leaves a session behind; the contract is stateless per call,
+so **every conversational turn = one session** and that floor is unavoidable. Everything ABOVE
+that floor is waste. A real build recently created 38 sessions where ~20 were structurally
+needed — the other ~18 were avoidable. Do not repeat that.
+
+**Budget and track coverage — run each scenario exactly once.**
+- Before testing, enumerate the distinct scenarios and the minimum live turns each needs (a
+  3-turn conversation is 3 sessions; a single Q&A is 1). That total is your budget.
+- Keep ONE coverage checklist. Tick each scenario as it passes. **Never re-run a green
+  scenario** to "double-check" — a pass is a pass. Never run the same scenario from two
+  different harnesses.
+
+**Validate deterministic logic OFFLINE (zero sessions).**
+- Pricing, math, parsing, formatting live in a `pythonnode`. Unit-test the expected values in
+  local Python **without** calling `run-session`. Spend live sessions only on the
+  conversational / integration path that genuinely needs the running flow.
+
+**Reuse sessions; never spin up a new one for a sub-check.**
+- Testing a relay/proxy/render path? Reuse an existing session id's messages — do not create a
+  fresh session just to eyeball the same round-trip.
+
+**Test-harness hygiene (this caused the single biggest waste — ~32% of that 38).**
+- If you script the pass, **guard every live call under `if __name__ == "__main__":`**. Calls
+  at module top level fire on *import*.
+- **Never `import` a harness that makes live calls from another harness** — importing
+  re-executes its whole suite as a side effect (this silently re-ran 12 sessions that produced
+  zero new information). One harness, one entry point.
+- When done, **report the session count** and confirm it's at/near the scenario floor. If it's
+  well above, say why.
+
+---
+
 ## Red flags — stop and correct
 
 - Business logic (math, pricing, parsing, rules) in the UI — it belongs in a `pythonnode`.
@@ -84,6 +120,10 @@ labels. (`GET /api/sessions/<id>/get-updates/` gives status only — messages ca
   user explicitly asks for it.
 - Hardcoding or committing an API key.
 - Declaring done on a UI that was never run against the live flow.
+- Live calls in a test harness at module top level, or `import`ing one live-hitting harness
+  from another — both re-fire real sessions on import.
+- Re-running a scenario that already passed, or creating a new session for a sub-check you could
+  do against an existing session's messages.
 
 ---
 

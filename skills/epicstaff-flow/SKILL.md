@@ -239,20 +239,37 @@ patch_start_variables(flow_id, variables=<full DDD dict from Step 1>)
 Every path any downstream `input_map` reads must be present, even as `null`.
 
 ### Step 9 — Runnable gate (mandatory before declaring done)
+
+Run the gate in TWO phases. **Every live run is expensive** — it executes the whole
+graph (LLM crew nodes are slow) and leaves a session behind. The pain users report is
+20–30 leftover test sessions and long build times, and it comes from doing a live run
+after *every* edit. Keep live runs to a minimum: iterate statically, execute once.
+
+**Phase 1 — static, zero-cost, repeat freely.** After each structural change, and for
+any quick check, run the static-only pass — it starts NO session and costs NO tokens:
 ```
-smoke_test_flow(flow_id, variables=<one representative input>)
+smoke_test_flow(flow_id, execute=False)
 ```
-`smoke_test_flow` is the "ready to test" gate. It runs `test_flow`'s static checks
-(`_validate_graph`) AND then executes the flow once, confirming it reached the end node
-with no node errors and no `"not found"` output holes. `test_flow(flow_id)` alone is
-static only — it passes on flows that silently return `"not found"`; do not treat it as
-proof of runnability.
+Fix every error-severity finding here FIRST. Never do a live run while a static error
+remains — it will only fail the same way, slower, and burn a session doing it.
+
+**Phase 2 — one live run, only when static is clean.** When Phase 1 reports no errors,
+do a single live run to prove one happy path reaches the end node:
+```
+smoke_test_flow(flow_id, variables=<one representative input>)   # execute=True (default)
+```
+It re-runs the static checks AND executes once, confirming it reached the end node with
+no node errors and no `"not found"` output holes. `test_flow(flow_id)` alone is static
+only — it passes on flows that silently return `"not found"`; never treat it as proof of
+runnability.
 
 - Pass a representative `variables` input (e.g. a real chat message) to exercise the
   meaningful path; omit it to run with the start node's declared defaults.
-- `runnable: true` → hand off. `runnable: false` → the `summary` + `holes`/`node_errors`
-  name the failing node; fix and re-run.
-- `execute=false` gives a fast static-only pass (zero token cost) for a quick check.
+- `runnable: true` → done, hand off. `runnable: false` → the `summary` + `holes`/
+  `node_errors` name the failing node. Fix that specific defect, re-confirm with Phase 1
+  (`execute=False`), and only then spend another live run. **Aim for one passing live
+  run per build — not a live run per edit.**
+- Record the passing `session_id` — `flow-qa` reuses it instead of executing again.
 
 Then hand off to `flow-qa` for the final validation pass.
 

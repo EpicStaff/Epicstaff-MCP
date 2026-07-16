@@ -164,8 +164,21 @@ Tie back to `flow-ddd`:
 
 ### 8. Runtime smoke test (the runnable gate — if feasible)
 
-Prefer the one-call gate, which combines the static `_validate_graph` check with a single
-live run and a structured verdict:
+**First: do NOT re-execute a flow that was already proven runnable in this build.** If
+`epicstaff-flow` (or a prior debug fix) already produced a `runnable: true` session and
+nothing structural changed since, reuse it — confirm from that recorded verdict or
+`inspect_session(<that session_id>)` instead of starting a fresh live run. A duplicate
+live gate here is the single biggest source of redundant test sessions and wasted time.
+
+Re-run a **live** gate ONLY when: no passing run exists this build, the flow changed
+since the last passing run, or you must confirm a QA-stage fix. For a purely structural
+re-check (nothing behavioral to prove), use the zero-cost static pass — it starts no
+session:
+```
+smoke_test_flow(flow_id, execute=False)
+```
+When a live run is genuinely warranted, prefer the one-call gate, which combines the
+static `_validate_graph` check with a single live run and a structured verdict:
 ```
 smoke_test_flow(flow_id, variables=<minimal synthetic input>)
 ```
@@ -197,7 +210,7 @@ Do the checks in order. Stop and write up findings if a blocker surfaces early; 
 7. Port legality pass over each edge.
 8. Per-node correctness pass (uses CDT detail from step 5).
 9. Error handling and side-effect review.
-10. (If feasible) Runnable gate: `smoke_test_flow(flow_id, variables=...)` → require `runnable: true`.
+10. (If feasible) Runnable gate: reuse the build's existing `runnable: true` session if nothing changed since; otherwise `smoke_test_flow(flow_id, variables=...)` → require `runnable: true`. Never execute a second identical live run just to re-confirm a pass.
 
 Do NOT patch in the middle of QA. Collect findings, then either report or hand off to `flow-debugger` with a specific symptom.
 
