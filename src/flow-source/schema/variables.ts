@@ -15,12 +15,25 @@ import { z } from 'zod';
  *     topic: "AI agents"                 # bare value → default
  *     retries: 0
  *     escalation_id: { default: "", description: "Set on the urgent branch only." }
+ *     org_config: { default: {}, persist: organization }   # persists across sessions
+ *
+ * `persist` marks a variable's value to be carried across sessions: `user` snapshots it
+ * per organization-user, `organization` per organization. The compiler records the name
+ * in the start node's `persistent_variables.{user,organization}` bucket; the backend
+ * `PersistentVariablesService` seeds it from the previous ended session on the next run.
  */
 export const variableDeclarationSchema = z.union([
   z
     .strictObject({
       default: z.unknown().describe('Initial value seeded into the flow state.'),
       description: z.string().optional().describe('What this variable holds.'),
+      persist: z
+        .enum(['user', 'organization'])
+        .optional()
+        .describe(
+          'Carry this variable across sessions: "user" (per organization-user) or ' +
+            '"organization" (per organization). Omit for a session-scoped variable.',
+        ),
     })
     .describe('Explicit variable declaration.'),
   // Any bare JSON value is taken as the default. Kept last so the object form wins first.
@@ -51,4 +64,19 @@ export function declarationDefault(declaration: VariableDeclarationSource): unkn
     return (declaration as { default: unknown }).default;
   }
   return declaration;
+}
+
+/** The persistence bucket a declaration opts into, or undefined for session-scoped. */
+export function declarationPersist(
+  declaration: VariableDeclarationSource,
+): 'user' | 'organization' | undefined {
+  if (
+    typeof declaration === 'object' &&
+    declaration !== null &&
+    !Array.isArray(declaration) &&
+    'persist' in declaration
+  ) {
+    return (declaration as { persist?: 'user' | 'organization' }).persist;
+  }
+  return undefined;
 }

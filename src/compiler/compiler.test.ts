@@ -243,6 +243,36 @@ flow:
     expect((envelope.variables as Record<string, unknown>).context).toBeNull();
   });
 
+  it('records persist-marked declarations in the persistent_variables buckets', async () => {
+    writeFlow(`
+meta: { name: persist-vars }
+variables:
+  pref: { default: {}, persist: user }
+  org_cfg: { default: {}, persist: organization }
+  scratch: { default: 0 }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const envelope = startEnvelope(artifact);
+    expect(envelope.persistent_variables).toEqual({ user: ['pref'], organization: ['org_cfg'] });
+    // The domain still carries all declared vars (persist is orthogonal to presence).
+    expect(Object.keys(startDomain(artifact))).toEqual(
+      expect.arrayContaining(['context', 'pref', 'org_cfg', 'scratch']),
+    );
+  });
+
   it('always seeds the conventional `context` variable into every start-node domain', async () => {
     // No variables declared, no producers — the domain must still carry `context`.
     writeFlow(`

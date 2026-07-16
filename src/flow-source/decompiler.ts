@@ -154,9 +154,25 @@ export async function decompileFlow(
   // wrapped form so only the actual domain values become the `variables:` section.
   const rawStartVariables = (dto.start_node_list?.[0]?.variables ?? {}) as Record<string, unknown>;
   const inner = rawStartVariables['variables'];
-  const startVariables = (
+  const domainValues = (
     inner && typeof inner === 'object' && !Array.isArray(inner) ? inner : rawStartVariables
   ) as Record<string, unknown>;
+
+  // Re-attach persistence: a variable named in persistent_variables.{user,organization}
+  // becomes an object declaration { default, persist } so a pull→push round-trip keeps
+  // the designation; the rest stay bare (value = default).
+  const persistent = (rawStartVariables['persistent_variables'] ?? {}) as {
+    user?: string[];
+    organization?: string[];
+  };
+  const persistOf = new Map<string, 'user' | 'organization'>();
+  for (const name of persistent.user ?? []) persistOf.set(name, 'user');
+  for (const name of persistent.organization ?? []) persistOf.set(name, 'organization');
+  const startVariables: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(domainValues)) {
+    const bucket = persistOf.get(name);
+    startVariables[name] = bucket ? { default: value, persist: bucket } : value;
+  }
 
   const document: YamlObject = {
     meta: {

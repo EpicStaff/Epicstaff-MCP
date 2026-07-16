@@ -15,7 +15,7 @@
  * flow actually produces, so the emitted start node never under-declares.
  */
 import type { FlowSource } from '../flow-source/schema/index.js';
-import { declarationDefault } from '../flow-source/schema/variables.js';
+import { declarationDefault, declarationPersist } from '../flow-source/schema/variables.js';
 import { isVarPathError, parseVarPath } from './varpath.js';
 
 /**
@@ -85,12 +85,32 @@ export function buildStartVariableDomain(
  * DOMAIN_VARIABLES_KEY="variables", DOMAIN_PERSISTENT_KEY="persistent_variables",
  * DOMAIN_USER_KEY="user", DOMAIN_ORGANIZATION_KEY="organization".
  */
+/**
+ * The `persistent_variables` buckets — top-level variable names a declaration marked
+ * `persist: user` / `persist: organization`. The backend `PersistentVariablesService`
+ * snapshots these paths from the domain at the end of a session and reseeds them on the
+ * next run (per organization-user / per organization).
+ */
+export function persistentVariableBuckets(source: FlowSource): {
+  user: string[];
+  organization: string[];
+} {
+  const buckets: { user: string[]; organization: string[] } = { user: [], organization: [] };
+  for (const [name, declaration] of Object.entries(source.variables ?? {})) {
+    const bucket = declarationPersist(declaration);
+    if (bucket !== undefined) {
+      buckets[bucket].push(name);
+    }
+  }
+  return buckets;
+}
+
 export function buildStartNodeVariables(
   source: FlowSource,
   startInitialState: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
     variables: buildStartVariableDomain(source, startInitialState),
-    persistent_variables: { user: [], organization: [] },
+    persistent_variables: persistentVariableBuckets(source),
   };
 }
