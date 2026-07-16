@@ -87,3 +87,19 @@ inside the flow**, not a reason to move logic into the UI.
 - **ES-only:** `epicstaff-flow`'s runnable gate passes (`smoke_test_flow` → `runnable: true`).
 - **App-shaped:** backend runnable gate passes **AND** the UI runs against the live backend
   end-to-end (a real user input produces the flow's rendered result).
+
+## Testing is session-budgeted (both paths)
+
+Every `run-session` / `run_session_and_wait` call is a full live execution that leaves a
+session behind. Keep sessions to the genuine floor:
+
+- **Build iteration** is bounded by `epicstaff-flow` Step 9 — iterate with
+  `smoke_test_flow(execute=False)` (no session), then **one** live gate run. Not a run per edit.
+- **Acceptance testing** is bounded by `epicstaff-app`'s "session-thrifty" rules — enumerate
+  distinct scenarios, run each **once** against a single coverage checklist, validate
+  deterministic logic offline (0 sessions), reuse sessions for sub-checks, and guard any test
+  harness so `import` never re-fires live calls.
+
+Report the session count when you hand off. A build that produces dozens of sessions is a
+process failure (duplicate runs, an unguarded harness, or re-proving green scenarios), not
+thoroughness.

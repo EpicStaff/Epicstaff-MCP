@@ -1260,21 +1260,30 @@ async def init_flow_metadata(graph_id: int) -> dict[str, Any]:
     MUST be called after any structural change (add/delete node or edge).
     Sets each node's metadata field with auto-calculated position, color, icon, size.
     """
-    _COLOR_MAP: dict[str, tuple[str, str]] = {
-        "startnodes": ("#22c55e", "play"),
-        "endnodes": ("#ef4444", "stop"),
-        "pythonnodes": ("#3d4251", "code"),
-        "crewnodes": ("#8b5cf6", "users"),
-        "classification-decision-table-node": ("#f59e0b", "split"),
-        "decision-table-node": ("#f59e0b", "table"),
-        "webhook-trigger-nodes": ("#06b6d4", "webhook"),
-        "telegram-trigger-nodes": ("#06b6d4", "webhook"),
-        "schedule-trigger-nodes": ("#06b6d4", "webhook"),
-        "code-agent-nodes": ("#3b82f6", "bot"),
-        "agentnodes": ("#3b82f6", "bot"),
-        "tasknodes": ("#3b82f6", "bot"),
+    # (color, icon, width, height) mirror the frontend's NODE_COLORS / NODE_ICONS
+    # (core/enums/node-config.ts) and getDefaultNodeSize (core/helpers/
+    # node-size.util.ts), keyed by backend list endpoint, so MCP-styled nodes
+    # render identically to ones created by hand in the flow editor.
+    _STYLE_MAP: dict[str, tuple[str, str, int, int]] = {
+        "startnodes": ("#d3d3d3", "ti ti-player-play-filled", 125, 60),
+        "endnodes": ("#d3d3d3", "ti ti-square-rounded", 330, 60),
+        "pythonnodes": ("#ffcf3f", "ti ti-brand-python", 330, 60),
+        "crewnodes": ("#5672cd", "ti ti-folder", 330, 60),
+        "classification-decision-table-node": (
+            "#2a5bd7",
+            "ti ti-table-options",
+            330,
+            60,
+        ),
+        "decision-table-node": ("#00aaff", "ti ti-table", 330, 60),
+        "webhook-trigger-nodes": ("#21f367ff", "ti ti-world", 330, 60),
+        "telegram-trigger-nodes": ("#229ED9", "ti ti-brand-telegram", 330, 60),
+        "schedule-trigger-nodes": ("#FF5C00", "ti ti-calendar", 330, 60),
+        "code-agent-nodes": ("#00e676", "ti ti-terminal-2", 330, 60),
+        "agentnodes": ("#685fff", "ti ti-robot", 330, 60),
+        "tasknodes": ("#2aba6b", "ti ti-circle-check", 330, 60),
     }
-    _DEFAULT_COLOR, _DEFAULT_ICON = "#3d4251", "node"
+    _DEFAULT_STYLE = ("#dddddd", "ti ti-help", 330, 60)
 
     async with get_client() as client:
         graph = await client.get(f"/api/graphs/{graph_id}/")
@@ -1343,20 +1352,46 @@ async def init_flow_metadata(graph_id: int) -> dict[str, Any]:
                 node_positions[name] = (max_depth * 400, stray_slot * 200)
                 stray_slot += 1
 
+        # Assign a monotonic node number to every non start/end node, mirroring
+        # the frontend's getNextNodeNumber counter. Any number already present in
+        # a node's metadata is preserved so re-running init keeps them stable.
+        node_numbers: dict[int, int] = {}
+        existing_numbers = [
+            (n["data"].get("metadata") or {}).get("nodeNumber") for n in all_nodes
+        ]
+        next_number = max((v for v in existing_numbers if isinstance(v, int)), default=0) + 1
+        for node_info in all_nodes:
+            if node_info["endpoint"] in ("startnodes", "endnodes"):
+                continue
+            existing_num = (node_info["data"].get("metadata") or {}).get("nodeNumber")
+            if isinstance(existing_num, int):
+                node_numbers[node_info["id"]] = existing_num
+            else:
+                node_numbers[node_info["id"]] = next_number
+                next_number += 1
+
         # Build PATCH coroutines
         async def _patch_node(node_info: dict[str, Any]) -> dict[str, Any]:
             nid = node_info["id"]
             name = node_info["name"]
             endpoint = node_info["endpoint"]
-            color, icon = _COLOR_MAP.get(endpoint, (_DEFAULT_COLOR, _DEFAULT_ICON))
+            color, icon, width, height = _STYLE_MAP.get(endpoint, _DEFAULT_STYLE)
+            if endpoint == "decision-table-node":
+                # Decision-table height grows with its condition groups; mirror
+                # getDecisionTableVisualHeight (core/helpers/node-size.util.ts).
+                groups = node_info["data"].get("condition_groups") or []
+                valid = sum(1 for g in groups if g.get("valid") is not False)
+                height = max(62 + 46 * max(valid + 2, 2), 200)
             x, y = node_positions.get(name, (0, 0))
-            metadata = {
+            metadata: dict[str, Any] = {
                 "position": {"x": x, "y": y},
                 "color": color,
                 "icon": icon,
-                "size": {"width": 180, "height": 50},
-                "parentId": None,
+                "size": {"width": width, "height": height},
             }
+            number = node_numbers.get(nid)
+            if number is not None:
+                metadata["nodeNumber"] = number
             return await client.patch(
                 f"/api/{endpoint}/{nid}/", json={"metadata": metadata}
             )
