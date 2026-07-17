@@ -40,6 +40,9 @@ export const FLOW_NODE_TYPES = [
 /** Legacy node types that are never accepted — the loader turns them into ERROR diagnostics. */
 export const FORBIDDEN_NODE_TYPES = ['llm', 'code-agent'] as const;
 
+/** A node type that may appear in flow source (`crew` deprecated). Excludes the forbidden types. */
+export type FlowNodeType = (typeof FLOW_NODE_TYPES)[number];
+
 const outputVariablePathField = z
   .string()
   .optional()
@@ -220,11 +223,15 @@ export const classificationCategorySchema = z.strictObject({
 export const classificationDecisionTableNodeSchema = z.strictObject({
   type: z.literal('classification-decision-table'),
   position: positionField,
-  llm_config: entityRef('LLM config used to classify the input.'),
+  llm_config: entityRef('LLM config intended to classify the input.'),
   categories: z
     .array(classificationCategorySchema)
     .min(1)
-    .describe('Categories the LLM routes between.'),
+    .describe(
+      'Intended classification categories. CAVEAT: as currently compiled this node does not reliably ' +
+        'classify — routing falls through to the first category. For real branching use a rule-based ' +
+        'decision-table. See describe_node_types for the current caveat.',
+    ),
   default_next_node: symbolicNameSchema
     .optional()
     .describe('Node to route to when classification fails or matches nothing.'),

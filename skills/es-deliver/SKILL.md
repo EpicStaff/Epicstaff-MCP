@@ -31,6 +31,10 @@ and state the shape you chose in your first response.
 Every shape needs a working graph first. Do not build any app or integration until the flow runs
 green.
 
+The flow's data model is the **Domain** — one state object `{ variables, persistent_variables }`.
+All node data exchange goes through `variables.*` (via `input_map` reads / `output_variable_path`
+writes); edges only sequence/branch, they carry no data. `es-write-flow` covers this in full.
+
 1. `es-connect` — auth + organization.
 2. `es-write-flow` — discover and **reuse** existing entities before defining new ones, then
    author/edit the flow source.

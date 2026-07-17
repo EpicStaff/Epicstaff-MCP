@@ -8,6 +8,8 @@ import { LlmApi } from '../api/llm.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
 import type { GraphDto } from '../models/graph.js';
+import { NODE_REFERENCE } from '../reference/node-reference.js';
+import { introspectNodeSchemas } from '../reference/node-schema-introspect.js';
 import { runTool } from './auth-org.tools.js';
 
 /**
@@ -70,6 +72,41 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
   const surfaces = new SurfacesApi(context.client);
   const agentDefinitions = new AgentDefinitionsApi(context.client);
   const graphs = new GraphsApi(context.client);
+
+  server.registerTool(
+    'describe_node_types',
+    {
+      title: 'Describe flow node types',
+      description:
+        'The catalog of node types you can write in flow source: each type\'s fields (name, description, ' +
+        'required) derived from the schema, plus a summary, when to use it, and runtime caveats the ' +
+        'compiler does not catch. Offline — needs no backend or auth. Call this before authoring a node ' +
+        'type you are unsure about. Pass `type` for one node; omit for the full catalog.',
+      inputSchema: {
+        type: z
+          .string()
+          .optional()
+          .describe('A single node type to describe, e.g. "agent" or "decision-table". Omit for all.'),
+      },
+    },
+    async ({ type }) =>
+      runTool(async () => {
+        const catalog = introspectNodeSchemas().map((info) => ({
+          ...info,
+          ...NODE_REFERENCE[info.type],
+        }));
+        if (type !== undefined) {
+          const one = catalog.find((node) => node.type === type);
+          if (one === undefined) {
+            throw new Error(
+              `unknown node type '${type}'. Available: ${catalog.map((node) => node.type).join(', ')}`,
+            );
+          }
+          return one;
+        }
+        return { node_types: catalog };
+      }),
+  );
 
   server.registerTool(
     'list_agents',
