@@ -29355,6 +29355,7 @@ var catalogSurfaceSchema = external_exports.strictObject({
 var surfacesSectionSchema = external_exports.record(symbolicNameSchema, catalogSurfaceSchema).default({}).describe("Catalog surfaces, keyed by symbolic name.");
 
 // src/flow-source/schema/flow.ts
+var FORBIDDEN_NODE_TYPES = ["llm", "code-agent"];
 var outputVariablePathField = external_exports.string().optional().describe(`Dot path in flow state where this node's output is stored, e.g. "variables.research_result".`);
 var positionField = positionSchema.optional();
 var inputMapField = inputMapSchema.default({});
@@ -29465,8 +29466,10 @@ var classificationCategorySchema = external_exports.strictObject({
 var classificationDecisionTableNodeSchema = external_exports.strictObject({
   type: external_exports.literal("classification-decision-table"),
   position: positionField,
-  llm_config: entityRef("LLM config used to classify the input."),
-  categories: external_exports.array(classificationCategorySchema).min(1).describe("Categories the LLM routes between."),
+  llm_config: entityRef("LLM config intended to classify the input."),
+  categories: external_exports.array(classificationCategorySchema).min(1).describe(
+    "Intended classification categories. CAVEAT: as currently compiled this node does not reliably classify \u2014 routing falls through to the first category. For real branching use a rule-based decision-table. See describe_node_types for the current caveat."
+  ),
   default_next_node: symbolicNameSchema.optional().describe("Node to route to when classification fails or matches nothing."),
   input_map: inputMapField
 });
@@ -34838,6 +34841,129 @@ function registerRunTools(server, context) {
 
 // src/tools/reference.tools.ts
 init_graphs();
+
+// src/reference/node-reference.ts
+var NODE_REFERENCE = {
+  start: {
+    summary: "The flow entry point; its `variables` (initial_state) is the authoritative Domain.",
+    whenToUse: "Every non-triggered flow needs exactly one. Seed initial variables here.",
+    caveats: [
+      "Reserved dict-method names as variable keys (items, keys, values, get, \u2026) break flow-state serialization at session start \u2014 do not use them as variable names.",
+      "List-index read paths in input_map (e.g. variables.a[1].b) are not supported at runtime \u2014 read the whole list into a variable and index it inside a python node instead."
+    ]
+  },
+  agent: {
+    summary: "Runs an AgentDefinition over one or more ordered tasks (dispatched to the agent service).",
+    whenToUse: "Multi-step agent work at one node, or when you want several tasks to share one agent.",
+    caveats: [
+      'Requires at least one entry in `tasks:` \u2014 an agent node with no tasks fails at runtime with "has no tasks to execute" (build_flow also errors on this).'
+    ]
+  },
+  task: {
+    summary: "Runs a single task on an AgentDefinition.",
+    whenToUse: "One discrete unit of agent work. Prefer over an agent node for a single step.",
+    caveats: []
+  },
+  python: {
+    summary: "Executes Python in the sandbox; reads inputs from and writes outputs to flow state.",
+    whenToUse: "Deterministic transforms, glue, list/index manipulation, calling out to libraries.",
+    caveats: [
+      "Provide exactly one of `code` / `code_file`; the `entrypoint` function receives the mapped inputs."
+    ]
+  },
+  end: {
+    summary: "Terminal node; marks a successful end of the run.",
+    whenToUse: "The single convergence point for all completing paths.",
+    caveats: []
+  },
+  note: {
+    summary: "Canvas annotation with no runtime effect.",
+    whenToUse: "Documenting a flow visually. Not connectable by edges.",
+    caveats: []
+  },
+  "file-extractor": {
+    summary: "Extracts text from a stored file into flow state.",
+    whenToUse: "Turning an uploaded/stored document into text for downstream nodes.",
+    caveats: []
+  },
+  subgraph: {
+    summary: "Embeds another flow as a node.",
+    whenToUse: "Reusing a whole flow as a step. Referencing the flow itself is a circular-reference error.",
+    caveats: []
+  },
+  "webhook-trigger": {
+    summary: "Starts the flow on an incoming webhook; its payload seeds flow state.",
+    whenToUse: "Event-driven flows started by an external HTTP call. The trigger is the interface.",
+    caveats: []
+  },
+  "telegram-trigger": {
+    summary: "Starts the flow on a Telegram message.",
+    whenToUse: "Telegram-bot-driven flows. Supply the bot token via env, never in flow source.",
+    caveats: []
+  },
+  "schedule-trigger": {
+    summary: "Starts the flow on a cron schedule.",
+    whenToUse: "Periodic/batch flows. No separate consumer \u2014 the schedule is the interface.",
+    caveats: []
+  },
+  "decision-table": {
+    summary: "Rule-based branching: the first matching Python condition routes to its next_node.",
+    whenToUse: "The reliable branching primitive. Prefer this over classification-decision-table.",
+    caveats: [
+      "The condition runs with `variables` as a plain dict, so write dict-subscript access (variables['x']['y'] == \u2026) \u2014 NOT attribute access or a bare input_map key.",
+      "Rules are ordered; the first match wins. Provide default_next_node for the no-match path."
+    ]
+  },
+  "classification-decision-table": {
+    summary: "Intended LLM-based classification routing (see caveat \u2014 currently unreliable).",
+    whenToUse: "Avoid for now \u2014 use a rule-based decision-table for branching that must actually work.",
+    caveats: [
+      "Does NOT reliably classify: as currently compiled it routes to the FIRST category regardless of input (no LLM classification call is made). Live-verified 2026-07. Use a rule-based decision-table instead until the backend/emit wires a real classification prompt."
+    ]
+  },
+  "audio-to-text": {
+    summary: "Transcribes audio to text into flow state (runs via crew + sandbox).",
+    whenToUse: "Speech-to-text steps inside a flow.",
+    caveats: []
+  },
+  crew: {
+    summary: "DEPRECATED \u2014 runs a legacy remote crew (project). Prefer agent/task nodes.",
+    whenToUse: "Only when the user explicitly needs the legacy crew path. Emits a deprecation warning.",
+    caveats: [
+      'Deprecated. Crews cannot be defined in flow source \u2014 only referenced via {existing: "<name>"}.'
+    ]
+  }
+};
+
+// src/reference/node-schema-introspect.ts
+var OMITTED_FIELDS = /* @__PURE__ */ new Set(["type", "position"]);
+var FORBIDDEN = new Set(FORBIDDEN_NODE_TYPES);
+function introspectNodeSchemas() {
+  const options = nodeSchema.options;
+  const result = [];
+  for (const option of options) {
+    const shape = option.shape;
+    const typeName = shape.type._def.value;
+    if (FORBIDDEN.has(typeName)) {
+      continue;
+    }
+    const fields = [];
+    for (const [name, field] of Object.entries(shape)) {
+      if (OMITTED_FIELDS.has(name)) {
+        continue;
+      }
+      fields.push({
+        name,
+        description: field.description ?? "",
+        required: !field.isOptional()
+      });
+    }
+    result.push({ type: typeName, deprecated: typeName === "crew", fields });
+  }
+  return result;
+}
+
+// src/tools/reference.tools.ts
 var NODE_LIST_KEYS = [
   "start_node_list",
   "agent_node_list",
@@ -34891,6 +35017,32 @@ function registerReferenceTools(server, context) {
   const surfaces = new SurfacesApi(context.client);
   const agentDefinitions = new AgentDefinitionsApi(context.client);
   const graphs = new GraphsApi(context.client);
+  server.registerTool(
+    "describe_node_types",
+    {
+      title: "Describe flow node types",
+      description: "The catalog of node types you can write in flow source: each type's fields (name, description, required) derived from the schema, plus a summary, when to use it, and runtime caveats the compiler does not catch. Offline \u2014 needs no backend or auth. Call this before authoring a node type you are unsure about. Pass `type` for one node; omit for the full catalog.",
+      inputSchema: {
+        type: external_exports.string().optional().describe('A single node type to describe, e.g. "agent" or "decision-table". Omit for all.')
+      }
+    },
+    async ({ type }) => runTool(async () => {
+      const catalog = introspectNodeSchemas().map((info) => ({
+        ...info,
+        ...NODE_REFERENCE[info.type]
+      }));
+      if (type !== void 0) {
+        const one = catalog.find((node) => node.type === type);
+        if (one === void 0) {
+          throw new Error(
+            `unknown node type '${type}'. Available: ${catalog.map((node) => node.type).join(", ")}`
+          );
+        }
+        return one;
+      }
+      return { node_types: catalog };
+    })
+  );
   server.registerTool(
     "list_agents",
     {
@@ -35428,12 +35580,35 @@ function registerAllTools(server, config2) {
 }
 
 // src/index.ts
+var EPICSTAFF_INSTRUCTIONS = [
+  "EpicStaff flows exchange ALL data through one state object \u2014 the Domain:",
+  "{ variables: {\u2026}, persistent_variables: { user: [], organization: [] } }.",
+  "",
+  "Nodes read and write variables.* via input_map (reads) and output_variable_path (writes).",
+  "Edges carry CONTROL FLOW only \u2014 run order and branching \u2014 never data: a node sees a value",
+  "because it reads a path some earlier node wrote, NOT because an edge connects them. Connecting",
+  "A \u2192 B does not hand A\u2019s output to B; wiring input_map / output_variable_path does.",
+  "",
+  "The start node's `variables` is the authoritative Domain (minimal valid form { variables: {} } \u2014",
+  "no inner key is mandatory). persistent_variables lists variable NAMES carried across sessions,",
+  'scoped to exactly "user" or "organization".',
+  "",
+  "Invariants: agent nodes need at least one task (tasks:); no parallel fan-out \u2014 one active path,",
+  'branch with a decision-table or conditional edge; never use node types "llm" or "code-agent"',
+  '("crew" is deprecated, prefer agent/task nodes). Call describe_node_types for the full node',
+  "catalog (fields + runtime caveats).",
+  "",
+  "Build flows with the es-* skills (front door: es-deliver \u2192 es-write-flow \u2192 build \u2192 push \u2192 test)."
+].join("\n");
 async function main() {
   const config2 = loadConfig();
-  const server = new McpServer({
-    name: "epicstaff",
-    version: "0.2.0"
-  });
+  const server = new McpServer(
+    {
+      name: "epicstaff",
+      version: "0.2.0"
+    },
+    { instructions: EPICSTAFF_INSTRUCTIONS }
+  );
   registerAllTools(server, config2);
   const transport = new StdioServerTransport();
   await server.connect(transport);
