@@ -29049,6 +29049,27 @@ var KnowledgeApi = class {
     }
     return this.client.post(`documents/source-collection/${collectionId}/upload/`, { formData });
   }
+  /** List the documents of one collection (nested route, returns collection info + documents). */
+  async listDocuments(collectionId) {
+    return this.client.get(`source-collections/${collectionId}/documents/`);
+  }
+  /** Delete documents by id across collections (`POST documents/bulk-delete/`). */
+  async deleteDocuments(documentIds) {
+    return this.client.post("documents/bulk-delete/", { body: { document_ids: documentIds } });
+  }
+  /**
+   * Re-trigger indexing of every RAG strategy attached to a collection — the
+   * step the pusher runs after document changes so retrieval sees the new set.
+   * Returns the rags that were kicked off.
+   */
+  async reindexCollection(collectionId) {
+    const collection = await this.getCollection(collectionId);
+    const rags = collection.rag_configurations ?? [];
+    for (const rag of rags) {
+      await this.startIndexing(rag.rag_id, rag.rag_type);
+    }
+    return rags.map((rag) => ({ rag_id: rag.rag_id, rag_type: rag.rag_type }));
+  }
   /**
    * Create (or idempotently update) the naive RAG for a collection and return
    * its backend id. The endpoint is `create_or_update` server-side, so a repeat
@@ -35569,6 +35590,73 @@ function registerUiTools(server, context) {
   );
 }
 
+// src/tools/knowledge.tools.ts
+import { existsSync as existsSync4 } from "node:fs";
+function registerKnowledgeTools(server, context) {
+  const knowledge = new KnowledgeApi(context.client);
+  server.registerTool(
+    "list_documents",
+    {
+      title: "List documents in a knowledge collection",
+      description: "List the documents stored in a knowledge (RAG) source collection: id, file name, and metadata. Use list_source_collections to find the collection id.",
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection.")
+      }
+    },
+    async ({ collection_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      return knowledge.listDocuments(collection_id);
+    })
+  );
+  server.registerTool(
+    "upload_documents",
+    {
+      title: "Upload documents to a knowledge collection",
+      description: "Upload local files as documents of an existing knowledge collection and (by default) re-trigger indexing of every RAG strategy attached to it, so agents can retrieve the new content once indexing completes (check with get_collection_status). Paths must be absolute. For flow-owned collections prefer adding the files to flow.yaml and re-running push_flow, which keeps the flow source authoritative; this tool is for ad-hoc corpus updates.",
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection."),
+        file_paths: external_exports.array(external_exports.string()).min(1).describe("Absolute paths of the local files to upload."),
+        reindex: external_exports.boolean().optional().describe("Re-trigger indexing of attached RAG strategies after upload (default true).")
+      }
+    },
+    async ({ collection_id, file_paths, reindex }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const missing = file_paths.filter((path6) => !existsSync4(path6));
+      if (missing.length > 0) {
+        throw new Error(`file(s) not found: ${missing.join(", ")}`);
+      }
+      const uploaded = await knowledge.uploadDocuments(collection_id, file_paths);
+      const reindexed = reindex === false ? [] : await knowledge.reindexCollection(collection_id);
+      return {
+        uploaded,
+        reindexed,
+        next: reindex === false ? "Indexing NOT triggered \u2014 the new documents are not retrievable until you re-index." : "Indexing started. Poll get_collection_status until the RAG status is completed."
+      };
+    })
+  );
+  server.registerTool(
+    "delete_documents",
+    {
+      title: "Delete documents from knowledge collections",
+      description: "Delete documents by document id (see list_documents). When collection_id is given, re-triggers indexing of that collection afterwards so retrieval stops seeing the removed content. Deletion is permanent.",
+      inputSchema: {
+        document_ids: external_exports.array(external_exports.number().int()).min(1).describe("Ids of the documents to delete."),
+        collection_id: external_exports.number().int().optional().describe("Collection to re-index after deletion (omit to skip re-indexing).")
+      }
+    },
+    async ({ document_ids, collection_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const deleted = await knowledge.deleteDocuments(document_ids);
+      const reindexed = collection_id === void 0 ? [] : await knowledge.reindexCollection(collection_id);
+      return {
+        deleted,
+        reindexed,
+        next: collection_id === void 0 ? "No re-index requested \u2014 removed content may remain retrievable until the collection is re-indexed." : "Indexing started. Poll get_collection_status until the RAG status is completed."
+      };
+    })
+  );
+}
+
 // src/tools/registry.ts
 function registerAllTools(server, config2) {
   const context = createContext(config2);
@@ -35577,6 +35665,7 @@ function registerAllTools(server, config2) {
   registerRunTools(server, context);
   registerReferenceTools(server, context);
   registerUiTools(server, context);
+  registerKnowledgeTools(server, context);
 }
 
 // src/index.ts
