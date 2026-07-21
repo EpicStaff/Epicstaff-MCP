@@ -19,6 +19,14 @@ export interface SourceCollection {
   [key: string]: unknown;
 }
 
+/** `GET source-collections/{id}/documents/` response (CollectionDocumentsViewSet.list). */
+export interface CollectionDocuments {
+  collection_id: number;
+  collection_name: string;
+  document_count: number;
+  documents: Array<Record<string, unknown>>;
+}
+
 interface Paginated<T> {
   count: number;
   results: T[];
@@ -71,6 +79,30 @@ export class KnowledgeApi {
       formData.append('files', new Blob([new Uint8Array(buffer)]), basename(filePath));
     }
     return this.client.post(`documents/source-collection/${collectionId}/upload/`, { formData });
+  }
+
+  /** List the documents of one collection (nested route, returns collection info + documents). */
+  async listDocuments(collectionId: number): Promise<CollectionDocuments> {
+    return this.client.get(`source-collections/${collectionId}/documents/`);
+  }
+
+  /** Delete documents by id across collections (`POST documents/bulk-delete/`). */
+  async deleteDocuments(documentIds: number[]): Promise<unknown> {
+    return this.client.post('documents/bulk-delete/', { body: { document_ids: documentIds } });
+  }
+
+  /**
+   * Re-trigger indexing of every RAG strategy attached to a collection — the
+   * step the pusher runs after document changes so retrieval sees the new set.
+   * Returns the rags that were kicked off.
+   */
+  async reindexCollection(collectionId: number): Promise<Array<{ rag_id: number; rag_type: RagType }>> {
+    const collection = await this.getCollection(collectionId);
+    const rags = (collection.rag_configurations ?? []) as Array<{ rag_id: number; rag_type: RagType }>;
+    for (const rag of rags) {
+      await this.startIndexing(rag.rag_id, rag.rag_type);
+    }
+    return rags.map((rag) => ({ rag_id: rag.rag_id, rag_type: rag.rag_type }));
   }
 
   /**
