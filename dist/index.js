@@ -29065,9 +29065,7 @@ var KnowledgeApi = class {
   async reindexCollection(collectionId) {
     const collection = await this.getCollection(collectionId);
     const rags = collection.rag_configurations ?? [];
-    for (const rag of rags) {
-      await this.startIndexing(rag.rag_id, rag.rag_type);
-    }
+    await Promise.all(rags.map((rag) => this.startIndexing(rag.rag_id, rag.rag_type)));
     return rags.map((rag) => ({ rag_id: rag.rag_id, rag_type: rag.rag_type }));
   }
   /**
@@ -33217,11 +33215,21 @@ var EntityPusher = class {
   storage;
   modelIdByName = null;
   builtinToolIdByName = null;
-  async push(artifact, lock) {
+  /**
+   * @param options.sections When set, only entity plans whose `section` is in
+   * this list are pushed — the rest are skipped entirely. Used by
+   * provision_knowledge to materialize just `llm_configs` + `knowledge` ahead of
+   * the full flow. Omitting `options` pushes everything (the default push_flow
+   * behavior, unchanged).
+   */
+  async push(artifact, lock, options) {
     const idMap = /* @__PURE__ */ new Map();
     const actions = [];
     let currentLock = lock;
     for (const plan of artifact.entities) {
+      if (options?.sections && !options.sections.includes(plan.section)) {
+        continue;
+      }
       if (plan.action === "resolve-existing") {
         const backendId2 = await this.resolveExisting(plan);
         idMap.set(plan.key, backendId2);
@@ -34586,6 +34594,48 @@ function registerFlowTools(server, context) {
     })
   );
   server.registerTool(
+    "provision_knowledge",
+    {
+      title: "Provision knowledge collections early (start indexing ahead of push)",
+      description: "Materialize ONLY the flow's knowledge collections (and the llm-configs they depend on) and kick off RAG indexing \u2014 without touching the graph or the rest of the entity tree. Indexing is slow and async, so run this as soon as the flow's knowledge section is authored and frozen, then keep building the flow in parallel. The later push_flow reuses these collections (identical content hash \u2192 not re-indexed), and wait_for_collections joins on the indexing you started here. Uses the same lockfile as push_flow.",
+      inputSchema: {
+        flow_dir: external_exports.string().describe("Absolute path of the flow directory")
+      }
+    },
+    async ({ flow_dir }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const artifact = await compileFlow(flow_dir);
+      if (hasErrors(artifact.diagnostics)) {
+        const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+        throw new Error(
+          `Flow source has ${errors.length} error(s) \u2014 first: ${errors[0].path}: ${errors[0].message}`
+        );
+      }
+      let lock = await readLock(flow_dir) ?? createLock(artifact.flowName);
+      const entityResult = await new EntityPusher(context).push(artifact, lock, {
+        sections: ["llm_configs", "knowledge"]
+      });
+      lock = entityResult.lock;
+      await writeLock(flow_dir, lock);
+      const collections = entityResult.actions.filter((action) => action.kind === "knowledge_collection").map((action) => {
+        const plan = artifact.entities.find((entity) => entity.key === action.key);
+        const ragEntry = plan ? getEntity(lock, plan.section, `${plan.name}#rag`) : void 0;
+        return {
+          name: plan?.name ?? action.key,
+          collectionId: action.backendId,
+          ragId: ragEntry?.backendId ?? null,
+          ragType: plan?.rag?.strategy ?? null
+        };
+      });
+      return {
+        collections,
+        indexingStarted: true,
+        next: "Author/build the rest of the flow, then push_flow (these collections will be reused, not re-indexed), then wait_for_collections before running."
+      };
+    })
+  );
+  server.registerTool(
     "pull_flow",
     {
       title: "Pull a remote flow into local flow source",
@@ -34711,8 +34761,10 @@ function summarizeMessages(messages) {
 }
 
 // src/tools/run.tools.ts
+var TERMINAL_RAG_STATUSES = /* @__PURE__ */ new Set(["completed", "warning", "failed"]);
 function registerRunTools(server, context) {
   const sessions = new SessionsApi(context.client);
+  const knowledge = new KnowledgeApi(context.client);
   server.registerTool(
     "run_flow",
     {
@@ -34856,6 +34908,57 @@ function registerRunTools(server, context) {
         context.client.get(`source-collections/${collection_id}/available-rags/`).catch(() => void 0)
       ]);
       return { collection, availableRags: rags };
+    })
+  );
+  server.registerTool(
+    "wait_for_collections",
+    {
+      title: "Wait for knowledge collections to finish indexing",
+      description: "Block until every RAG strategy on the given collections reaches a terminal indexing state (completed / warning / failed), or the timeout elapses \u2014 the join step before running a flow that relies on RAG. Polls the SERVER directly (never the lockfile). Pair with provision_knowledge, which starts indexing early and returns the collection ids to pass here.",
+      inputSchema: {
+        collection_ids: external_exports.array(external_exports.number().int()).min(1).describe("Backend ids of the collections to wait on (from provision_knowledge / push_flow)."),
+        timeout_seconds: external_exports.number().int().min(1).optional().describe("Give up waiting after this many seconds (default 600)."),
+        poll_interval_seconds: external_exports.number().int().min(1).optional().describe("Seconds between status polls (default 5).")
+      }
+    },
+    async ({ collection_ids, timeout_seconds, poll_interval_seconds }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const timeoutMs = (timeout_seconds ?? 600) * 1e3;
+      const intervalMs = (poll_interval_seconds ?? 5) * 1e3;
+      const deadline = Date.now() + timeoutMs;
+      let collections = [];
+      let allTerminal = false;
+      for (; ; ) {
+        const fetched = await Promise.all(collection_ids.map((id) => knowledge.getCollection(id)));
+        collections = fetched.map((collection, index) => {
+          const rags = collection.rag_configurations ?? [];
+          return {
+            collectionId: collection_ids[index],
+            rags: rags.map((rag) => ({ ragId: rag.rag_id, ragType: rag.rag_type, status: rag.status }))
+          };
+        });
+        allTerminal = collections.every(
+          (collection) => collection.rags.every((rag) => TERMINAL_RAG_STATUSES.has(rag.status))
+        );
+        if (allTerminal || Date.now() >= deadline) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+      const anyFailed = collections.some(
+        (collection) => collection.rags.some((rag) => rag.status === "failed")
+      );
+      const timedOut = !allTerminal;
+      const allCompleted = allTerminal && !anyFailed;
+      let next;
+      if (allCompleted) {
+        next = "All RAGs finished indexing \u2014 the collections are retrievable. Run the flow with run_flow.";
+      } else if (timedOut) {
+        next = "Timed out before every RAG finished indexing \u2014 some are still new/processing. Increase timeout_seconds and call wait_for_collections again, or inspect with get_collection_status.";
+      } else {
+        next = "One or more RAGs failed to index \u2014 retrieval will be incomplete. Inspect with get_collection_status, fix the collection/documents, and re-index before running.";
+      }
+      return { collections, allCompleted, timedOut, next };
     })
   );
 }
