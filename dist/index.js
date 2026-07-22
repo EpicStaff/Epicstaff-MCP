@@ -29011,6 +29011,10 @@ var AgentDefinitionsApi = class {
   async update(id, request) {
     return this.client.patch(`agent-definitions/${id}/`, { body: request });
   }
+  /** Delete an agent definition. Backend responds 204 (AgentDefinitionViewSet ModelViewSet). */
+  async delete(id) {
+    await this.client.delete(`agent-definitions/${id}/`);
+  }
 };
 
 // src/tools/flow.tools.ts
@@ -29104,6 +29108,13 @@ var KnowledgeApi = class {
   async startIndexing(ragId, ragType) {
     return this.client.post("process-rag-indexing/", { body: { rag_id: ragId, rag_type: ragType } });
   }
+  /**
+   * Delete a source collection and everything derived from it — documents, attached
+   * RAG strategies, and the pgvector index. Irreversible. Backend responds 204.
+   */
+  async deleteCollection(collectionId) {
+    await this.client.delete(`source-collections/${collectionId}/`);
+  }
 };
 
 // src/api/llm.ts
@@ -29162,6 +29173,10 @@ var SurfacesApi = class {
   }
   async update(id, request) {
     return this.client.put(`surfaces/${id}/`, { body: request });
+  }
+  /** Delete a catalog surface. Backend responds 204 (SurfaceViewSet is a plain ModelViewSet). */
+  async delete(id) {
+    await this.client.delete(`surfaces/${id}/`);
   }
 };
 
@@ -35760,6 +35775,533 @@ function registerKnowledgeTools(server, context) {
   );
 }
 
+// src/tools/catalog.tools.ts
+import { existsSync as existsSync5 } from "node:fs";
+var idOrName = external_exports.union([external_exports.number().int(), external_exports.string().min(1)]);
+var toolModeSchema2 = external_exports.enum(["allow", "deny"]).default("allow").describe('Tool permission. "deny" hard-wins over "allow" when surfaces combine.');
+var triStateSchema = external_exports.enum(["allow", "unset", "deny"]).default("unset").describe("Tri-state storage permission. When surfaces combine: deny > allow > unset.");
+var surfaceToolEntrySchema2 = external_exports.strictObject({
+  tool: idOrName.describe("Python/MCP tool: backend id or exact tool name (see list_tools)."),
+  mode: toolModeSchema2
+});
+var surfaceStorageItemSchema2 = external_exports.strictObject({
+  storage_file: external_exports.number().int().describe("Backend id of the org storage file this entry governs."),
+  can_list: triStateSchema,
+  can_view: triStateSchema,
+  can_edit: triStateSchema,
+  can_delete: triStateSchema
+});
+var surfaceKnowledgeEntrySchema2 = external_exports.strictObject({
+  collection: idOrName.describe("Knowledge collection: backend id or exact collection name."),
+  naive_search_config: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
+  graph_basic_search_config: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
+  graph_local_search_config: external_exports.record(external_exports.string(), external_exports.unknown()).optional()
+});
+var surfaceBodyShape2 = {
+  description: external_exports.string().optional().describe("What this surface bundles and why."),
+  instructions: external_exports.string().optional().describe("Extra instructions injected into an agent when this surface is attached."),
+  owner_agent: idOrName.nullable().optional().describe(
+    "Owning agent (id or name). Set \u21D2 agent-specific (only that agent may attach it). null/omitted \u21D2 shared."
+  ),
+  allow_creation: external_exports.boolean().optional().describe("Whether the agent may create new files in this surface."),
+  python_tools: external_exports.array(surfaceToolEntrySchema2).optional().describe("Python tool grants."),
+  mcp_tools: external_exports.array(surfaceToolEntrySchema2).optional().describe("MCP tool grants."),
+  storage_items: external_exports.array(surfaceStorageItemSchema2).optional().describe("Per-file storage permissions."),
+  knowledge: external_exports.array(surfaceKnowledgeEntrySchema2).optional().describe("Knowledge collections this surface exposes.")
+};
+var ragInputSchema = external_exports.strictObject({
+  strategy: external_exports.enum(["naive", "graph"]).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
+  embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
+  llm_config: idOrName.optional().describe('LLM config (id or name) used to build/query the graph. REQUIRED for strategy "graph".')
+});
+async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
+  if (typeof ref === "number") return ref;
+  const items = await list();
+  const wanted = ref.trim().toLowerCase();
+  const match = items.find((item) => nameOf(item).toLowerCase() === wanted);
+  const id = match ? idOf(match) : void 0;
+  if (id === void 0) {
+    const available = items.map(nameOf).filter(Boolean).slice(0, 30).join(", ");
+    throw new Error(
+      `${entityLabel} "${ref}" not found in the active organization. Available: ${available || "(none)"}. Pass a numeric backend id or an exact existing name.`
+    );
+  }
+  return id;
+}
+async function resolveEmbedderRef(ref, llm, client) {
+  const configs = await llm.listEmbeddingConfigs();
+  if (typeof ref === "number") return ref;
+  if (typeof ref === "string") {
+    const wanted = ref.trim().toLowerCase();
+    const named = configs.find(
+      (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === wanted
+    );
+    if (named) return named.id;
+    const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+    throw new Error(
+      `Embedding config "${ref}" not found in the organization. Available: ${available || "(none)"}.`
+    );
+  }
+  return resolveDefaultEmbedderId(configs, client);
+}
+async function resolveDefaultEmbedderId(configs, client) {
+  if (configs.length === 0) {
+    throw new Error(
+      "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder), or pass rag.embedder explicitly."
+    );
+  }
+  const defaultConfig = await client.get("default-embedding-config/").catch(() => void 0);
+  const defaultModelId = defaultConfig?.model;
+  if (defaultModelId !== void 0) {
+    const byModel = configs.find((config2) => config2.model === defaultModelId);
+    if (byModel) return byModel.id;
+  }
+  if (configs.length === 1) return configs[0].id;
+  const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+  throw new Error(
+    `Cannot pick a default embedding config: the organization has several and none matches the configured default embedding model. Pass rag.embedder as one of: ${available}.`
+  );
+}
+function isAlreadyExistsError(error2) {
+  if (error2.status === 409) return true;
+  const haystack = [
+    error2.message,
+    error2.bodyExcerpt ?? "",
+    ...error2.validationErrors?.map((issue2) => `${issue2.field} ${issue2.reason}`) ?? []
+  ].join(" ").toLowerCase();
+  return /already exist|must be unique|unique constraint|duplicate|conflict/.test(haystack);
+}
+async function createOrExplainConflict(create, name, updateToolName) {
+  try {
+    return await create();
+  } catch (error2) {
+    if (error2 instanceof ApiError && isAlreadyExistsError(error2)) {
+      throw new Error(
+        `An entity named "${name}" already exists in this organization (catalog names are org-unique). Use ${updateToolName} to modify the existing one, or choose a different name.`
+      );
+    }
+    throw error2;
+  }
+}
+function registerCatalogTools(server, context) {
+  const surfaces = new SurfacesApi(context.client);
+  const agents = new AgentDefinitionsApi(context.client);
+  const knowledge = new KnowledgeApi(context.client);
+  const llm = new LlmApi(context.client);
+  const tools = new ToolsApi(context.client);
+  const resolveAgent = (ref) => resolveNamedRef(ref, "Agent", () => agents.list(), (agent) => agent.id, (agent) => agent.name);
+  const resolveSurface = (ref) => resolveNamedRef(ref, "Surface", () => surfaces.list(), (surface) => surface.id, (surface) => surface.name);
+  const resolveLlmConfig = (ref) => resolveNamedRef(ref, "LLM config", () => llm.listConfigs(), (config2) => config2.id, (config2) => config2.custom_name);
+  const resolveCollection = (ref) => resolveNamedRef(
+    ref,
+    "Knowledge collection",
+    () => knowledge.listCollections(),
+    (collection) => collection.collection_id ?? collection.id,
+    (collection) => collection.collection_name
+  );
+  const resolvePythonTool = (ref) => resolveNamedRef(ref, "Python tool", () => tools.listPythonCodeTools(), (tool) => tool.id, (tool) => tool.name);
+  const resolveMcpTool = (ref) => resolveNamedRef(ref, "MCP tool", () => tools.listMcpTools(), (tool) => tool.id, (tool) => tool.name);
+  async function buildSurfaceRequest(name, body) {
+    const request = { name };
+    if (body.description !== void 0) request.description = body.description;
+    if (body.instructions !== void 0) request.instructions = body.instructions;
+    if (body.allow_creation !== void 0) request.allow_creation = body.allow_creation;
+    if (body.owner_agent !== void 0) {
+      request.owner_agent = body.owner_agent === null ? null : await resolveAgent(body.owner_agent);
+    }
+    if (body.python_tools !== void 0) {
+      request.python_tools = await Promise.all(
+        body.python_tools.map(async (entry) => ({
+          python_tool: await resolvePythonTool(entry.tool),
+          mode: entry.mode
+        }))
+      );
+    }
+    if (body.mcp_tools !== void 0) {
+      request.mcp_tools = await Promise.all(
+        body.mcp_tools.map(async (entry) => ({
+          mcp_tool: await resolveMcpTool(entry.tool),
+          mode: entry.mode
+        }))
+      );
+    }
+    if (body.storage_items !== void 0) {
+      request.storage_items = body.storage_items.map((item) => ({ ...item }));
+    }
+    if (body.knowledge !== void 0) {
+      const knowledgeEntries = await Promise.all(
+        body.knowledge.map(async (entry) => ({
+          collection: await resolveCollection(entry.collection),
+          ...entry.naive_search_config !== void 0 && { naive_search_config: entry.naive_search_config },
+          ...entry.graph_basic_search_config !== void 0 && {
+            graph_basic_search_config: entry.graph_basic_search_config
+          },
+          ...entry.graph_local_search_config !== void 0 && {
+            graph_local_search_config: entry.graph_local_search_config
+          }
+        }))
+      );
+      request.knowledge = knowledgeEntries;
+    }
+    return request;
+  }
+  server.registerTool(
+    "create_surface",
+    {
+      title: "Create a catalog surface",
+      description: 'Create a reusable catalog surface (a named bundle of tool/storage/knowledge grants + instructions that agents attach). Standalone \u2014 no flow needed. Reference it later from a flow via existing: "<name>". Names are org-unique; on a name clash use update_surface. Connect-both-ends recipe for an agent with a private surface: (1) create_surface, (2) create_agent with default_surfaces: [<surfaceId or name>], (3) update_surface owner_agent: <agentId> to make the surface agent-specific.',
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Org-unique surface name; the handle flows reference via existing:."),
+        ...surfaceBodyShape2
+      }
+    },
+    async ({ name, ...body }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const request = await buildSurfaceRequest(name, body);
+      const created = await createOrExplainConflict(() => surfaces.create(request), name, "update_surface");
+      return {
+        surface: created,
+        next: 'Reference this surface from a flow with existing: "' + name + '". To bind it to one agent: create_agent(default_surfaces:[' + created.id + "]) then update_surface(owner_agent: <agentId>)."
+      };
+    })
+  );
+  server.registerTool(
+    "update_surface",
+    {
+      title: "Update a catalog surface",
+      description: "Update an existing catalog surface. Fetches the current surface and merges the fields you provide (the backend PUT replaces the whole record, so unspecified fields are preserved from the current state). Provided list fields (python_tools, mcp_tools, storage_items, knowledge) REPLACE the existing list, not append.",
+      inputSchema: {
+        surface: idOrName.describe("The surface to update: backend id or exact current name."),
+        name: external_exports.string().min(1).optional().describe("New name (rename). Omit to keep the current name."),
+        ...surfaceBodyShape2
+      }
+    },
+    async ({ surface, name, ...body }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const surfaceId = await resolveSurface(surface);
+      const current = await surfaces.get(surfaceId);
+      const merged = mergeSurfaceBody(current, name, body);
+      const request = await buildSurfaceRequest(merged.name, merged.body);
+      const updated = await surfaces.update(surfaceId, request);
+      return { surface: updated };
+    })
+  );
+  server.registerTool(
+    "get_surface",
+    {
+      title: "Get a catalog surface",
+      description: "Fetch one catalog surface in full (tools, storage items, knowledge, owner) by id or exact name.",
+      inputSchema: {
+        surface: idOrName.describe("The surface to fetch: backend id or exact name.")
+      }
+    },
+    async ({ surface }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const surfaceId = await resolveSurface(surface);
+      return surfaces.get(surfaceId);
+    })
+  );
+  server.registerTool(
+    "delete_surface",
+    {
+      title: "Delete a catalog surface",
+      description: 'Delete a catalog surface by id or exact name. IRREVERSIBLE and NOT flow-aware: any flow that references this surface via existing: "<name>" will FAIL its next push_flow (the reference will not resolve). Verify no flow depends on it first.',
+      inputSchema: {
+        surface: idOrName.describe("The surface to delete: backend id or exact name.")
+      }
+    },
+    async ({ surface }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const surfaceId = await resolveSurface(surface);
+      const current = await surfaces.get(surfaceId);
+      await surfaces.delete(surfaceId);
+      return {
+        deleted: { id: surfaceId, name: current.name },
+        next: 'WARNING: any flow referencing this surface via existing: "' + current.name + '" will fail its next push_flow. Update or remove those references.'
+      };
+    })
+  );
+  server.registerTool(
+    "create_agent",
+    {
+      title: "Create an agent definition",
+      description: 'Create a reusable AgentDefinition (the first-class Agent entity) standalone \u2014 no flow needed. Reference it later from a flow agent node via existing: "<name>". Names are org-unique; on a clash use update_agent. llm_config and default_surfaces[].surface accept a backend id OR an existing name. Connect-both-ends recipe: create_surface first, then create_agent(default_surfaces:[<surface>]), then update_surface(owner_agent: <this agent>) to make the surface agent-specific.',
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Org-unique agent name; the handle flows reference via existing:."),
+        instructions: external_exports.string().describe("Boot instructions \u2014 the agent system prompt."),
+        description: external_exports.string().optional().describe("One-line summary of what this agent is for."),
+        llm_config: idOrName.describe("LLM config the agent thinks with: backend id or exact name (list_llm_configs)."),
+        fcm_llm_config: idOrName.optional().describe("Separate LLM config for function calling: id or name."),
+        default_surfaces: external_exports.array(
+          external_exports.strictObject({
+            surface: idOrName.describe("Surface to attach by default: id or exact name."),
+            place: external_exports.enum(["all", "flow", "chat"]).default("all").describe("Where it applies.")
+          })
+        ).optional().describe("Surfaces assigned to this agent by default, per usage place."),
+        max_iter: external_exports.number().int().positive().optional().describe("Max reasoning/tool-call iterations per run."),
+        max_rpm: external_exports.number().int().positive().optional().describe("Max LLM requests per minute (unlimited when omitted)."),
+        max_execution_time: external_exports.number().int().positive().optional().describe("Max execution time per run (seconds)."),
+        cache: external_exports.boolean().optional().describe("Whether tool-result caching is enabled."),
+        max_retry_limit: external_exports.number().int().nonnegative().optional().describe("Max retries when an LLM call fails."),
+        default_temperature: external_exports.number().optional().describe("Default sampling temperature."),
+        metadata: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("Free-form metadata stored with the agent.")
+      }
+    },
+    async ({ name, ...body }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const request = await buildAgentRequest(name, body, {
+        resolveLlmConfig,
+        resolveSurface
+      });
+      const created = await createOrExplainConflict(() => agents.create(request), name, "update_agent");
+      return {
+        agent: created,
+        next: 'Reference this agent from a flow agent node with existing: "' + name + '". If it should own a private surface, call update_surface(owner_agent: ' + created.id + ")."
+      };
+    })
+  );
+  server.registerTool(
+    "update_agent",
+    {
+      title: "Update an agent definition",
+      description: "Partially update an existing AgentDefinition (PATCH \u2014 only the fields you pass change). default_surfaces, when provided, REPLACES the current list. llm_config and surfaces accept id or name.",
+      inputSchema: {
+        agent: idOrName.describe("The agent to update: backend id or exact current name."),
+        name: external_exports.string().min(1).optional().describe("New name (rename)."),
+        instructions: external_exports.string().optional(),
+        description: external_exports.string().optional(),
+        llm_config: idOrName.optional(),
+        fcm_llm_config: idOrName.optional(),
+        default_surfaces: external_exports.array(
+          external_exports.strictObject({
+            surface: idOrName,
+            place: external_exports.enum(["all", "flow", "chat"]).default("all")
+          })
+        ).optional(),
+        max_iter: external_exports.number().int().positive().optional(),
+        max_rpm: external_exports.number().int().positive().optional(),
+        max_execution_time: external_exports.number().int().positive().optional(),
+        cache: external_exports.boolean().optional(),
+        max_retry_limit: external_exports.number().int().nonnegative().optional(),
+        default_temperature: external_exports.number().optional(),
+        metadata: external_exports.record(external_exports.string(), external_exports.unknown()).optional()
+      }
+    },
+    async ({ agent, ...body }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const agentId = await resolveAgent(agent);
+      const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
+      const updated = await agents.update(agentId, request);
+      return { agent: updated };
+    })
+  );
+  server.registerTool(
+    "get_agent",
+    {
+      title: "Get an agent definition",
+      description: "Fetch one AgentDefinition in full (instructions, llm configs, default surfaces) by id or exact name.",
+      inputSchema: {
+        agent: idOrName.describe("The agent to fetch: backend id or exact name.")
+      }
+    },
+    async ({ agent }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const agentId = await resolveAgent(agent);
+      return agents.get(agentId);
+    })
+  );
+  server.registerTool(
+    "delete_agent",
+    {
+      title: "Delete an agent definition",
+      description: 'Delete an AgentDefinition by id or exact name. IRREVERSIBLE and NOT flow-aware: any flow that references this agent via existing: "<name>" will FAIL its next push_flow. Surfaces owned by this agent are cascade-deleted with it. Verify no flow depends on it first.',
+      inputSchema: {
+        agent: idOrName.describe("The agent to delete: backend id or exact name.")
+      }
+    },
+    async ({ agent }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const agentId = await resolveAgent(agent);
+      const current = await agents.get(agentId);
+      await agents.delete(agentId);
+      return {
+        deleted: { id: agentId, name: current.name },
+        next: 'WARNING: any flow referencing this agent via existing: "' + current.name + '" will fail its next push_flow. Surfaces owned by this agent were cascade-deleted.'
+      };
+    })
+  );
+  server.registerTool(
+    "create_collection",
+    {
+      title: "Create a knowledge collection",
+      description: 'Create a knowledge (RAG) source collection standalone \u2014 no flow needed \u2014 optionally uploading documents and attaching a RAG strategy in one call. Composes: create collection \u2192 upload documents \u2192 attach naive/graph RAG \u2192 start indexing. Reference it later from a surface via existing: "<name>". A standalone collection must FINISH indexing (poll wait_for_collections) before any flow that references it will retrieve from it. Collection names are not strictly unique, but reuse a name and documents accumulate \u2014 prefer upload_documents to add to an existing one.',
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Collection name; the handle surfaces/flows reference via existing:."),
+        documents: external_exports.array(external_exports.string().min(1)).optional().describe("Absolute paths of local files to upload as documents."),
+        rag: ragInputSchema.optional().describe("RAG strategy to attach and index. Omit to create an empty, un-indexed collection.")
+      }
+    },
+    async ({ name, documents, rag }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      if (documents && documents.length > 0) {
+        const missing = documents.filter((path6) => !existsSync5(path6));
+        if (missing.length > 0) {
+          throw new Error(`file(s) not found: ${missing.join(", ")}`);
+        }
+      }
+      const collection = await knowledge.createCollection(name);
+      const collectionId = collection.collection_id ?? collection.id;
+      if (collectionId === void 0) {
+        throw new Error("Backend did not return an id for the created collection.");
+      }
+      if (documents && documents.length > 0) {
+        await knowledge.uploadDocuments(collectionId, documents);
+      }
+      const attached = rag ? await attachAndIndexRag(collectionId, rag, { knowledge, llm, client: context.client, resolveLlmConfig }) : void 0;
+      return {
+        collectionId,
+        ragId: attached?.ragId,
+        ragType: attached?.ragType,
+        indexingStarted: attached !== void 0,
+        next: attached ? `Indexing started. Poll wait_for_collections(collection_ids:[${collectionId}]) until complete \u2014 only then will a flow referencing this collection retrieve from it.` : "Collection created empty. Add a RAG strategy with attach_rag, then wait_for_collections before use."
+      };
+    })
+  );
+  server.registerTool(
+    "attach_rag",
+    {
+      title: "Attach a RAG strategy to a collection",
+      description: "Create (or idempotently update) a RAG strategy on an existing collection and start indexing it. Use after create_collection (when rag was omitted) or to add a second strategy. embedder and llm_config accept a backend id or an existing name; graph RAG requires llm_config.",
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection (see list_source_collections)."),
+        strategy: external_exports.enum(["naive", "graph"]).describe("RAG strategy to attach."),
+        embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
+        llm_config: idOrName.optional().describe('LLM config (id or name). REQUIRED for strategy "graph".')
+      }
+    },
+    async ({ collection_id, strategy, embedder, llm_config }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      const attached = await attachAndIndexRag(
+        collection_id,
+        { strategy, embedder, llm_config },
+        { knowledge, llm, client: context.client, resolveLlmConfig }
+      );
+      return {
+        collectionId: collection_id,
+        ragId: attached.ragId,
+        ragType: attached.ragType,
+        indexingStarted: true,
+        next: `Indexing started. Poll wait_for_collections(collection_ids:[${collection_id}]) until complete.`
+      };
+    })
+  );
+  server.registerTool(
+    "delete_collection",
+    {
+      title: "Delete a knowledge collection",
+      description: 'Delete a knowledge source collection by id. IRREVERSIBLE: its documents, attached RAG strategies, and the pgvector index are dropped permanently. NOT flow-aware: any flow whose surface references this collection via existing: "<name>" will FAIL its next push_flow, and retrieval stops immediately. Verify no surface/flow depends on it first.',
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection to delete.")
+      }
+    },
+    async ({ collection_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      await knowledge.deleteCollection(collection_id);
+      return {
+        deleted: { collectionId: collection_id },
+        next: 'WARNING: the pgvector index was dropped irreversibly. Any surface/flow referencing this collection via existing: "<name>" will fail its next push_flow, and retrieval has stopped.'
+      };
+    })
+  );
+}
+async function resolveDefaultSurfaces(entries, resolveSurface) {
+  return Promise.all(
+    entries.map(async (entry) => ({ surface: await resolveSurface(entry.surface), place: entry.place }))
+  );
+}
+async function buildAgentRequest(name, body, resolvers) {
+  const request = {
+    name,
+    instructions: body.instructions,
+    llm_config: await resolvers.resolveLlmConfig(body.llm_config)
+  };
+  if (body.description !== void 0) request.description = body.description;
+  if (body.fcm_llm_config !== void 0) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
+  if (body.default_surfaces !== void 0) {
+    request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
+  }
+  assignAgentKnobs(request, body);
+  return request;
+}
+async function buildAgentPatch(body, resolvers) {
+  const request = {};
+  if (body.name !== void 0) request.name = body.name;
+  if (body.instructions !== void 0) request.instructions = body.instructions;
+  if (body.description !== void 0) request.description = body.description;
+  if (body.llm_config !== void 0) request.llm_config = await resolvers.resolveLlmConfig(body.llm_config);
+  if (body.fcm_llm_config !== void 0) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
+  if (body.default_surfaces !== void 0) {
+    request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
+  }
+  assignAgentKnobs(request, body);
+  return request;
+}
+function assignAgentKnobs(request, body) {
+  if (body.max_iter !== void 0) request.max_iter = body.max_iter;
+  if (body.max_rpm !== void 0) request.max_rpm = body.max_rpm;
+  if (body.max_execution_time !== void 0) request.max_execution_time = body.max_execution_time;
+  if (body.cache !== void 0) request.cache = body.cache;
+  if (body.max_retry_limit !== void 0) request.max_retry_limit = body.max_retry_limit;
+  if (body.default_temperature !== void 0) request.default_temperature = body.default_temperature;
+  if (body.metadata !== void 0) request.metadata = body.metadata;
+}
+function mergeSurfaceBody(current, newName, body) {
+  const merged = {
+    description: body.description ?? current.description,
+    instructions: body.instructions ?? current.instructions,
+    allow_creation: body.allow_creation ?? current.allow_creation,
+    owner_agent: body.owner_agent !== void 0 ? body.owner_agent : current.owner_agent,
+    python_tools: body.python_tools ?? current.python_tools.map((entry) => ({ tool: entry.python_tool, mode: entry.mode })),
+    mcp_tools: body.mcp_tools ?? current.mcp_tools.map((entry) => ({ tool: entry.mcp_tool, mode: entry.mode })),
+    storage_items: body.storage_items ?? current.storage_items.map((item) => ({ ...item })),
+    // Re-send existing knowledge unchanged when the caller did not override it;
+    // search configs are opaque passthrough here, so widen at the boundary.
+    knowledge: body.knowledge ?? current.knowledge.map((entry) => ({
+      collection: entry.collection,
+      ...entry.naive_search_config != null && { naive_search_config: entry.naive_search_config },
+      ...entry.graph_basic_search_config != null && { graph_basic_search_config: entry.graph_basic_search_config },
+      ...entry.graph_local_search_config != null && { graph_local_search_config: entry.graph_local_search_config }
+    }))
+  };
+  return { name: newName ?? current.name, body: merged };
+}
+async function attachAndIndexRag(collectionId, rag, ctx) {
+  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm, ctx.client);
+  if (rag.strategy === "naive") {
+    const ragId2 = await ctx.knowledge.createNaiveRag(collectionId, embedderId);
+    await ctx.knowledge.startIndexing(ragId2, "naive");
+    return { ragId: ragId2, ragType: "naive" };
+  }
+  if (rag.llm_config === void 0) {
+    throw new Error("graph RAG requires llm_config (backend id or name of an LLM config).");
+  }
+  const llmId = await ctx.resolveLlmConfig(rag.llm_config);
+  const ragId = await ctx.knowledge.createGraphRag(collectionId, embedderId, llmId);
+  await ctx.knowledge.startIndexing(ragId, "graph");
+  return { ragId, ragType: "graph" };
+}
+
 // src/tools/registry.ts
 function registerAllTools(server, config2) {
   const context = createContext(config2);
@@ -35769,6 +36311,7 @@ function registerAllTools(server, config2) {
   registerReferenceTools(server, context);
   registerUiTools(server, context);
   registerKnowledgeTools(server, context);
+  registerCatalogTools(server, context);
 }
 
 // src/index.ts
