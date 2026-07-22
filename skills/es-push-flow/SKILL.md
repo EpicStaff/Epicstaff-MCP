@@ -16,6 +16,11 @@ One responsibility: materialize the local flow on the server, safely.
 4. Call `push_flow`. It upserts entities in dependency order, uploads new/changed
    knowledge documents, attaches RAG, and bulk-saves the graph with the computed layout.
    Repushing updates in place — the lockfile (`flow.lock.json`) maps names to backend ids.
+   Knowledge that is unchanged since the last push (same documents + RAG strategy → same content
+   hash) is reported `reused` and is **not** re-indexed; a collection re-indexes only when its
+   documents or RAG config actually changed. If the flow has knowledge, prefer calling
+   `provision_knowledge` early (before the flow is fully authored) to start the slow indexing
+   sooner — this push then reuses those collections instead of indexing from scratch.
 5. Report: graph id, what was created vs updated, and the editor link from the response.
    Suggest opening the flow in the EpicStaff editor to see it.
 6. Commit `flow.lock.json` together with the flow source — it is the identity map.

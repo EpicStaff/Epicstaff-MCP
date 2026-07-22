@@ -99,9 +99,7 @@ export class KnowledgeApi {
   async reindexCollection(collectionId: number): Promise<Array<{ rag_id: number; rag_type: RagType }>> {
     const collection = await this.getCollection(collectionId);
     const rags = (collection.rag_configurations ?? []) as Array<{ rag_id: number; rag_type: RagType }>;
-    for (const rag of rags) {
-      await this.startIndexing(rag.rag_id, rag.rag_type);
-    }
+    await Promise.all(rags.map((rag) => this.startIndexing(rag.rag_id, rag.rag_type)));
     return rags.map((rag) => ({ rag_id: rag.rag_id, rag_type: rag.rag_type }));
   }
 

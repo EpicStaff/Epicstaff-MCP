@@ -1,8 +1,27 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import { KnowledgeApi } from '../api/knowledge.js';
 import { SessionsApi, TERMINAL_SESSION_STATUSES, summarizeMessages } from '../api/sessions.js';
 import { runTool } from './auth-org.tools.js';
+
+/**
+ * RAG indexing statuses that mean a strategy has stopped progressing:
+ * `completed` (indexed), `warning` (indexed with warnings — still retrievable),
+ * `failed` (gave up). The only in-progress statuses are `new` and `processing`.
+ */
+const TERMINAL_RAG_STATUSES = new Set(['completed', 'warning', 'failed']);
+
+interface RagStatus {
+  ragId: number;
+  ragType: string;
+  status: string;
+}
+
+interface CollectionRagStatus {
+  collectionId: number;
+  rags: RagStatus[];
+}
 
 /**
  * Test-loop tools: run a pushed flow, poll it, read its messages, debug it.
@@ -10,6 +29,7 @@ import { runTool } from './auth-org.tools.js';
  */
 export function registerRunTools(server: McpServer, context: AppContext): void {
   const sessions = new SessionsApi(context.client);
+  const knowledge = new KnowledgeApi(context.client);
 
   server.registerTool(
     'run_flow',
@@ -197,6 +217,88 @@ export function registerRunTools(server: McpServer, context: AppContext): void {
             .catch(() => undefined),
         ]);
         return { collection, availableRags: rags };
+      }),
+  );
+
+  server.registerTool(
+    'wait_for_collections',
+    {
+      title: 'Wait for knowledge collections to finish indexing',
+      description:
+        'Block until every RAG strategy on the given collections reaches a terminal indexing state ' +
+        '(completed / warning / failed), or the timeout elapses — the join step before running a flow that ' +
+        'relies on RAG. Polls the SERVER directly (never the lockfile). Pair with provision_knowledge, which ' +
+        'starts indexing early and returns the collection ids to pass here.',
+      inputSchema: {
+        collection_ids: z
+          .array(z.number().int())
+          .min(1)
+          .describe('Backend ids of the collections to wait on (from provision_knowledge / push_flow).'),
+        timeout_seconds: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('Give up waiting after this many seconds (default 600).'),
+        poll_interval_seconds: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('Seconds between status polls (default 5).'),
+      },
+    },
+    async ({ collection_ids, timeout_seconds, poll_interval_seconds }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        const timeoutMs = (timeout_seconds ?? 600) * 1000;
+        const intervalMs = (poll_interval_seconds ?? 5) * 1000;
+        const deadline = Date.now() + timeoutMs;
+
+        let collections: CollectionRagStatus[] = [];
+        let allTerminal = false;
+        for (;;) {
+          const fetched = await Promise.all(collection_ids.map((id) => knowledge.getCollection(id)));
+          collections = fetched.map((collection, index) => {
+            const rags = (collection.rag_configurations ?? []) as Array<{
+              rag_id: number;
+              rag_type: string;
+              status: string;
+            }>;
+            return {
+              collectionId: collection_ids[index]!,
+              rags: rags.map((rag) => ({ ragId: rag.rag_id, ragType: rag.rag_type, status: rag.status })),
+            };
+          });
+          allTerminal = collections.every((collection) =>
+            collection.rags.every((rag) => TERMINAL_RAG_STATUSES.has(rag.status)),
+          );
+          if (allTerminal || Date.now() >= deadline) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+
+        const anyFailed = collections.some((collection) =>
+          collection.rags.some((rag) => rag.status === 'failed'),
+        );
+        const timedOut = !allTerminal;
+        const allCompleted = allTerminal && !anyFailed;
+
+        let next: string;
+        if (allCompleted) {
+          next = 'All RAGs finished indexing — the collections are retrievable. Run the flow with run_flow.';
+        } else if (timedOut) {
+          next =
+            'Timed out before every RAG finished indexing — some are still new/processing. Increase ' +
+            'timeout_seconds and call wait_for_collections again, or inspect with get_collection_status.';
+        } else {
+          next =
+            'One or more RAGs failed to index — retrieval will be incomplete. Inspect with ' +
+            'get_collection_status, fix the collection/documents, and re-index before running.';
+        }
+
+        return { collections, allCompleted, timedOut, next };
       }),
   );
 }

@@ -260,6 +260,62 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
   );
 
   server.registerTool(
+    'provision_knowledge',
+    {
+      title: 'Provision knowledge collections early (start indexing ahead of push)',
+      description:
+        'Materialize ONLY the flow\'s knowledge collections (and the llm-configs they depend on) and kick off ' +
+        'RAG indexing — without touching the graph or the rest of the entity tree. Indexing is slow and async, ' +
+        'so run this as soon as the flow\'s knowledge section is authored and frozen, then keep building the ' +
+        'flow in parallel. The later push_flow reuses these collections (identical content hash → not re-indexed), ' +
+        'and wait_for_collections joins on the indexing you started here. Uses the same lockfile as push_flow.',
+      inputSchema: {
+        flow_dir: z.string().describe('Absolute path of the flow directory'),
+      },
+    },
+    async ({ flow_dir }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        context.org.requireActiveOrg();
+
+        const artifact = await compileFlow(flow_dir);
+        if (hasErrors(artifact.diagnostics)) {
+          const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+          throw new Error(
+            `Flow source has ${errors.length} error(s) — first: ${errors[0]!.path}: ${errors[0]!.message}`,
+          );
+        }
+
+        let lock = (await readLock(flow_dir)) ?? createLock(artifact.flowName);
+
+        const entityResult = await new EntityPusher(context).push(artifact, lock, {
+          sections: ['llm_configs', 'knowledge'],
+        });
+        lock = entityResult.lock;
+        await writeLock(flow_dir, lock);
+
+        const collections = entityResult.actions
+          .filter((action) => action.kind === 'knowledge_collection')
+          .map((action) => {
+            const plan = artifact.entities.find((entity) => entity.key === action.key);
+            const ragEntry = plan ? getEntity(lock, plan.section, `${plan.name}#rag`) : undefined;
+            return {
+              name: plan?.name ?? action.key,
+              collectionId: action.backendId,
+              ragId: ragEntry?.backendId ?? null,
+              ragType: plan?.rag?.strategy ?? null,
+            };
+          });
+
+        return {
+          collections,
+          indexingStarted: true,
+          next: 'Author/build the rest of the flow, then push_flow (these collections will be reused, not re-indexed), then wait_for_collections before running.',
+        };
+      }),
+  );
+
+  server.registerTool(
     'pull_flow',
     {
       title: 'Pull a remote flow into local flow source',

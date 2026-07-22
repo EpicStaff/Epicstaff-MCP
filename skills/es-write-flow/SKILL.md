@@ -78,7 +78,12 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
    - `llm_configs` — model by name (e.g. `model: gpt-4o`); reuse `{ existing: ... }` when possible.
    - `tools` — `python_code_tools` / `mcp_tools` / `tool_configs` the agents need.
    - `knowledge` — collections with `documents:` (paths relative to the flow dir; put the
-     files there) and a `rag:` strategy (`naive` or `graph`).
+     files there) and a `rag:` strategy (`naive` or `graph`). **Author the knowledge section
+     first** — before the rest of the flow — so it can be provisioned (indexing started) early
+     while you finish authoring. **Freeze the knowledge inputs (documents + RAG strategy) before
+     provisioning:** RAG indexing keys off the content hash of those inputs, so changing them
+     after `provision_knowledge` forces the later push to re-index from scratch, wasting the
+     head start.
    - `surfaces` — what each agent may touch: tools, knowledge, instructions. One-off needs
      go as `inline_surface` on the node instead of polluting the catalog.
    - `agents` — AgentDefinitions: `instructions`, `llm_config`, `default_surfaces`.

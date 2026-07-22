@@ -36,10 +36,20 @@ All node data exchange goes through `variables.*` (via `input_map` reads / `outp
 writes); edges only sequence/branch, they carry no data. `es-write-flow` covers this in full.
 
 1. `es-connect` — auth + organization.
-2. `es-write-flow` — discover and **reuse** existing entities before defining new ones, then
-   author/edit the flow source.
-3. `es-build-flow` → `es-push-flow` — compile clean, then materialize.
-4. `es-test-flow` — run with realistic input and confirm the output is genuinely good against the
+2. `es-write-flow` — discover and **reuse** existing entities before defining new ones. Author the
+   **knowledge section first** (collections, documents, RAG strategy) alongside a minimal valid
+   graph — just a start node is enough to compile — so knowledge can be provisioned before the rest
+   of the flow exists.
+3. If the flow has knowledge: `provision_knowledge` now. It materializes only the collections
+   (+ their llm-configs) and starts the slow async RAG indexing, so it runs in parallel while you
+   finish authoring. Freeze the knowledge inputs (documents + RAG strategy) before this — changing
+   them afterwards makes the later push re-index.
+4. Finish authoring the rest of the flow (`es-write-flow`).
+5. `es-build-flow` → `es-push-flow` — compile clean, then materialize the full flow. Collections
+   provisioned in step 3 are reported `reused` (unchanged content hash → not re-indexed).
+6. If the flow has knowledge: `wait_for_collections(collection_ids)` — the JOIN on the indexing
+   started in step 3, before any run.
+7. `es-test-flow` — run with realistic input and confirm the output is genuinely good against the
    task's own bar (correct; and for anything user-facing, clear and useful). Iterate until it is.
 
 Stop here for **ES-only**: report the graph id, how it is triggered/run, and — if a caller will

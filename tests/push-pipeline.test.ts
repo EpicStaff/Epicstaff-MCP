@@ -348,6 +348,34 @@ describe('push pipeline (mock backend)', () => {
     expect(backend.received.some((r) => r.path === '/api/process-rag-indexing/' && r.method === 'POST')).toBe(true);
   });
 
+  it('section filter pushes only llm_configs + knowledge (the provision_knowledge path)', async () => {
+    const context = createContext(loadConfig(ENV));
+    await context.auth.ensureAuthenticated();
+    await context.org.resolve();
+    const artifact = await compileFlow(flowDir);
+
+    const lock = createLock(artifact.flowName);
+    const entityResult = await new EntityPusher(context).push(artifact, lock, {
+      sections: ['llm_configs', 'knowledge'],
+    });
+
+    // Only llm-configs and the collection were created; tools/surfaces/agents were skipped.
+    const createPaths = backend.received
+      .filter((r) => r.method === 'POST' && r.path.match(/llm-configs|python-code-tool|source-collections|surfaces|agent-definitions/))
+      .map((r) => r.path);
+    expect(createPaths).toEqual(['/api/llm-configs/', '/api/source-collections/']);
+
+    // RAG indexing was still kicked off for the provisioned collection.
+    expect(backend.received.some((r) => r.path === '/api/process-rag-indexing/' && r.method === 'POST')).toBe(true);
+
+    // The action set is confined to the two allowed sections.
+    expect(entityResult.actions.some((a) => a.kind === 'knowledge_collection')).toBe(true);
+    expect(entityResult.actions.every((a) => a.key.startsWith('llm_configs.') || a.key.startsWith('knowledge.'))).toBe(true);
+
+    // No graph was touched.
+    expect(backend.savedGraphPayloads.length).toBe(0);
+  });
+
   it('remote save_version drift is detected as a conflict', async () => {
     await pushOnce();
     // Simulate an editor save bumping the remote version.

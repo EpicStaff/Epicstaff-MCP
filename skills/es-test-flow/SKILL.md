@@ -8,8 +8,12 @@ description: Run a pushed EpicStaff flow and debug the result — poll status, r
 One responsibility: execute a flow and understand what happened.
 
 1. Get the graph id (from the push result or `list_graphs` / `flow.lock.json`).
-2. If the flow uses knowledge collections: `get_collection_status` first — a collection
-   still indexing means agents run without their knowledge. Wait or warn the user.
+2. If the flow uses knowledge collections: JOIN on indexing before running. Call
+   `wait_for_collections(collection_ids, timeout_seconds)` with the collection ids from the
+   push / `provision_knowledge` result — it blocks until every RAG is terminal (completed /
+   warning / failed) or the timeout elapses. Running before this returns means agents run
+   without their knowledge. If it reports `timedOut` or a failed RAG, surface that to the user
+   (raise the timeout or inspect with `get_collection_status`) rather than running blind.
 3. `run_flow` with the graph id and the `initial_state` the flow's start node expects. Pass the
    FULL variables map you want, keyed by top-level variable name (e.g.
    `{"chat": {"message": "..."}, "quote": {}, "reply": null}`) — for `persistent_variables`

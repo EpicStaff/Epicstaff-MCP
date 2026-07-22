@@ -65,12 +65,27 @@ export class EntityPusher {
     this.storage = new StorageApi(context.client);
   }
 
-  async push(artifact: BuildArtifact, lock: FlowLock): Promise<EntityPushResult> {
+  /**
+   * @param options.sections When set, only entity plans whose `section` is in
+   * this list are pushed — the rest are skipped entirely. Used by
+   * provision_knowledge to materialize just `llm_configs` + `knowledge` ahead of
+   * the full flow. Omitting `options` pushes everything (the default push_flow
+   * behavior, unchanged).
+   */
+  async push(
+    artifact: BuildArtifact,
+    lock: FlowLock,
+    options?: { sections?: string[] },
+  ): Promise<EntityPushResult> {
     const idMap = new Map<string, number>();
     const actions: EntityPushAction[] = [];
     let currentLock = lock;
 
     for (const plan of artifact.entities) {
+      if (options?.sections && !options.sections.includes(plan.section)) {
+        continue;
+      }
+
       if (plan.action === 'resolve-existing') {
         const backendId = await this.resolveExisting(plan);
         idMap.set(plan.key, backendId);
