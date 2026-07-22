@@ -77,4 +77,9 @@ export class AgentDefinitionsApi {
   async update(id: number, request: Partial<CreateAgentDefinitionRequest>): Promise<AgentDefinition> {
     return this.client.patch(`agent-definitions/${id}/`, { body: request });
   }
+
+  /** Delete an agent definition. Backend responds 204 (AgentDefinitionViewSet ModelViewSet). */
+  async delete(id: number): Promise<void> {
+    await this.client.delete<void>(`agent-definitions/${id}/`);
+  }
 }

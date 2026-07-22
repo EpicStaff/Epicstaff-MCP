@@ -107,4 +107,9 @@ export class SurfacesApi {
   async update(id: number, request: CreateSurfaceRequest): Promise<Surface> {
     return this.client.put(`surfaces/${id}/`, { body: request });
   }
+
+  /** Delete a catalog surface. Backend responds 204 (SurfaceViewSet is a plain ModelViewSet). */
+  async delete(id: number): Promise<void> {
+    await this.client.delete<void>(`surfaces/${id}/`);
+  }
 }

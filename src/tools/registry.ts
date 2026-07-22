@@ -7,6 +7,7 @@ import { registerRunTools } from './run.tools.js';
 import { registerReferenceTools } from './reference.tools.js';
 import { registerUiTools } from './ui.tools.js';
 import { registerKnowledgeTools } from './knowledge.tools.js';
+import { registerCatalogTools } from './catalog.tools.js';
 
 /**
  * Central tool registration. Each tool category module exports a
@@ -21,4 +22,5 @@ export function registerAllTools(server: McpServer, config: Config): void {
   registerReferenceTools(server, context);
   registerUiTools(server, context);
   registerKnowledgeTools(server, context);
+  registerCatalogTools(server, context);
 }

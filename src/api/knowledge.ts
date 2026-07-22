@@ -141,4 +141,12 @@ export class KnowledgeApi {
   async startIndexing(ragId: number, ragType: RagType): Promise<{ detail: string }> {
     return this.client.post('process-rag-indexing/', { body: { rag_id: ragId, rag_type: ragType } });
   }
+
+  /**
+   * Delete a source collection and everything derived from it — documents, attached
+   * RAG strategies, and the pgvector index. Irreversible. Backend responds 204.
+   */
+  async deleteCollection(collectionId: number): Promise<void> {
+    await this.client.delete<void>(`source-collections/${collectionId}/`);
+  }
 }
