@@ -35,7 +35,7 @@ async function main(): Promise<void> {
   const server = new McpServer(
     {
       name: 'epicstaff',
-      version: '0.4.0',
+      version: '3.0.0',
     },
     { instructions: EPICSTAFF_INSTRUCTIONS },
   );
@@ -44,7 +44,9 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info(`EpicStaff MCP server started (api: ${config.apiUrl}, user: ${config.email})`);
+  logger.info(
+    `EpicStaff MCP server started (api: ${config.apiUrl}, auth: ${config.email ?? 'api-token'})`,
+  );
 }
 
 main().catch((error) => {

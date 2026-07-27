@@ -1,8 +1,10 @@
 {
-  "name": "epicstaff-flow-dev",
-  "version": "0.4.0",
+  "name": "epicstaff-mcp",
+  "version": "3.0.0",
   "description": "Develop EpicStaff flows like code: write flow-source locally, build (validate + auto-layout), push to EpicStaff, run and debug — via a bundled MCP server and skills.",
   "author": {
-    "name": "EpicStaff team"
-  }
+    "name": "EpicStaff"
+  },
+  "homepage": "https://github.com/EpicStaff/Epicstaff-MCP",
+  "keywords": ["epicstaff", "mcp", "flows", "agents"]
 }
