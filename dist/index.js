@@ -29104,6 +29104,60 @@ var KnowledgeApi = class {
     }
     return id;
   }
+  /**
+   * Update the graph RAG index configuration (chunking, entity types, gleanings).
+   * Must run BEFORE startIndexing — the config is read when indexing executes.
+   */
+  async updateGraphRagIndexConfig(graphRagId, config2) {
+    await this.client.put(`graph-rag/${graphRagId}/index-config/`, { body: { ...config2 } });
+  }
+  /**
+   * Ensure every collection document has a naive-rag document config row.
+   * Idempotent — only creates configs for documents that lack one (a Django
+   * signal creates them on RAG creation, but documents uploaded later need this).
+   */
+  async initializeNaiveRagDocumentConfigs(naiveRagId) {
+    await this.client.post(`naive-rag/${naiveRagId}/document-configs/initialize/`);
+  }
+  /** List the per-document chunking configs of a naive RAG. */
+  async listNaiveRagDocumentConfigs(naiveRagId) {
+    return unwrap3(
+      await this.client.get(
+        `naive-rag/${naiveRagId}/document-configs/`
+      )
+    );
+  }
+  /**
+   * Apply the same chunking parameters to a set of document configs.
+   * Must run BEFORE startIndexing — chunking is read when indexing executes.
+   */
+  async bulkUpdateNaiveRagDocumentConfigs(naiveRagId, configIds, update) {
+    await this.client.put(`naive-rag/${naiveRagId}/document-configs/bulk-update/`, {
+      body: { config_ids: configIds, ...update }
+    });
+  }
+  /**
+   * Ensure every collection document has a config row, then apply the given
+   * chunking parameters to all of them. Initialize always runs: the backend
+   * signal creates config rows only when the NaiveRag row is FIRST created —
+   * update pushes and later document uploads need it explicitly, and indexing
+   * silently skips documents without a config row. Returns how many configs
+   * were updated (0 when no chunking parameters were given).
+   */
+  async applyNaiveDocumentChunking(naiveRagId, chunking) {
+    await this.initializeNaiveRagDocumentConfigs(naiveRagId);
+    if (chunking === void 0 || chunking.chunk_size === void 0 && chunking.chunk_overlap === void 0) {
+      return 0;
+    }
+    const configs = await this.listNaiveRagDocumentConfigs(naiveRagId);
+    if (configs.length === 0) return 0;
+    await this.bulkUpdateNaiveRagDocumentConfigs(
+      naiveRagId,
+      configs.map((config2) => config2.naive_rag_document_id),
+      chunking
+    );
+    return configs.length;
+  }
   /** Kick off async indexing; readiness is checked via get_collection_status. */
   async startIndexing(ragId, ragType) {
     return this.client.post("process-rag-indexing/", { body: { rag_id: ragId, rag_type: ragType } });
@@ -29583,21 +29637,36 @@ var flowSectionSchema = external_exports.strictObject({
 // src/flow-source/schema/knowledge.ts
 var naiveRagConfigSchema = external_exports.strictObject({
   strategy: external_exports.literal("naive").describe("Plain chunk-and-embed vector RAG."),
-  chunk_size: external_exports.number().int().positive().default(1e3).describe("Chunk size in characters used when embedding documents."),
-  chunk_overlap: external_exports.number().int().nonnegative().default(200).describe("Overlap in characters between consecutive chunks."),
-  embedder: external_exports.string().optional().describe("Embedding config name on the backend. Backend default when omitted."),
-  search_limit: external_exports.number().int().positive().default(5).describe("Maximum number of chunks returned per similarity search."),
-  distance_threshold: external_exports.number().min(0).max(1).optional().describe("Similarity distance cut-off (0\u20131). Backend default when omitted.")
-}).describe("Naive (chunk + embed + similarity search) RAG configuration.");
+  chunk_size: external_exports.number().int().positive().optional().describe("Chunk size in tokens, applied to every document. Backend default (1000) when omitted."),
+  chunk_overlap: external_exports.number().int().nonnegative().optional().describe("Overlap in tokens between consecutive chunks. Backend default (150) when omitted."),
+  embedder: external_exports.string().optional().describe("Embedding config name on the backend. Backend default when omitted.")
+}).describe(
+  "Naive (chunk + embed + similarity search) RAG configuration. Search-time limits/thresholds are configured on the surface knowledge entry, not here."
+);
 var graphRagConfigSchema = external_exports.strictObject({
   strategy: external_exports.literal("graph").describe("Graph RAG: entity/community graph built over the documents."),
   llm_config: entityRef("LLM config used to build and query the knowledge graph.").optional(),
-  chunk_size: external_exports.number().int().positive().default(1e3).describe("Chunk size in characters."),
-  chunk_overlap: external_exports.number().int().nonnegative().default(200).describe("Overlap in characters between consecutive chunks."),
-  community_level: external_exports.number().int().nonnegative().optional().describe("Community hierarchy level used for graph search. Backend default when omitted."),
-  search_limit: external_exports.number().int().positive().default(5).describe("Maximum number of results returned per graph search.")
-}).describe("Graph RAG configuration.");
-var ragConfigSchema = external_exports.discriminatedUnion("strategy", [naiveRagConfigSchema, graphRagConfigSchema]).describe('RAG strategy for the collection: "naive" vector search or "graph" RAG.');
+  embedder: external_exports.string().optional().describe("Embedding config name on the backend. Org default when omitted."),
+  chunk_size: external_exports.number().int().min(100).max(1e4).optional().describe("Chunk size in tokens fed to graph extraction. Backend default (1200) when omitted."),
+  chunk_overlap: external_exports.number().int().min(0).max(5e3).optional().describe("Overlap in tokens between consecutive chunks. Backend default (100) when omitted."),
+  entity_types: external_exports.array(external_exports.string().min(1)).nonempty().optional().describe(
+    'Entity categories the extraction LLM is instructed to find. Backend default: ["organization", "person", "geo", "event"]. Match these to the corpus domain \u2014 concepts that fit no listed type are often not extracted and become invisible to graph search. Richer lists grow the graph and indexing cost.'
+  ),
+  max_gleanings: external_exports.number().int().min(0).max(10).optional().describe(
+    "How many times the extraction LLM is re-asked for missed entities per chunk. Backend default: 1. Each increment adds roughly one full extraction pass of LLM cost."
+  )
+}).describe(
+  "Graph RAG configuration. Search-time settings (community level, result limit) are configured on the surface knowledge entry (graph_local_search_config), not here."
+);
+var ragConfigSchema = external_exports.discriminatedUnion("strategy", [naiveRagConfigSchema, graphRagConfigSchema]).superRefine((config2, ctx) => {
+  if (config2.chunk_size !== void 0 && config2.chunk_overlap !== void 0 && config2.chunk_overlap >= config2.chunk_size) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["chunk_overlap"],
+      message: `chunk_overlap (${config2.chunk_overlap}) must be smaller than chunk_size (${config2.chunk_size}).`
+    });
+  }
+}).describe('RAG strategy for the collection: "naive" vector search or "graph" RAG.');
 var knowledgeCollectionSchema = external_exports.strictObject({
   description: external_exports.string().optional().describe("What this collection contains."),
   documents: external_exports.array(external_exports.string().min(1)).min(1).describe(
@@ -31550,18 +31619,36 @@ function buildKnowledgePlans(source, flowDir, registry2) {
 }
 function buildRagPlan(collection, registry2) {
   const rag = collection.rag;
+  const embedder = rag.embedder !== void 0 ? { $ref: `embedders.${rag.embedder}` } : { $ref: "embedders.default" };
   if (rag.strategy === "naive") {
+    const chunking = definedFields({
+      chunk_size: rag.chunk_size,
+      chunk_overlap: rag.chunk_overlap
+    });
     return {
       strategy: "naive",
-      embedder: rag.embedder !== void 0 ? { $ref: `embedders.${rag.embedder}` } : { $ref: "embedders.default" }
+      embedder,
+      ...chunking !== void 0 ? { document_chunking: chunking } : {}
     };
   }
+  const indexConfig = definedFields({
+    chunk_size: rag.chunk_size,
+    chunk_overlap: rag.chunk_overlap,
+    entity_types: rag.entity_types,
+    max_gleanings: rag.max_gleanings
+  });
   return {
     strategy: "graph",
-    // Graph RAG has no embedder field in flow source — the org default is used.
-    embedder: { $ref: "embedders.default" },
-    ...rag.llm_config !== void 0 ? { llm: registry2.ref("llm_configs", rag.llm_config) } : {}
+    embedder,
+    ...rag.llm_config !== void 0 ? { llm: registry2.ref("llm_configs", rag.llm_config) } : {},
+    ...indexConfig !== void 0 ? { index_config: indexConfig } : {}
   };
+}
+function definedFields(fields) {
+  const present = Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== void 0)
+  );
+  return Object.keys(present).length > 0 ? present : void 0;
 }
 function buildSurfacePlans(source, registry2) {
   return Object.entries(source.surfaces).map(
@@ -33490,19 +33577,35 @@ var EntityPusher = class {
         let ragId;
         if (plan.rag.strategy === "naive") {
           ragId = await this.knowledge.createNaiveRag(collectionId, embedderId);
+          await this.applyNaiveChunking(ragId, plan.rag.document_chunking);
         } else {
           const llmId = await this.resolveRagRef(plan.rag.llm ?? 0, idMap);
           ragId = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
+          if (plan.rag.index_config !== void 0) {
+            await this.knowledge.updateGraphRagIndexConfig(ragId, plan.rag.index_config);
+          }
         }
         await this.knowledge.startIndexing(ragId, plan.rag.strategy);
         logger.info(`Attached ${plan.rag.strategy} RAG (#${ragId}) to collection #${collectionId}; indexing started`);
         currentLock = setEntity(currentLock, plan.section, ragKey, { backendId: ragId, contentHash: ragHash });
       } else if (pendingUploads.length > 0) {
+        if (plan.rag.strategy === "naive") {
+          await this.applyNaiveChunking(ragEntry.backendId, plan.rag.document_chunking);
+        }
         await this.knowledge.startIndexing(ragEntry.backendId, plan.rag.strategy);
         logger.info(`Re-indexing collection #${collectionId} after document changes`);
       }
     }
     return currentLock;
+  }
+  /** Config-row init + author chunking for a naive RAG; see KnowledgeApi.applyNaiveDocumentChunking. */
+  async applyNaiveChunking(naiveRagId, chunking) {
+    const updated = await this.knowledge.applyNaiveDocumentChunking(naiveRagId, chunking);
+    if (updated > 0) {
+      logger.info(
+        `Applied chunking (size=${chunking?.chunk_size ?? "default"}, overlap=${chunking?.chunk_overlap ?? "default"}) to ${updated} document config(s) of naive RAG #${naiveRagId}`
+      );
+    }
   }
   async resolveRagRef(ref, idMap) {
     if (typeof ref === "number") return ref;
@@ -35812,7 +35915,15 @@ var surfaceBodyShape2 = {
 var ragInputSchema = external_exports.strictObject({
   strategy: external_exports.enum(["naive", "graph"]).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
   embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
-  llm_config: idOrName.optional().describe('LLM config (id or name) used to build/query the graph. REQUIRED for strategy "graph".')
+  llm_config: idOrName.optional().describe('LLM config (id or name) used to build/query the graph. REQUIRED for strategy "graph".'),
+  chunk_size: external_exports.number().int().positive().optional().describe("Chunk size in tokens. Backend default when omitted (naive: 1000, graph: 1200)."),
+  chunk_overlap: external_exports.number().int().nonnegative().optional().describe("Chunk overlap in tokens. Backend default when omitted (naive: 150, graph: 100)."),
+  entity_types: external_exports.array(external_exports.string().min(1)).nonempty().optional().describe(
+    'Graph strategy only. Entity categories the extraction LLM is instructed to find (backend default ["organization", "person", "geo", "event"]). Match these to the corpus domain \u2014 unlisted concept types are often not extracted and stay invisible to graph search.'
+  ),
+  max_gleanings: external_exports.number().int().min(0).max(10).optional().describe(
+    "Graph strategy only. Re-ask passes for missed entities per chunk (backend default 1). Each increment adds roughly one full extraction pass of LLM cost."
+  )
 });
 async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
   if (typeof ref === "number") return ref;
@@ -36185,15 +36296,19 @@ function registerCatalogTools(server, context) {
         collection_id: external_exports.number().int().describe("Backend id of the source collection (see list_source_collections)."),
         strategy: external_exports.enum(["naive", "graph"]).describe("RAG strategy to attach."),
         embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
-        llm_config: idOrName.optional().describe('LLM config (id or name). REQUIRED for strategy "graph".')
+        llm_config: idOrName.optional().describe('LLM config (id or name). REQUIRED for strategy "graph".'),
+        chunk_size: ragInputSchema.shape.chunk_size,
+        chunk_overlap: ragInputSchema.shape.chunk_overlap,
+        entity_types: ragInputSchema.shape.entity_types,
+        max_gleanings: ragInputSchema.shape.max_gleanings
       }
     },
-    async ({ collection_id, strategy, embedder, llm_config }) => runTool(async () => {
+    async ({ collection_id, strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       context.org.requireActiveOrg();
       const attached = await attachAndIndexRag(
         collection_id,
-        { strategy, embedder, llm_config },
+        { strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings },
         { knowledge, llm, client: context.client, resolveLlmConfig }
       );
       return {
@@ -36289,7 +36404,14 @@ function mergeSurfaceBody(current, newName, body) {
 async function attachAndIndexRag(collectionId, rag, ctx) {
   const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm, ctx.client);
   if (rag.strategy === "naive") {
+    if (rag.entity_types !== void 0 || rag.max_gleanings !== void 0) {
+      throw new Error('entity_types and max_gleanings apply to graph RAG only \u2014 remove them or use strategy "graph".');
+    }
     const ragId2 = await ctx.knowledge.createNaiveRag(collectionId, embedderId);
+    await ctx.knowledge.applyNaiveDocumentChunking(ragId2, {
+      ...rag.chunk_size !== void 0 ? { chunk_size: rag.chunk_size } : {},
+      ...rag.chunk_overlap !== void 0 ? { chunk_overlap: rag.chunk_overlap } : {}
+    });
     await ctx.knowledge.startIndexing(ragId2, "naive");
     return { ragId: ragId2, ragType: "naive" };
   }
@@ -36298,6 +36420,15 @@ async function attachAndIndexRag(collectionId, rag, ctx) {
   }
   const llmId = await ctx.resolveLlmConfig(rag.llm_config);
   const ragId = await ctx.knowledge.createGraphRag(collectionId, embedderId, llmId);
+  const indexConfig = {
+    ...rag.chunk_size !== void 0 ? { chunk_size: rag.chunk_size } : {},
+    ...rag.chunk_overlap !== void 0 ? { chunk_overlap: rag.chunk_overlap } : {},
+    ...rag.entity_types !== void 0 ? { entity_types: rag.entity_types } : {},
+    ...rag.max_gleanings !== void 0 ? { max_gleanings: rag.max_gleanings } : {}
+  };
+  if (Object.keys(indexConfig).length > 0) {
+    await ctx.knowledge.updateGraphRagIndexConfig(ragId, indexConfig);
+  }
   await ctx.knowledge.startIndexing(ragId, "graph");
   return { ragId, ragType: "graph" };
 }
@@ -36340,7 +36471,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "0.3.0"
+      version: "0.4.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
