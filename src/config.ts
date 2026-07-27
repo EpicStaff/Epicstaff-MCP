@@ -44,15 +44,20 @@ function normalizeApiUrl(raw: string): string {
 /**
  * The plugin's .mcp.json passes every variable through `${VAR}` interpolation,
  * which turns unset variables into empty strings — treat those as absent.
+ * Names are tried in order; the first non-empty value wins.
  */
-function readEnv(env: NodeJS.ProcessEnv, primary: string, legacy?: string): string | undefined {
-  const value = env[primary] || (legacy !== undefined ? env[legacy] : undefined);
-  return value ? value : undefined;
+function readEnv(env: NodeJS.ProcessEnv, ...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = env[name];
+    if (value) return value;
+  }
+  return undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const baseUrl = readEnv(env, 'EPICSTAFF_BASE_URL', 'ES_URL');
-  const email = readEnv(env, 'EPICSTAFF_EMAIL', 'ES_EMAIL');
+  // EPICSTAFF_USERNAME is the pre-2.0 Python plugin's name for the login email.
+  const email = readEnv(env, 'EPICSTAFF_EMAIL', 'EPICSTAFF_USERNAME', 'ES_EMAIL');
   const password = readEnv(env, 'EPICSTAFF_PASSWORD', 'ES_PASSWORD');
   const apiToken = readEnv(env, 'EPICSTAFF_API_TOKEN');
 

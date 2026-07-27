@@ -23,6 +23,15 @@ describe('loadConfig env contract', () => {
     expect(config).toEqual({ apiUrl: 'http://es.test/api/', apiToken: 'issued-key-123' });
   });
 
+  it('accepts EPICSTAFF_USERNAME (pre-2.0 plugin name) as the login email', () => {
+    const config = loadConfig({
+      EPICSTAFF_BASE_URL: 'http://es.test',
+      EPICSTAFF_USERNAME: 'dev@example.com',
+      EPICSTAFF_PASSWORD: 'secret',
+    });
+    expect(config.email).toBe('dev@example.com');
+  });
+
   it('falls back to the legacy ES_* names', () => {
     const config = loadConfig({
       ES_URL: 'http://es.test',
