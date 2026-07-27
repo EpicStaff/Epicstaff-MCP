@@ -28503,13 +28503,16 @@ function normalizeApiUrl(raw) {
   }
   return `${url}/`;
 }
-function readEnv(env, primary, legacy) {
-  const value = env[primary] || (legacy !== void 0 ? env[legacy] : void 0);
-  return value ? value : void 0;
+function readEnv(env, ...names) {
+  for (const name of names) {
+    const value = env[name];
+    if (value) return value;
+  }
+  return void 0;
 }
 function loadConfig(env = process.env) {
   const baseUrl = readEnv(env, "EPICSTAFF_BASE_URL", "ES_URL");
-  const email2 = readEnv(env, "EPICSTAFF_EMAIL", "ES_EMAIL");
+  const email2 = readEnv(env, "EPICSTAFF_EMAIL", "EPICSTAFF_USERNAME", "ES_EMAIL");
   const password = readEnv(env, "EPICSTAFF_PASSWORD", "ES_PASSWORD");
   const apiToken = readEnv(env, "EPICSTAFF_API_TOKEN");
   const problems = [];
