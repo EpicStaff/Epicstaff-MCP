@@ -28494,11 +28494,8 @@ var StdioServerTransport = class {
 };
 
 // src/config.ts
-var envSchema = external_exports.object({
-  ES_URL: external_exports.string().url("ES_URL must be a valid URL, e.g. http://127.0.0.1").transform(normalizeApiUrl),
-  ES_EMAIL: external_exports.string().email("ES_EMAIL must be a valid email address"),
-  ES_PASSWORD: external_exports.string().min(1, "ES_PASSWORD must not be empty")
-});
+var urlSchema = external_exports.string().url("EPICSTAFF_BASE_URL must be a valid URL, e.g. http://127.0.0.1").transform(normalizeApiUrl);
+var emailSchema = external_exports.string().email("EPICSTAFF_EMAIL must be a valid email address");
 function normalizeApiUrl(raw) {
   let url = raw.replace(/\/+$/, "");
   if (!url.endsWith("/api")) {
@@ -28506,22 +28503,54 @@ function normalizeApiUrl(raw) {
   }
   return `${url}/`;
 }
+function readEnv(env, primary, legacy) {
+  const value = env[primary] || (legacy !== void 0 ? env[legacy] : void 0);
+  return value ? value : void 0;
+}
 function loadConfig(env = process.env) {
-  const parsed = envSchema.safeParse({
-    ES_URL: env.ES_URL,
-    ES_EMAIL: env.ES_EMAIL,
-    ES_PASSWORD: env.ES_PASSWORD
-  });
-  if (!parsed.success) {
-    const problems = parsed.error.issues.map((issue2) => `${issue2.path.join(".") || "env"}: ${issue2.message}`).join("; ");
+  const baseUrl = readEnv(env, "EPICSTAFF_BASE_URL", "ES_URL");
+  const email2 = readEnv(env, "EPICSTAFF_EMAIL", "ES_EMAIL");
+  const password = readEnv(env, "EPICSTAFF_PASSWORD", "ES_PASSWORD");
+  const apiToken = readEnv(env, "EPICSTAFF_API_TOKEN");
+  const problems = [];
+  let apiUrl;
+  if (baseUrl === void 0) {
+    problems.push("EPICSTAFF_BASE_URL is not set");
+  } else {
+    const parsedUrl = urlSchema.safeParse(baseUrl);
+    if (parsedUrl.success) {
+      apiUrl = parsedUrl.data;
+    } else {
+      problems.push(parsedUrl.error.issues[0]?.message ?? "EPICSTAFF_BASE_URL is invalid");
+    }
+  }
+  if (apiToken === void 0) {
+    if (email2 === void 0 && password === void 0) {
+      problems.push(
+        "set EPICSTAFF_API_TOKEN, or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD to log in and mint a key"
+      );
+    } else if (email2 === void 0) {
+      problems.push("EPICSTAFF_EMAIL is not set (required with EPICSTAFF_PASSWORD)");
+    } else if (password === void 0) {
+      problems.push("EPICSTAFF_PASSWORD is not set (required with EPICSTAFF_EMAIL)");
+    }
+  }
+  if (email2 !== void 0) {
+    const parsedEmail = emailSchema.safeParse(email2);
+    if (!parsedEmail.success) {
+      problems.push(parsedEmail.error.issues[0]?.message ?? "EPICSTAFF_EMAIL is invalid");
+    }
+  }
+  if (problems.length > 0 || apiUrl === void 0) {
     throw new Error(
-      `Invalid EpicStaff MCP configuration \u2014 ${problems}. Set ES_URL, ES_EMAIL and ES_PASSWORD in the MCP server environment.`
+      `Invalid EpicStaff MCP configuration \u2014 ${problems.join("; ")}. Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment.`
     );
   }
   return {
-    apiUrl: parsed.data.ES_URL,
-    email: parsed.data.ES_EMAIL,
-    password: parsed.data.ES_PASSWORD
+    apiUrl,
+    ...email2 !== void 0 ? { email: email2 } : {},
+    ...password !== void 0 ? { password } : {},
+    ...apiToken !== void 0 ? { apiToken } : {}
   };
 }
 
@@ -28716,11 +28745,34 @@ var AuthService = class {
     return this.ensureAuthenticated();
   }
   async bootstrap() {
+    if (this.config.apiToken !== void 0) {
+      return this.useProvidedToken(this.config.apiToken);
+    }
     const { apiKey } = this.store.get();
     if (apiKey && await this.isKeyValid()) {
       return apiKey;
     }
     return this.mintKey();
+  }
+  /**
+   * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the
+   * pre-issued key directly. Seeded into the store so the client attaches it
+   * as X-Api-Key like any minted key. Falls back to credential login only
+   * when the token is rejected AND credentials are configured.
+   */
+  async useProvidedToken(token) {
+    this.store.update({ apiKey: token, keyPrefix: token.slice(0, 8) });
+    if (await this.isKeyValid()) {
+      return token;
+    }
+    this.store.update({ apiKey: null, keyPrefix: null });
+    if (this.config.email !== void 0 && this.config.password !== void 0) {
+      logger.info("EPICSTAFF_API_TOKEN was rejected \u2014 falling back to credential login");
+      return this.mintKey();
+    }
+    throw new Error(
+      "EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, or set EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD so a fresh key can be minted."
+    );
   }
   async isKeyValid() {
     try {
@@ -28735,6 +28787,11 @@ var AuthService = class {
     }
   }
   async mintKey() {
+    if (this.config.email === void 0 || this.config.password === void 0) {
+      throw new Error(
+        "No API key available and no credentials to mint one \u2014 set EPICSTAFF_API_TOKEN, or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment."
+      );
+    }
     logger.info("Logging in to mint a new API key");
     let tokens;
     try {
@@ -28747,7 +28804,7 @@ var AuthService = class {
         throw new ApiError(
           error2.status,
           error2.url,
-          "Login failed \u2014 check ES_EMAIL / ES_PASSWORD in the MCP server environment."
+          "Login failed \u2014 check EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD in the MCP server environment."
         );
       }
       throw error2;
@@ -28877,7 +28934,7 @@ function stateFileName(baseUrl, email2) {
 
 // src/context.ts
 function createContext(config2) {
-  const store = new StateStore(config2.apiUrl, config2.email);
+  const store = new StateStore(config2.apiUrl, config2.email ?? "api-token");
   const client = new EpicStaffClient(config2, store);
   const auth = new AuthService(config2, store, client);
   const org = new OrgService(store, client);
@@ -28920,7 +28977,7 @@ async function runTool(work) {
 }
 function hintFor(error2) {
   if (error2.status === 401) {
-    return "Authentication failed even after re-minting \u2014 verify ES_EMAIL / ES_PASSWORD.";
+    return "Authentication failed even after re-minting \u2014 verify EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).";
   }
   if (error2.status === 403) {
     return "Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.";
@@ -28944,7 +29001,7 @@ function registerAuthOrgTools(server, context) {
       const { keyPrefix } = context.store.get();
       return {
         apiUrl: context.config.apiUrl,
-        user: context.config.email,
+        user: context.config.email ?? "api-token",
         apiKeyPrefix: keyPrefix,
         organizations: orgStatus.organizations,
         activeOrgId: orgStatus.activeOrgId,
@@ -36471,14 +36528,16 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "0.4.0"
+      version: "3.0.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
   registerAllTools(server, config2);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info(`EpicStaff MCP server started (api: ${config2.apiUrl}, user: ${config2.email})`);
+  logger.info(
+    `EpicStaff MCP server started (api: ${config2.apiUrl}, auth: ${config2.email ?? "api-token"})`
+  );
 }
 main().catch((error2) => {
   logger.error("Fatal startup error", error2);
