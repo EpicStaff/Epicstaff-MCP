@@ -14,12 +14,16 @@ write (flow.yaml) → build (validate + layout) → push (entities + graph) → 
 The plugin bundles the MCP server as built JS — no npm install needed at use time.
 
 1. Add this repo as a Claude Code plugin (marketplace manifest included):
-   `claude plugin marketplace add <path-or-git-url>` then install `epicstaff-flow-dev`.
+   `claude plugin marketplace add EpicStaff/Epicstaff-MCP` then install `epicstaff-mcp`.
 2. Configure the environment for the MCP server (e.g. in your shell or the plugin's env):
-   - `ES_URL` — EpicStaff base URL (e.g. `http://127.0.0.1`)
-   - `ES_EMAIL` / `ES_PASSWORD` — your EpicStaff login
-3. First tool call logs in, mints a dedicated API key (`POST /api/auth/api-key/`), and
-   persists it in `~/.es_mcp/` — credentials are only used for that bootstrap.
+   - `EPICSTAFF_BASE_URL` — EpicStaff base URL (e.g. `http://127.0.0.1`)
+   - `EPICSTAFF_API_TOKEN` — a pre-issued API key, **or**
+   - `EPICSTAFF_EMAIL` / `EPICSTAFF_PASSWORD` — your EpicStaff login (a dedicated API key
+     is minted on first use)
+   The pre-3.0 names `ES_URL` / `ES_EMAIL` / `ES_PASSWORD` still work as legacy fallbacks.
+3. With login credentials, the first tool call logs in, mints a dedicated API key
+   (`POST /api/auth/api-key/`), and persists it in `~/.es_mcp/` — credentials are only
+   used for that bootstrap. With `EPICSTAFF_API_TOKEN`, the token is used directly.
 
 Organizations are resolved automatically (`GET /api/profile/`). One org → auto-selected;
 several → pick with `set_active_organization`.

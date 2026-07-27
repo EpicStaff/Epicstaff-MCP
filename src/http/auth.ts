@@ -59,11 +59,36 @@ export class AuthService {
   }
 
   private async bootstrap(): Promise<string> {
+    if (this.config.apiToken !== undefined) {
+      return this.useProvidedToken(this.config.apiToken);
+    }
     const { apiKey } = this.store.get();
     if (apiKey && (await this.isKeyValid())) {
       return apiKey;
     }
     return this.mintKey();
+  }
+
+  /**
+   * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the
+   * pre-issued key directly. Seeded into the store so the client attaches it
+   * as X-Api-Key like any minted key. Falls back to credential login only
+   * when the token is rejected AND credentials are configured.
+   */
+  private async useProvidedToken(token: string): Promise<string> {
+    this.store.update({ apiKey: token, keyPrefix: token.slice(0, 8) });
+    if (await this.isKeyValid()) {
+      return token;
+    }
+    this.store.update({ apiKey: null, keyPrefix: null });
+    if (this.config.email !== undefined && this.config.password !== undefined) {
+      logger.info('EPICSTAFF_API_TOKEN was rejected — falling back to credential login');
+      return this.mintKey();
+    }
+    throw new Error(
+      'EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, ' +
+        'or set EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD so a fresh key can be minted.',
+    );
   }
 
   private async isKeyValid(): Promise<boolean> {
@@ -81,6 +106,12 @@ export class AuthService {
   }
 
   private async mintKey(): Promise<string> {
+    if (this.config.email === undefined || this.config.password === undefined) {
+      throw new Error(
+        'No API key available and no credentials to mint one — set EPICSTAFF_API_TOKEN, ' +
+          'or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment.',
+      );
+    }
     logger.info('Logging in to mint a new API key');
     let tokens: TokenPair;
     try {
@@ -93,7 +124,7 @@ export class AuthService {
         throw new ApiError(
           error.status,
           error.url,
-          'Login failed — check ES_EMAIL / ES_PASSWORD in the MCP server environment.',
+          'Login failed — check EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD in the MCP server environment.',
         );
       }
       throw error;

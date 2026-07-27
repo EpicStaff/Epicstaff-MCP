@@ -27,7 +27,7 @@ export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typ
 
 function hintFor(error: ApiError): string | undefined {
   if (error.status === 401) {
-    return 'Authentication failed even after re-minting — verify ES_EMAIL / ES_PASSWORD.';
+    return 'Authentication failed even after re-minting — verify EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).';
   }
   if (error.status === 403) {
     return 'Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.';
@@ -56,7 +56,7 @@ export function registerAuthOrgTools(server: McpServer, context: AppContext): vo
         const { keyPrefix } = context.store.get();
         return {
           apiUrl: context.config.apiUrl,
-          user: context.config.email,
+          user: context.config.email ?? 'api-token',
           apiKeyPrefix: keyPrefix,
           organizations: orgStatus.organizations,
           activeOrgId: orgStatus.activeOrgId,

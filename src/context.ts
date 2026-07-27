@@ -14,7 +14,9 @@ export interface AppContext {
 }
 
 export function createContext(config: Config): AppContext {
-  const store = new StateStore(config.apiUrl, config.email);
+  // Token-authenticated setups have no email; state (active org, key cache) is
+  // still per-host, keyed under a fixed identity.
+  const store = new StateStore(config.apiUrl, config.email ?? 'api-token');
   const client = new EpicStaffClient(config, store);
   const auth = new AuthService(config, store, client);
   const org = new OrgService(store, client);

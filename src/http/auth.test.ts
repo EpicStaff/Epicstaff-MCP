@@ -48,9 +48,9 @@ describe('auth bootstrap + org resolution', () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  function makeServices() {
-    const config = loadConfig(ENV);
-    const store = new StateStore(config.apiUrl, config.email);
+  function makeServices(env: Record<string, string> = ENV) {
+    const config = loadConfig(env);
+    const store = new StateStore(config.apiUrl, config.email ?? 'api-token');
     const client = new EpicStaffClient(config, store);
     const auth = new AuthService(config, store, client);
     const org = new OrgService(store, client);
@@ -125,6 +125,53 @@ describe('auth bootstrap + org resolution', () => {
     const result = await client.get<{ results: unknown[] }>('graphs/');
     expect(result.results).toEqual([]);
     expect(graphCalls).toBe(2); // failed once, retried once
+  });
+
+  it('EPICSTAFF_API_TOKEN: uses the provided token directly, no login', async () => {
+    routes.set('GET /api/auth/api-key/validate/', (call) => {
+      expect(call.headers.get('X-Api-Key')).toBe('issued-key-123');
+      return jsonResponse(200, { active: true });
+    });
+
+    const { store, auth } = makeServices({
+      EPICSTAFF_BASE_URL: 'http://es.test',
+      EPICSTAFF_API_TOKEN: 'issued-key-123',
+    });
+    const key = await auth.ensureAuthenticated();
+
+    expect(key).toBe('issued-key-123');
+    expect(store.get().apiKey).toBe('issued-key-123');
+    expect(calls.some((call) => call.url.includes('auth/login/'))).toBe(false);
+  });
+
+  it('rejected EPICSTAFF_API_TOKEN without credentials: clear error, no login attempt', async () => {
+    routes.set('GET /api/auth/api-key/validate/', () => jsonResponse(401, { detail: 'invalid' }));
+
+    const { auth } = makeServices({
+      EPICSTAFF_BASE_URL: 'http://es.test',
+      EPICSTAFF_API_TOKEN: 'revoked-key',
+    });
+
+    await expect(auth.ensureAuthenticated()).rejects.toThrow(/EPICSTAFF_API_TOKEN was rejected/);
+    expect(calls.some((call) => call.url.includes('auth/login/'))).toBe(false);
+  });
+
+  it('rejected EPICSTAFF_API_TOKEN with credentials: falls back to login + mint', async () => {
+    routes.set('GET /api/auth/api-key/validate/', () => jsonResponse(401, { detail: 'invalid' }));
+    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt', refresh: 'r' }));
+    routes.set('POST /api/auth/api-key/', () =>
+      jsonResponse(201, { api_key: 'fresh-key', prefix: 'fresh-ke', name: 'es-mcp' }),
+    );
+
+    const { auth } = makeServices({
+      EPICSTAFF_BASE_URL: 'http://es.test',
+      EPICSTAFF_API_TOKEN: 'revoked-key',
+      EPICSTAFF_EMAIL: 'dev@example.com',
+      EPICSTAFF_PASSWORD: 'secret',
+    });
+
+    const key = await auth.ensureAuthenticated();
+    expect(key).toBe('fresh-key');
   });
 
   it('org: auto-selects a single active org and sends the header afterwards', async () => {

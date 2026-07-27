@@ -1,20 +1,32 @@
 import { z } from 'zod';
 
-const envSchema = z.object({
-  ES_URL: z
-    .string()
-    .url('ES_URL must be a valid URL, e.g. http://127.0.0.1')
-    .transform(normalizeApiUrl),
-  ES_EMAIL: z.string().email('ES_EMAIL must be a valid email address'),
-  ES_PASSWORD: z.string().min(1, 'ES_PASSWORD must not be empty'),
-});
-
+/**
+ * Environment contract (matches the original epicstaff-mcp plugin):
+ *
+ *   EPICSTAFF_BASE_URL   — EpicStaff server URL (required)
+ *   EPICSTAFF_API_TOKEN  — pre-issued API key; used directly, no login
+ *   EPICSTAFF_EMAIL      — login email; the server mints an API key
+ *   EPICSTAFF_PASSWORD   — login password
+ *
+ * Either the token or the email+password pair must be set (token wins when
+ * both are). The pre-rename `ES_URL` / `ES_EMAIL` / `ES_PASSWORD` names are
+ * accepted as legacy fallbacks.
+ */
 export interface Config {
   /** Base API URL, always ending in `/api/` (matches the frontend ConfigService.apiUrl convention). */
   apiUrl: string;
-  email: string;
-  password: string;
+  email?: string;
+  password?: string;
+  /** Pre-issued API key (EPICSTAFF_API_TOKEN) — skips the login/mint flow. */
+  apiToken?: string;
 }
+
+const urlSchema = z
+  .string()
+  .url('EPICSTAFF_BASE_URL must be a valid URL, e.g. http://127.0.0.1')
+  .transform(normalizeApiUrl);
+
+const emailSchema = z.string().email('EPICSTAFF_EMAIL must be a valid email address');
 
 /**
  * Normalize any user-supplied EpicStaff URL to the frontend convention:
@@ -29,24 +41,66 @@ function normalizeApiUrl(raw: string): string {
   return `${url}/`;
 }
 
+/**
+ * The plugin's .mcp.json passes every variable through `${VAR}` interpolation,
+ * which turns unset variables into empty strings — treat those as absent.
+ */
+function readEnv(env: NodeJS.ProcessEnv, primary: string, legacy?: string): string | undefined {
+  const value = env[primary] || (legacy !== undefined ? env[legacy] : undefined);
+  return value ? value : undefined;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const parsed = envSchema.safeParse({
-    ES_URL: env.ES_URL,
-    ES_EMAIL: env.ES_EMAIL,
-    ES_PASSWORD: env.ES_PASSWORD,
-  });
-  if (!parsed.success) {
-    const problems = parsed.error.issues
-      .map((issue) => `${issue.path.join('.') || 'env'}: ${issue.message}`)
-      .join('; ');
+  const baseUrl = readEnv(env, 'EPICSTAFF_BASE_URL', 'ES_URL');
+  const email = readEnv(env, 'EPICSTAFF_EMAIL', 'ES_EMAIL');
+  const password = readEnv(env, 'EPICSTAFF_PASSWORD', 'ES_PASSWORD');
+  const apiToken = readEnv(env, 'EPICSTAFF_API_TOKEN');
+
+  const problems: string[] = [];
+
+  let apiUrl: string | undefined;
+  if (baseUrl === undefined) {
+    problems.push('EPICSTAFF_BASE_URL is not set');
+  } else {
+    const parsedUrl = urlSchema.safeParse(baseUrl);
+    if (parsedUrl.success) {
+      apiUrl = parsedUrl.data;
+    } else {
+      problems.push(parsedUrl.error.issues[0]?.message ?? 'EPICSTAFF_BASE_URL is invalid');
+    }
+  }
+
+  if (apiToken === undefined) {
+    if (email === undefined && password === undefined) {
+      problems.push(
+        'set EPICSTAFF_API_TOKEN, or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD to log in and mint a key',
+      );
+    } else if (email === undefined) {
+      problems.push('EPICSTAFF_EMAIL is not set (required with EPICSTAFF_PASSWORD)');
+    } else if (password === undefined) {
+      problems.push('EPICSTAFF_PASSWORD is not set (required with EPICSTAFF_EMAIL)');
+    }
+  }
+
+  if (email !== undefined) {
+    const parsedEmail = emailSchema.safeParse(email);
+    if (!parsedEmail.success) {
+      problems.push(parsedEmail.error.issues[0]?.message ?? 'EPICSTAFF_EMAIL is invalid');
+    }
+  }
+
+  if (problems.length > 0 || apiUrl === undefined) {
     throw new Error(
-      `Invalid EpicStaff MCP configuration — ${problems}. ` +
-        'Set ES_URL, ES_EMAIL and ES_PASSWORD in the MCP server environment.',
+      `Invalid EpicStaff MCP configuration — ${problems.join('; ')}. ` +
+        'Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or ' +
+        'EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment.',
     );
   }
+
   return {
-    apiUrl: parsed.data.ES_URL,
-    email: parsed.data.ES_EMAIL,
-    password: parsed.data.ES_PASSWORD,
+    apiUrl,
+    ...(email !== undefined ? { email } : {}),
+    ...(password !== undefined ? { password } : {}),
+    ...(apiToken !== undefined ? { apiToken } : {}),
   };
 }
