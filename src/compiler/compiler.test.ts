@@ -81,6 +81,141 @@ flow:
     expect(collection?.rag?.embedder).toEqual({ $ref: 'embedders.marketing-embeddings' });
   });
 
+  it('maps graph RAG embedder + index-config fields into the plan', async () => {
+    mkdirSync(join(flowDir, 'docs'), { recursive: true });
+    writeFileSync(join(flowDir, 'docs/a.md'), 'content');
+    writeFlow(`
+meta: { name: graph-index-config }
+knowledge:
+  kb:
+    documents: [docs/a.md]
+    rag:
+      strategy: graph
+      llm_config: default
+      embedder: my-embedder
+      chunk_size: 900
+      chunk_overlap: 80
+      entity_types: [service, feature, person]
+      max_gleanings: 2
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const collection = artifact.entities.find((plan) => plan.kind === 'knowledge_collection');
+    expect(collection?.rag?.embedder).toEqual({ $ref: 'embedders.my-embedder' });
+    expect(collection?.rag?.index_config).toEqual({
+      chunk_size: 900,
+      chunk_overlap: 80,
+      entity_types: ['service', 'feature', 'person'],
+      max_gleanings: 2,
+    });
+  });
+
+  it('omitted RAG tuning fields stay out of the plan (rag content-hash stability)', async () => {
+    mkdirSync(join(flowDir, 'docs'), { recursive: true });
+    writeFileSync(join(flowDir, 'docs/a.md'), 'content');
+    writeFlow(`
+meta: { name: rag-defaults }
+knowledge:
+  plain_naive:
+    documents: [docs/a.md]
+    rag: { strategy: naive }
+  plain_graph:
+    documents: [docs/a.md]
+    rag: { strategy: graph, llm_config: default }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const collections = artifact.entities.filter((plan) => plan.kind === 'knowledge_collection');
+    const naive = collections.find((plan) => plan.name === 'plain_naive');
+    const graph = collections.find((plan) => plan.name === 'plain_graph');
+    // Exact shape matters: an extra key (even undefined-valued) would change the
+    // rag content hash and force a spurious re-index of every existing flow.
+    expect(naive?.rag).toEqual({ strategy: 'naive', embedder: { $ref: 'embedders.default' } });
+    expect(graph?.rag).toEqual({
+      strategy: 'graph',
+      embedder: { $ref: 'embedders.default' },
+      llm: { $ref: 'llm_configs.default' },
+    });
+  });
+
+  it('rejects search-time settings on the rag config (they live on surface knowledge entries)', async () => {
+    mkdirSync(join(flowDir, 'docs'), { recursive: true });
+    writeFileSync(join(flowDir, 'docs/a.md'), 'content');
+    writeFlow(`
+meta: { name: rag-search-time-keys }
+knowledge:
+  kb:
+    documents: [docs/a.md]
+    rag: { strategy: graph, llm_config: default, community_level: 2, search_limit: 5 }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.some((diagnostic) => /community_level|search_limit|unrecognized/i.test(diagnostic.message))).toBe(true);
+  });
+
+  it('rejects chunk_overlap >= chunk_size on a rag config', async () => {
+    mkdirSync(join(flowDir, 'docs'), { recursive: true });
+    writeFileSync(join(flowDir, 'docs/a.md'), 'content');
+    writeFlow(`
+meta: { name: rag-overlap-too-big }
+knowledge:
+  kb:
+    documents: [docs/a.md]
+    rag: { strategy: naive, chunk_size: 200, chunk_overlap: 200 }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: agent, agent: a1, tasks: [{ instructions: do the work }] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.some((diagnostic) => /chunk_overlap.*smaller than chunk_size/i.test(diagnostic.message))).toBe(true);
+  });
+
   it('rejects an edge out of an end node', async () => {
     writeFlow(`
 meta: { name: edge-from-end }

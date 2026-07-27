@@ -115,6 +115,19 @@ class MockBackend {
       return { status: 201, body: { naive_rag: { naive_rag_id: 900 } } };
     if (/^POST \/api\/graph-rag\/collections\/\d+\/graph-rag\/$/.test(key))
       return { status: 201, body: { graph_rag: { graph_rag_id: 901 } } };
+    if (/^PUT \/api\/graph-rag\/\d+\/index-config\/$/.test(key))
+      return { status: 200, body: { message: 'Index config updated' } };
+    if (/^POST \/api\/naive-rag\/\d+\/document-configs\/initialize\/$/.test(key))
+      return { status: 200, body: { message: 'ok', configs_created: 0, configs_existing: 1, new_configs: [] } };
+    if (/^GET \/api\/naive-rag\/\d+\/document-configs\/$/.test(key))
+      return {
+        status: 200,
+        body: [
+          { naive_rag_document_id: 950, document_id: 1, file_name: 'doc.md', chunk_size: 1000, chunk_overlap: 150 },
+        ],
+      };
+    if (/^PUT \/api\/naive-rag\/\d+\/document-configs\/bulk-update\/$/.test(key))
+      return { status: 200, body: { message: 'Successfully updated 1 config(s)', updated_count: 1, failed_count: 0 } };
     if (key === 'POST /api/process-rag-indexing/') return { status: 200, body: { detail: 'started' } };
     if (/^DELETE \/api\/source-collections\/\d+\/$/.test(key)) return { status: 204, body: undefined };
 

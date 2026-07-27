@@ -108,6 +108,38 @@ const ragInputSchema = z.strictObject({
   llm_config: idOrName
     .optional()
     .describe('LLM config (id or name) used to build/query the graph. REQUIRED for strategy "graph".'),
+  chunk_size: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Chunk size in tokens. Backend default when omitted (naive: 1000, graph: 1200).'),
+  chunk_overlap: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe('Chunk overlap in tokens. Backend default when omitted (naive: 150, graph: 100).'),
+  entity_types: z
+    .array(z.string().min(1))
+    .nonempty()
+    .optional()
+    .describe(
+      'Graph strategy only. Entity categories the extraction LLM is instructed to find ' +
+        '(backend default ["organization", "person", "geo", "event"]). Match these to the ' +
+        'corpus domain — unlisted concept types are often not extracted and stay invisible ' +
+        'to graph search.',
+    ),
+  max_gleanings: z
+    .number()
+    .int()
+    .min(0)
+    .max(10)
+    .optional()
+    .describe(
+      'Graph strategy only. Re-ask passes for missed entities per chunk (backend default 1). ' +
+        'Each increment adds roughly one full extraction pass of LLM cost.',
+    ),
 });
 
 // ---------------------------------------------------------------------------
@@ -641,15 +673,19 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         strategy: z.enum(['naive', 'graph']).describe('RAG strategy to attach.'),
         embedder: idOrName.optional().describe('Embedding config: id or name. Org default when omitted.'),
         llm_config: idOrName.optional().describe('LLM config (id or name). REQUIRED for strategy "graph".'),
+        chunk_size: ragInputSchema.shape.chunk_size,
+        chunk_overlap: ragInputSchema.shape.chunk_overlap,
+        entity_types: ragInputSchema.shape.entity_types,
+        max_gleanings: ragInputSchema.shape.max_gleanings,
       },
     },
-    async ({ collection_id, strategy, embedder, llm_config }) =>
+    async ({ collection_id, strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         context.org.requireActiveOrg();
         const attached = await attachAndIndexRag(
           collection_id,
-          { strategy, embedder, llm_config },
+          { strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings },
           { knowledge, llm, client: context.client, resolveLlmConfig },
         );
         return {
@@ -811,12 +847,27 @@ interface RagContext {
 
 async function attachAndIndexRag(
   collectionId: number,
-  rag: { strategy: 'naive' | 'graph'; embedder?: number | string; llm_config?: number | string },
+  rag: {
+    strategy: 'naive' | 'graph';
+    embedder?: number | string;
+    llm_config?: number | string;
+    chunk_size?: number;
+    chunk_overlap?: number;
+    entity_types?: string[];
+    max_gleanings?: number;
+  },
   ctx: RagContext,
 ): Promise<{ ragId: number; ragType: 'naive' | 'graph' }> {
   const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm, ctx.client);
   if (rag.strategy === 'naive') {
+    if (rag.entity_types !== undefined || rag.max_gleanings !== undefined) {
+      throw new Error('entity_types and max_gleanings apply to graph RAG only — remove them or use strategy "graph".');
+    }
     const ragId = await ctx.knowledge.createNaiveRag(collectionId, embedderId);
+    await ctx.knowledge.applyNaiveDocumentChunking(ragId, {
+      ...(rag.chunk_size !== undefined ? { chunk_size: rag.chunk_size } : {}),
+      ...(rag.chunk_overlap !== undefined ? { chunk_overlap: rag.chunk_overlap } : {}),
+    });
     await ctx.knowledge.startIndexing(ragId, 'naive');
     return { ragId, ragType: 'naive' };
   }
@@ -825,6 +876,15 @@ async function attachAndIndexRag(
   }
   const llmId = await ctx.resolveLlmConfig(rag.llm_config);
   const ragId = await ctx.knowledge.createGraphRag(collectionId, embedderId, llmId);
+  const indexConfig = {
+    ...(rag.chunk_size !== undefined ? { chunk_size: rag.chunk_size } : {}),
+    ...(rag.chunk_overlap !== undefined ? { chunk_overlap: rag.chunk_overlap } : {}),
+    ...(rag.entity_types !== undefined ? { entity_types: rag.entity_types } : {}),
+    ...(rag.max_gleanings !== undefined ? { max_gleanings: rag.max_gleanings } : {}),
+  };
+  if (Object.keys(indexConfig).length > 0) {
+    await ctx.knowledge.updateGraphRagIndexConfig(ragId, indexConfig);
+  }
   await ctx.knowledge.startIndexing(ragId, 'graph');
   return { ragId, ragType: 'graph' };
 }

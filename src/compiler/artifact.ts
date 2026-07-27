@@ -77,6 +77,28 @@ export interface RagPlan {
   embedder: number | SymbolicRef;
   /** graph strategy only. */
   llm?: number | SymbolicRef;
+  /**
+   * graph strategy only: index configuration applied via
+   * `PUT graph-rag/{id}/index-config/` before indexing starts.
+   * Present only when the author set at least one field — omitted fields keep
+   * backend defaults AND keep the rag content hash stable for existing flows.
+   */
+  index_config?: {
+    chunk_size?: number;
+    chunk_overlap?: number;
+    entity_types?: string[];
+    max_gleanings?: number;
+  };
+  /**
+   * naive strategy only: per-document chunking applied via the
+   * document-configs bulk-update endpoint before indexing starts.
+   * Present only when the author set at least one field (same hash-stability
+   * contract as index_config).
+   */
+  document_chunking?: {
+    chunk_size?: number;
+    chunk_overlap?: number;
+  };
 }
 
 export interface EntityPlan {

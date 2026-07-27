@@ -108,6 +108,26 @@ class MockBackend {
         status: 200,
         body: { message: 'NaiveRag configured successfully', naive_rag: { naive_rag_id: this.id() } },
       };
+    // Mirrors GraphRagViewSet.create_or_update: wrapped envelope, id as graph_rag_id.
+    if (/^POST \/api\/graph-rag\/collections\/\d+\/graph-rag\/$/.test(key))
+      return {
+        status: 200,
+        body: { message: 'GraphRag configured successfully', graph_rag: { graph_rag_id: this.id() } },
+      };
+    if (/^PUT \/api\/graph-rag\/\d+\/index-config\/$/.test(key))
+      return { status: 200, body: { message: 'Index config updated' } };
+    if (/^POST \/api\/naive-rag\/\d+\/document-configs\/initialize\/$/.test(key))
+      return { status: 200, body: { message: 'ok', configs_created: 0, configs_existing: 2, new_configs: [] } };
+    if (/^GET \/api\/naive-rag\/\d+\/document-configs\/$/.test(key))
+      return {
+        status: 200,
+        body: [
+          { naive_rag_document_id: 11, document_id: 1, file_name: 'a.md', chunk_size: 1000, chunk_overlap: 150 },
+          { naive_rag_document_id: 12, document_id: 2, file_name: 'b.md', chunk_size: 1000, chunk_overlap: 150 },
+        ],
+      };
+    if (/^PUT \/api\/naive-rag\/\d+\/document-configs\/bulk-update\/$/.test(key))
+      return { status: 200, body: { message: 'Successfully updated 2 config(s)', updated_count: 2, failed_count: 0 } };
     if (key === 'POST /api/process-rag-indexing/') {
       if (this.failIndexingTimes > 0) {
         this.failIndexingTimes -= 1;
@@ -346,6 +366,69 @@ describe('push pipeline (mock backend)', () => {
     expect(entityResult.actions.some((action) => action.kind === 'knowledge_collection')).toBe(true);
     expect(backend.createdByPath.get('source-collections')).toHaveLength(1);
     expect(backend.received.some((r) => r.path === '/api/process-rag-indexing/' && r.method === 'POST')).toBe(true);
+  });
+
+  it('applies naive document chunking (initialize → bulk-update) before indexing starts', async () => {
+    // The fixture sets chunk_size: 800 / chunk_overlap: 100 on the naive rag.
+    await pushOnce();
+
+    const paths = backend.received.map((r) => `${r.method} ${r.path}`);
+    const initializeIndex = paths.findIndex((p) => /POST \/api\/naive-rag\/\d+\/document-configs\/initialize\/$/.test(p));
+    const bulkUpdateIndex = paths.findIndex((p) => /PUT \/api\/naive-rag\/\d+\/document-configs\/bulk-update\/$/.test(p));
+    const indexingIndex = paths.findIndex((p) => p === 'POST /api/process-rag-indexing/');
+    expect(initializeIndex).toBeGreaterThan(-1);
+    expect(bulkUpdateIndex).toBeGreaterThan(initializeIndex);
+    expect(indexingIndex).toBeGreaterThan(bulkUpdateIndex);
+
+    // All config rows get the authored chunking.
+    const bulkUpdate = backend.received[bulkUpdateIndex]!;
+    expect(bulkUpdate.body).toEqual({ config_ids: [11, 12], chunk_size: 800, chunk_overlap: 100 });
+  });
+
+  it('applies the graph index config before indexing and re-applies it when it changes', async () => {
+    const flowFile = join(flowDir, 'flow.yaml');
+    const graphRagBlock = [
+      'strategy: graph',
+      '      llm_config: default',
+      '      entity_types: [service, person]',
+      '      max_gleanings: 2',
+    ].join('\n');
+    writeFileSync(
+      flowFile,
+      readFileSync(flowFile, 'utf8')
+        .replace('strategy: naive', graphRagBlock)
+        .replace('      chunk_size: 800\n', '')
+        .replace('      chunk_overlap: 100\n', ''),
+    );
+
+    await pushOnce();
+    const indexConfigPuts = () =>
+      backend.received.filter((r) => r.method === 'PUT' && /\/api\/graph-rag\/\d+\/index-config\/$/.test(r.path));
+    expect(indexConfigPuts()).toHaveLength(1);
+    expect(indexConfigPuts()[0]!.body).toEqual({ entity_types: ['service', 'person'], max_gleanings: 2 });
+
+    // The config must land before indexing reads it.
+    const paths = backend.received.map((r) => `${r.method} ${r.path}`);
+    const putIndex = paths.findIndex((p) => /PUT \/api\/graph-rag\/\d+\/index-config\/$/.test(p));
+    const indexingIndex = paths.findIndex((p) => p === 'POST /api/process-rag-indexing/');
+    expect(indexingIndex).toBeGreaterThan(putIndex);
+
+    // Unchanged repush: rag reused, no second index-config write, no re-index.
+    const indexingCalls = () => backend.received.filter((r) => r.path === '/api/process-rag-indexing/');
+    const indexingCountAfterFirstPush = indexingCalls().length;
+    await pushOnce();
+    expect(indexConfigPuts()).toHaveLength(1);
+    expect(indexingCalls()).toHaveLength(indexingCountAfterFirstPush);
+
+    // Changing entity_types dirties the rag: config re-applied, indexing re-triggered.
+    writeFileSync(
+      flowFile,
+      readFileSync(flowFile, 'utf8').replace('entity_types: [service, person]', 'entity_types: [service, api]'),
+    );
+    await pushOnce();
+    expect(indexConfigPuts()).toHaveLength(2);
+    expect(indexConfigPuts()[1]!.body).toEqual({ entity_types: ['service', 'api'], max_gleanings: 2 });
+    expect(indexingCalls().length).toBeGreaterThan(indexingCountAfterFirstPush);
   });
 
   it('section filter pushes only llm_configs + knowledge (the provision_knowledge path)', async () => {

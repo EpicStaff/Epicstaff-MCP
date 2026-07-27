@@ -84,6 +84,16 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
      provisioning:** RAG indexing keys off the content hash of those inputs, so changing them
      after `provision_knowledge` forces the later push to re-index from scratch, wasting the
      head start.
+     - Indexing knobs (all optional; omit for backend defaults): `chunk_size` / `chunk_overlap`
+       on both strategies; graph RAG also takes `embedder`, `entity_types`, and `max_gleanings`.
+     - For graph RAG over a domain corpus (product docs, API refs, contracts), set
+       `entity_types` to match the corpus — the backend default
+       `[organization, person, geo, event]` misses domain concepts, and an unextracted concept
+       is invisible to graph search. Cost note: richer `entity_types` grow the graph;
+       each `max_gleanings` increment adds roughly one extraction pass of LLM cost.
+     - Search-time settings (result limit, similarity threshold, community level) do NOT go
+       on `rag:` — they belong to the surface knowledge entry that attaches the collection
+       (`naive_config` / `graph_local_search_config`).
    - `surfaces` — what each agent may touch: tools, knowledge, instructions. One-off needs
      go as `inline_surface` on the node instead of polluting the catalog.
    - `agents` — AgentDefinitions: `instructions`, `llm_config`, `default_surfaces`.

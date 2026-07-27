@@ -78,6 +78,14 @@ as long as both ends get wired.
 
 ## Knowledge collections must finish indexing before a flow can retrieve
 
+Both tools take optional indexing knobs (omit for backend defaults): `chunk_size` /
+`chunk_overlap` on either strategy; graph RAG also takes `entity_types` and `max_gleanings`.
+For a domain corpus (product docs, API refs, contracts), set `entity_types` to match it — the
+backend default `[organization, person, geo, event]` misses domain concepts, and an
+unextracted concept is invisible to graph search. Each `max_gleanings` increment adds roughly
+one extraction pass of LLM cost. Search-time settings (result limit, thresholds, community
+level) live on the surface knowledge entry, not on the RAG config.
+
 `create_collection` (or `attach_rag`) only **starts** async indexing. A flow that references
 the collection will not retrieve anything until indexing **completes**:
 

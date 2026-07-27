@@ -48,6 +48,33 @@ interface GraphRagCreateResponse {
   graph_rag?: { graph_rag_id?: number };
 }
 
+/**
+ * `PUT graph-rag/{id}/index-config/` body — GraphRagIndexConfigUpdateSerializer.
+ * All fields optional server-side; the backend requires at least one.
+ */
+export interface GraphRagIndexConfigUpdate {
+  chunk_size?: number;
+  chunk_overlap?: number;
+  entity_types?: string[];
+  max_gleanings?: number;
+}
+
+/** One row of `GET naive-rag/{id}/document-configs/` (DocumentConfigSerializer). */
+export interface NaiveRagDocumentConfig {
+  naive_rag_document_id: number;
+  document_id: number;
+  file_name: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  [key: string]: unknown;
+}
+
+/** `PUT naive-rag/{id}/document-configs/bulk-update/` — per-document chunking fields. */
+export interface NaiveRagChunkingUpdate {
+  chunk_size?: number;
+  chunk_overlap?: number;
+}
+
 function unwrap<T>(response: Paginated<T> | T[]): T[] {
   return Array.isArray(response) ? response : response.results;
 }
@@ -135,6 +162,72 @@ export class KnowledgeApi {
       );
     }
     return id;
+  }
+
+  /**
+   * Update the graph RAG index configuration (chunking, entity types, gleanings).
+   * Must run BEFORE startIndexing — the config is read when indexing executes.
+   */
+  async updateGraphRagIndexConfig(graphRagId: number, config: GraphRagIndexConfigUpdate): Promise<void> {
+    await this.client.put(`graph-rag/${graphRagId}/index-config/`, { body: { ...config } });
+  }
+
+  /**
+   * Ensure every collection document has a naive-rag document config row.
+   * Idempotent — only creates configs for documents that lack one (a Django
+   * signal creates them on RAG creation, but documents uploaded later need this).
+   */
+  async initializeNaiveRagDocumentConfigs(naiveRagId: number): Promise<void> {
+    await this.client.post(`naive-rag/${naiveRagId}/document-configs/initialize/`);
+  }
+
+  /** List the per-document chunking configs of a naive RAG. */
+  async listNaiveRagDocumentConfigs(naiveRagId: number): Promise<NaiveRagDocumentConfig[]> {
+    return unwrap(
+      await this.client.get<Paginated<NaiveRagDocumentConfig> | NaiveRagDocumentConfig[]>(
+        `naive-rag/${naiveRagId}/document-configs/`,
+      ),
+    );
+  }
+
+  /**
+   * Apply the same chunking parameters to a set of document configs.
+   * Must run BEFORE startIndexing — chunking is read when indexing executes.
+   */
+  async bulkUpdateNaiveRagDocumentConfigs(
+    naiveRagId: number,
+    configIds: number[],
+    update: NaiveRagChunkingUpdate,
+  ): Promise<void> {
+    await this.client.put(`naive-rag/${naiveRagId}/document-configs/bulk-update/`, {
+      body: { config_ids: configIds, ...update },
+    });
+  }
+
+  /**
+   * Ensure every collection document has a config row, then apply the given
+   * chunking parameters to all of them. Initialize always runs: the backend
+   * signal creates config rows only when the NaiveRag row is FIRST created —
+   * update pushes and later document uploads need it explicitly, and indexing
+   * silently skips documents without a config row. Returns how many configs
+   * were updated (0 when no chunking parameters were given).
+   */
+  async applyNaiveDocumentChunking(
+    naiveRagId: number,
+    chunking?: NaiveRagChunkingUpdate,
+  ): Promise<number> {
+    await this.initializeNaiveRagDocumentConfigs(naiveRagId);
+    if (chunking === undefined || (chunking.chunk_size === undefined && chunking.chunk_overlap === undefined)) {
+      return 0;
+    }
+    const configs = await this.listNaiveRagDocumentConfigs(naiveRagId);
+    if (configs.length === 0) return 0;
+    await this.bulkUpdateNaiveRagDocumentConfigs(
+      naiveRagId,
+      configs.map((config) => config.naive_rag_document_id),
+      chunking,
+    );
+    return configs.length;
   }
 
   /** Kick off async indexing; readiness is checked via get_collection_status. */

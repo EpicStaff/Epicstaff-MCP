@@ -375,21 +375,44 @@ export class EntityPusher {
         let ragId: number;
         if (plan.rag.strategy === 'naive') {
           ragId = await this.knowledge.createNaiveRag(collectionId, embedderId);
+          await this.applyNaiveChunking(ragId, plan.rag.document_chunking);
         } else {
           const llmId = await this.resolveRagRef(plan.rag.llm ?? 0, idMap);
           ragId = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
+          if (plan.rag.index_config !== undefined) {
+            await this.knowledge.updateGraphRagIndexConfig(ragId, plan.rag.index_config);
+          }
         }
         await this.knowledge.startIndexing(ragId, plan.rag.strategy);
         logger.info(`Attached ${plan.rag.strategy} RAG (#${ragId}) to collection #${collectionId}; indexing started`);
         currentLock = setEntity(currentLock, plan.section, ragKey, { backendId: ragId, contentHash: ragHash });
       } else if (pendingUploads.length > 0) {
-        // Docs changed under an existing RAG — re-index.
+        // Docs changed under an existing RAG — re-index. For naive, new documents
+        // need config rows first: the backend signal only creates them on RAG
+        // creation, and indexing silently skips documents without a config.
+        if (plan.rag.strategy === 'naive') {
+          await this.applyNaiveChunking(ragEntry.backendId, plan.rag.document_chunking);
+        }
         await this.knowledge.startIndexing(ragEntry.backendId, plan.rag.strategy);
         logger.info(`Re-indexing collection #${collectionId} after document changes`);
       }
     }
 
     return currentLock;
+  }
+
+  /** Config-row init + author chunking for a naive RAG; see KnowledgeApi.applyNaiveDocumentChunking. */
+  private async applyNaiveChunking(
+    naiveRagId: number,
+    chunking: { chunk_size?: number; chunk_overlap?: number } | undefined,
+  ): Promise<void> {
+    const updated = await this.knowledge.applyNaiveDocumentChunking(naiveRagId, chunking);
+    if (updated > 0) {
+      logger.info(
+        `Applied chunking (size=${chunking?.chunk_size ?? 'default'}, overlap=${chunking?.chunk_overlap ?? 'default'}) ` +
+          `to ${updated} document config(s) of naive RAG #${naiveRagId}`,
+      );
+    }
   }
 
   private async resolveRagRef(ref: number | { $ref: string }, idMap: Map<string, number>): Promise<number> {

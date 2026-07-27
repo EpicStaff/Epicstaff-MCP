@@ -45,9 +45,6 @@
  *    neither.
  *  - classification category descriptions — the CDT table state has no
  *    description field.
- *  - knowledge chunking parameters (`chunk_size`, `chunk_overlap`, …) — the
- *    RAG create endpoints only accept embedder/llm ids (no warning: defaults
- *    are close enough; revisit when the API grows fields).
  *
  * Cross-section cycle: `surfaces[].owner_agent` points forward to the agents
  * section while `agents[].default_surfaces` points back at surfaces. The plan
@@ -361,21 +358,45 @@ function buildKnowledgePlans(
 
 function buildRagPlan(collection: KnowledgeCollectionSource, registry: RefRegistry): RagPlan {
   const rag = collection.rag;
+  const embedder =
+    rag.embedder !== undefined
+      ? ({ $ref: `embedders.${rag.embedder}` } as const)
+      : ({ $ref: 'embedders.default' } as const);
   if (rag.strategy === 'naive') {
+    const chunking = definedFields({
+      chunk_size: rag.chunk_size,
+      chunk_overlap: rag.chunk_overlap,
+    });
     return {
       strategy: 'naive',
-      embedder:
-        rag.embedder !== undefined
-          ? { $ref: `embedders.${rag.embedder}` }
-          : { $ref: 'embedders.default' },
+      embedder,
+      ...(chunking !== undefined ? { document_chunking: chunking } : {}),
     };
   }
+  const indexConfig = definedFields({
+    chunk_size: rag.chunk_size,
+    chunk_overlap: rag.chunk_overlap,
+    entity_types: rag.entity_types,
+    max_gleanings: rag.max_gleanings,
+  });
   return {
     strategy: 'graph',
-    // Graph RAG has no embedder field in flow source — the org default is used.
-    embedder: { $ref: 'embedders.default' },
+    embedder,
     ...(rag.llm_config !== undefined ? { llm: registry.ref('llm_configs', rag.llm_config) } : {}),
+    ...(indexConfig !== undefined ? { index_config: indexConfig } : {}),
   };
+}
+
+/**
+ * Keep only the keys the author actually set; return undefined when none are.
+ * Fields the author left out must stay out of the plan so untouched flows keep
+ * a byte-identical rag content hash (no spurious re-index on repush).
+ */
+function definedFields<T extends Record<string, unknown>>(fields: T): T | undefined {
+  const present = Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined),
+  ) as T;
+  return Object.keys(present).length > 0 ? present : undefined;
 }
 
 /** Payload template shaped like `CreateSurfaceRequest` (src/api/surfaces.ts). */
