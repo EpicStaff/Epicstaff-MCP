@@ -125,9 +125,12 @@ export class EpicStaffClient {
     if (options.bearerToken) {
       headers.set('Authorization', `Bearer ${options.bearerToken}`);
     } else if (!options.skipAuth) {
-      const { apiKey } = this.store.get();
+      const { apiKey, bearerAccessToken } = this.store.get();
       if (apiKey) {
         headers.set('X-Api-Key', apiKey);
+      } else if (bearerAccessToken) {
+        // Legacy backend with no API-key system (see auth.ts) — same JWT the frontend uses.
+        headers.set('Authorization', `Bearer ${bearerAccessToken}`);
       }
     }
     if (!options.skipAuth && !ORG_HEADER_SKIP.some((pattern) => pattern.test(url))) {

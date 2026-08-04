@@ -15,6 +15,13 @@ const stateSchema = z.object({
   email: z.string(),
   apiKey: z.string().nullable(),
   keyPrefix: z.string().nullable(),
+  /**
+   * JWT fallback for legacy backends with no auth/api-key/ minting route: the access
+   * token is sent as `Authorization: Bearer`, refreshed via auth/refresh/ using the
+   * refresh token. Mutually exclusive with apiKey — only one scheme is active at a time.
+   */
+  bearerAccessToken: z.string().nullable(),
+  bearerRefreshToken: z.string().nullable(),
   activeOrgId: z.number().nullable(),
 });
 
@@ -45,7 +52,15 @@ export class StateStore {
   }
 
   private loadOrInit(baseUrl: string, email: string): PersistedState {
-    const empty: PersistedState = { baseUrl, email, apiKey: null, keyPrefix: null, activeOrgId: null };
+    const empty: PersistedState = {
+      baseUrl,
+      email,
+      apiKey: null,
+      keyPrefix: null,
+      bearerAccessToken: null,
+      bearerRefreshToken: null,
+      activeOrgId: null,
+    };
     if (!existsSync(this.filePath)) {
       return empty;
     }

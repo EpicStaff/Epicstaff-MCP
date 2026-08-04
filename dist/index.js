@@ -28699,9 +28699,11 @@ var EpicStaffClient = class {
     if (options.bearerToken) {
       headers.set("Authorization", `Bearer ${options.bearerToken}`);
     } else if (!options.skipAuth) {
-      const { apiKey } = this.store.get();
+      const { apiKey, bearerAccessToken } = this.store.get();
       if (apiKey) {
         headers.set("X-Api-Key", apiKey);
+      } else if (bearerAccessToken) {
+        headers.set("Authorization", `Bearer ${bearerAccessToken}`);
       }
     }
     if (!options.skipAuth && !ORG_HEADER_SKIP.some((pattern) => pattern.test(url))) {
@@ -28727,7 +28729,7 @@ var AuthService = class {
   store;
   client;
   bootstrapPromise = null;
-  /** Ensure a working API key exists; validate the stored one or mint fresh. */
+  /** Ensure a working credential exists; validate/refresh the stored one or establish fresh. */
   async ensureAuthenticated() {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
@@ -28741,18 +28743,21 @@ var AuthService = class {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
     }
-    this.store.update({ apiKey: null, keyPrefix: null });
+    this.store.update({ apiKey: null, keyPrefix: null, bearerAccessToken: null });
     return this.ensureAuthenticated();
   }
   async bootstrap() {
     if (this.config.apiToken !== void 0) {
       return this.useProvidedToken(this.config.apiToken);
     }
-    const { apiKey } = this.store.get();
+    const { apiKey, bearerRefreshToken } = this.store.get();
     if (apiKey && await this.isKeyValid()) {
       return apiKey;
     }
-    return this.mintKey();
+    if (!apiKey && bearerRefreshToken) {
+      return this.refreshBearer(bearerRefreshToken);
+    }
+    return this.establishCredential();
   }
   /**
    * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the
@@ -28768,7 +28773,7 @@ var AuthService = class {
     this.store.update({ apiKey: null, keyPrefix: null });
     if (this.config.email !== void 0 && this.config.password !== void 0) {
       logger.info("EPICSTAFF_API_TOKEN was rejected \u2014 falling back to credential login");
-      return this.mintKey();
+      return this.establishCredential();
     }
     throw new Error(
       "EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted."
@@ -28786,18 +28791,42 @@ var AuthService = class {
       throw error2;
     }
   }
-  async mintKey() {
-    if (this.config.email === void 0 || this.config.password === void 0) {
-      throw new Error(
-        "No API key available and no credentials to mint one \u2014 set EPICSTAFF_API_TOKEN, or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment."
-      );
+  /**
+   * Refresh a legacy backend's JWT access token via its refresh token. Falls back to a
+   * fresh login when the refresh token itself is rejected (expired or revoked).
+   */
+  async refreshBearer(refreshToken) {
+    let refreshed;
+    try {
+      refreshed = await this.client.post("auth/refresh/", {
+        skipAuth: true,
+        body: { refresh: refreshToken }
+      });
+    } catch (error2) {
+      if (error2 instanceof ApiError && (error2.status === 401 || error2.status === 403)) {
+        logger.info("Stored refresh token is no longer valid \u2014 logging in again");
+        this.store.update({ bearerAccessToken: null, bearerRefreshToken: null });
+        return this.establishCredential();
+      }
+      throw error2;
     }
-    logger.info("Logging in to mint a new API key");
+    this.store.update({
+      bearerAccessToken: refreshed.access,
+      bearerRefreshToken: refreshed.refresh ?? refreshToken
+    });
+    return refreshed.access;
+  }
+  async establishCredential() {
+    const { email: email2, password } = this.config;
+    if (email2 === void 0 || password === void 0) {
+      throw new Error("establishCredential() called without credentials \u2014 this is a bug in AuthService.");
+    }
+    logger.info("Logging in to establish a credential");
     let tokens;
     try {
       tokens = await this.client.post("auth/login/", {
         skipAuth: true,
-        body: { email: this.config.email, password: this.config.password }
+        body: { email: email2, password }
       });
     } catch (error2) {
       if (error2 instanceof ApiError && error2.status === 401) {
@@ -28809,13 +28838,32 @@ var AuthService = class {
       }
       throw error2;
     }
-    const minted = await this.client.post("auth/api-key/", {
-      bearerToken: tokens.access,
-      body: { name: `es-mcp (${hostname2()})`, scopes: [] }
-    });
-    this.store.update({ apiKey: minted.api_key, keyPrefix: minted.prefix });
-    logger.info(`Minted API key ${minted.prefix}\u2026 and persisted it`);
-    return minted.api_key;
+    try {
+      const minted = await this.client.post("auth/api-key/", {
+        bearerToken: tokens.access,
+        body: { name: `es-mcp (${hostname2()})`, scopes: [] }
+      });
+      this.store.update({
+        apiKey: minted.api_key,
+        keyPrefix: minted.prefix,
+        bearerAccessToken: null,
+        bearerRefreshToken: null
+      });
+      logger.info(`Minted API key ${minted.prefix}\u2026 and persisted it`);
+      return minted.api_key;
+    } catch (error2) {
+      if (!(error2 instanceof ApiError && error2.status === 404)) {
+        throw error2;
+      }
+      logger.info("auth/api-key/ not found \u2014 this backend has no API-key system; using JWT bearer auth instead");
+      this.store.update({
+        apiKey: null,
+        keyPrefix: null,
+        bearerAccessToken: tokens.access,
+        bearerRefreshToken: tokens.refresh
+      });
+      return tokens.access;
+    }
   }
 };
 
@@ -28882,6 +28930,13 @@ var stateSchema = external_exports.object({
   email: external_exports.string(),
   apiKey: external_exports.string().nullable(),
   keyPrefix: external_exports.string().nullable(),
+  /**
+   * JWT fallback for legacy backends with no auth/api-key/ minting route: the access
+   * token is sent as `Authorization: Bearer`, refreshed via auth/refresh/ using the
+   * refresh token. Mutually exclusive with apiKey — only one scheme is active at a time.
+   */
+  bearerAccessToken: external_exports.string().nullable(),
+  bearerRefreshToken: external_exports.string().nullable(),
   activeOrgId: external_exports.number().nullable()
 });
 function stateDir() {
@@ -28903,7 +28958,15 @@ var StateStore = class {
     return this.state;
   }
   loadOrInit(baseUrl, email2) {
-    const empty = { baseUrl, email: email2, apiKey: null, keyPrefix: null, activeOrgId: null };
+    const empty = {
+      baseUrl,
+      email: email2,
+      apiKey: null,
+      keyPrefix: null,
+      bearerAccessToken: null,
+      bearerRefreshToken: null,
+      activeOrgId: null
+    };
     if (!existsSync(this.filePath)) {
       return empty;
     }
@@ -28977,7 +29040,7 @@ async function runTool(work) {
 }
 function hintFor(error2) {
   if (error2.status === 401) {
-    return "Authentication failed even after re-minting \u2014 verify EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).";
+    return "Authentication failed even after re-authenticating \u2014 verify EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).";
   }
   if (error2.status === 403) {
     return "Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.";
@@ -28992,16 +29055,18 @@ function registerAuthOrgTools(server, context) {
     "check_connection",
     {
       title: "Check EpicStaff connection",
-      description: "Verify connectivity and authentication with the EpicStaff backend: validates or mints the API key (first launch logs in with credentials and mints a dedicated key), resolves organizations, and auto-selects the organization when there is exactly one. Call this first in every session.",
+      description: "Verify connectivity and authentication with the EpicStaff backend: validates or mints the API key (first launch logs in with credentials and mints a dedicated key \u2014 or, on a legacy backend with no API-key system, falls back to JWT bearer auth), resolves organizations, and auto-selects the organization when there is exactly one. Call this first in every session.",
       inputSchema: {}
     },
     async () => runTool(async () => {
       await context.auth.ensureAuthenticated();
       const orgStatus = await context.org.resolve();
-      const { keyPrefix } = context.store.get();
+      const { apiKey, keyPrefix, bearerAccessToken } = context.store.get();
+      const authMode = context.config.apiToken !== void 0 ? "api-token" : apiKey ? "api-key" : bearerAccessToken ? "jwt-bearer" : "unknown";
       return {
         apiUrl: context.config.apiUrl,
         user: context.config.email ?? "api-token",
+        authMode,
         apiKeyPrefix: keyPrefix,
         organizations: orgStatus.organizations,
         activeOrgId: orgStatus.activeOrgId,

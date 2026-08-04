@@ -27,7 +27,7 @@ export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typ
 
 function hintFor(error: ApiError): string | undefined {
   if (error.status === 401) {
-    return 'Authentication failed even after re-minting — verify EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).';
+    return 'Authentication failed even after re-authenticating — verify EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).';
   }
   if (error.status === 403) {
     return 'Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.';
@@ -45,18 +45,22 @@ export function registerAuthOrgTools(server: McpServer, context: AppContext): vo
       title: 'Check EpicStaff connection',
       description:
         'Verify connectivity and authentication with the EpicStaff backend: validates or mints the API key ' +
-        '(first launch logs in with credentials and mints a dedicated key), resolves organizations, and ' +
-        'auto-selects the organization when there is exactly one. Call this first in every session.',
+        '(first launch logs in with credentials and mints a dedicated key — or, on a legacy backend with no ' +
+        'API-key system, falls back to JWT bearer auth), resolves organizations, and auto-selects the ' +
+        'organization when there is exactly one. Call this first in every session.',
       inputSchema: {},
     },
     async () =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         const orgStatus = await context.org.resolve();
-        const { keyPrefix } = context.store.get();
+        const { apiKey, keyPrefix, bearerAccessToken } = context.store.get();
+        const authMode =
+          context.config.apiToken !== undefined ? 'api-token' : apiKey ? 'api-key' : bearerAccessToken ? 'jwt-bearer' : 'unknown';
         return {
           apiUrl: context.config.apiUrl,
           user: context.config.email ?? 'api-token',
+          authMode,
           apiKeyPrefix: keyPrefix,
           organizations: orgStatus.organizations,
           activeOrgId: orgStatus.activeOrgId,

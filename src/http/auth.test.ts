@@ -178,6 +178,81 @@ describe('auth bootstrap + org resolution', () => {
     expect(key).toBe('fresh-key');
   });
 
+  it('legacy backend (auth/api-key/ missing): falls back to JWT bearer auth', async () => {
+    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt-access', refresh: 'jwt-refresh' }));
+    routes.set('POST /api/auth/api-key/', () => jsonResponse(404, { detail: 'no such route' }));
+    routes.set('GET /api/graphs/', (call) => {
+      expect(call.headers.get('Authorization')).toBe('Bearer jwt-access');
+      expect(call.headers.get('X-Api-Key')).toBeNull();
+      return jsonResponse(200, { results: [] });
+    });
+
+    const { store, client, auth } = makeServices();
+    const key = await auth.ensureAuthenticated();
+
+    expect(key).toBe('jwt-access');
+    expect(store.get().apiKey).toBeNull();
+    expect(store.get().bearerAccessToken).toBe('jwt-access');
+    expect(store.get().bearerRefreshToken).toBe('jwt-refresh');
+
+    await client.get('graphs/');
+  });
+
+  it('bearer mode: the next bootstrap refreshes the access token via auth/refresh/', async () => {
+    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'access-1', refresh: 'refresh-1' }));
+    routes.set('POST /api/auth/api-key/', () => jsonResponse(404, { detail: 'no such route' }));
+    routes.set('POST /api/auth/refresh/', (call) => {
+      expect(call.body).toEqual({ refresh: 'refresh-1' });
+      return jsonResponse(200, { access: 'access-2' });
+    });
+
+    const { store, auth } = makeServices();
+    const first = await auth.ensureAuthenticated();
+    expect(first).toBe('access-1');
+
+    const second = await auth.ensureAuthenticated();
+    expect(second).toBe('access-2');
+    expect(store.get().bearerAccessToken).toBe('access-2');
+    // No rotated refresh token in the response — the original is kept.
+    expect(store.get().bearerRefreshToken).toBe('refresh-1');
+  });
+
+  it('bearer mode: a rejected refresh token falls back to a fresh login', async () => {
+    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'access-1', refresh: 'refresh-1' }));
+    routes.set('POST /api/auth/api-key/', () => jsonResponse(404, { detail: 'no such route' }));
+    routes.set('POST /api/auth/refresh/', () => jsonResponse(401, { detail: 'refresh token expired' }));
+
+    const { store, auth } = makeServices();
+    await auth.ensureAuthenticated();
+
+    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'access-2', refresh: 'refresh-2' }));
+    const second = await auth.ensureAuthenticated();
+
+    expect(second).toBe('access-2');
+    expect(store.get().bearerRefreshToken).toBe('refresh-2');
+  });
+
+  it('bearer mode: 401 on a business call triggers a refresh and one retry', async () => {
+    routes.set('POST /api/auth/refresh/', () => jsonResponse(200, { access: 'fresh-access', refresh: 'refresh-2' }));
+
+    let graphCalls = 0;
+    routes.set('GET /api/graphs/', (call) => {
+      graphCalls += 1;
+      if (call.headers.get('Authorization') === 'Bearer fresh-access') {
+        return jsonResponse(200, { results: [] });
+      }
+      return jsonResponse(401, { detail: 'expired' });
+    });
+
+    const { store, client } = makeServices();
+    store.update({ bearerAccessToken: 'stale-access', bearerRefreshToken: 'refresh-1' });
+
+    const result = await client.get<{ results: unknown[] }>('graphs/');
+
+    expect(result.results).toEqual([]);
+    expect(graphCalls).toBe(2); // failed once with the stale token, retried once with the fresh one
+  });
+
   it('org: auto-selects a single active org and sends the header afterwards', async () => {
     routes.set('GET /api/profile/', () =>
       jsonResponse(200, {
