@@ -87,7 +87,7 @@ export class AuthService {
     }
     throw new Error(
       'EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, ' +
-        'or set EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD so a fresh key can be minted.',
+        'or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted.',
     );
   }
 
@@ -109,7 +109,7 @@ export class AuthService {
     if (this.config.email === undefined || this.config.password === undefined) {
       throw new Error(
         'No API key available and no credentials to mint one — set EPICSTAFF_API_TOKEN, ' +
-          'or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment.',
+          'or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment.',
       );
     }
     logger.info('Logging in to mint a new API key');
@@ -124,7 +124,7 @@ export class AuthService {
         throw new ApiError(
           error.status,
           error.url,
-          'Login failed — check EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD in the MCP server environment.',
+          'Login failed — check EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD in the MCP server environment.',
         );
       }
       throw error;

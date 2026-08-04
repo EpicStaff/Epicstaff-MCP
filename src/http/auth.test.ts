@@ -8,7 +8,11 @@ import { EpicStaffClient } from './client.js';
 import { AuthService } from './auth.js';
 import { OrgService } from './org.js';
 
-const ENV = { ES_URL: 'http://es.test', ES_EMAIL: 'dev@example.com', ES_PASSWORD: 'secret' };
+const ENV = {
+  EPICSTAFF_BASE_URL: 'http://es.test',
+  EPICSTAFF_USERNAME: 'dev@example.com',
+  EPICSTAFF_PASSWORD: 'secret',
+};
 
 type FetchCall = { url: string; method: string; headers: Headers; body?: unknown };
 
@@ -166,7 +170,7 @@ describe('auth bootstrap + org resolution', () => {
     const { auth } = makeServices({
       EPICSTAFF_BASE_URL: 'http://es.test',
       EPICSTAFF_API_TOKEN: 'revoked-key',
-      EPICSTAFF_EMAIL: 'dev@example.com',
+      EPICSTAFF_USERNAME: 'dev@example.com',
       EPICSTAFF_PASSWORD: 'secret',
     });
 

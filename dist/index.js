@@ -28495,7 +28495,7 @@ var StdioServerTransport = class {
 
 // src/config.ts
 var urlSchema = external_exports.string().url("EPICSTAFF_BASE_URL must be a valid URL, e.g. http://127.0.0.1").transform(normalizeApiUrl);
-var emailSchema = external_exports.string().email("EPICSTAFF_EMAIL must be a valid email address");
+var emailSchema = external_exports.string().email("EPICSTAFF_USERNAME must be a valid email address");
 function normalizeApiUrl(raw) {
   let url = raw.replace(/\/+$/, "");
   if (!url.endsWith("/api")) {
@@ -28503,17 +28503,14 @@ function normalizeApiUrl(raw) {
   }
   return `${url}/`;
 }
-function readEnv(env, ...names) {
-  for (const name of names) {
-    const value = env[name];
-    if (value) return value;
-  }
-  return void 0;
+function readEnv(env, name) {
+  const value = env[name];
+  return value ? value : void 0;
 }
 function loadConfig(env = process.env) {
-  const baseUrl = readEnv(env, "EPICSTAFF_BASE_URL", "ES_URL");
-  const email2 = readEnv(env, "EPICSTAFF_EMAIL", "EPICSTAFF_USERNAME", "ES_EMAIL");
-  const password = readEnv(env, "EPICSTAFF_PASSWORD", "ES_PASSWORD");
+  const baseUrl = readEnv(env, "EPICSTAFF_BASE_URL");
+  const email2 = readEnv(env, "EPICSTAFF_USERNAME");
+  const password = readEnv(env, "EPICSTAFF_PASSWORD");
   const apiToken = readEnv(env, "EPICSTAFF_API_TOKEN");
   const problems = [];
   let apiUrl;
@@ -28530,23 +28527,23 @@ function loadConfig(env = process.env) {
   if (apiToken === void 0) {
     if (email2 === void 0 && password === void 0) {
       problems.push(
-        "set EPICSTAFF_API_TOKEN, or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD to log in and mint a key"
+        "set EPICSTAFF_API_TOKEN, or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD to log in and mint a key"
       );
     } else if (email2 === void 0) {
-      problems.push("EPICSTAFF_EMAIL is not set (required with EPICSTAFF_PASSWORD)");
+      problems.push("EPICSTAFF_USERNAME is not set (required with EPICSTAFF_PASSWORD)");
     } else if (password === void 0) {
-      problems.push("EPICSTAFF_PASSWORD is not set (required with EPICSTAFF_EMAIL)");
+      problems.push("EPICSTAFF_PASSWORD is not set (required with EPICSTAFF_USERNAME)");
     }
   }
   if (email2 !== void 0) {
     const parsedEmail = emailSchema.safeParse(email2);
     if (!parsedEmail.success) {
-      problems.push(parsedEmail.error.issues[0]?.message ?? "EPICSTAFF_EMAIL is invalid");
+      problems.push(parsedEmail.error.issues[0]?.message ?? "EPICSTAFF_USERNAME is invalid");
     }
   }
   if (problems.length > 0 || apiUrl === void 0) {
     throw new Error(
-      `Invalid EpicStaff MCP configuration \u2014 ${problems.join("; ")}. Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment.`
+      `Invalid EpicStaff MCP configuration \u2014 ${problems.join("; ")}. Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment.`
     );
   }
   return {
@@ -28774,7 +28771,7 @@ var AuthService = class {
       return this.mintKey();
     }
     throw new Error(
-      "EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, or set EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD so a fresh key can be minted."
+      "EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted."
     );
   }
   async isKeyValid() {
@@ -28792,7 +28789,7 @@ var AuthService = class {
   async mintKey() {
     if (this.config.email === void 0 || this.config.password === void 0) {
       throw new Error(
-        "No API key available and no credentials to mint one \u2014 set EPICSTAFF_API_TOKEN, or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment."
+        "No API key available and no credentials to mint one \u2014 set EPICSTAFF_API_TOKEN, or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment."
       );
     }
     logger.info("Logging in to mint a new API key");
@@ -28807,7 +28804,7 @@ var AuthService = class {
         throw new ApiError(
           error2.status,
           error2.url,
-          "Login failed \u2014 check EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD in the MCP server environment."
+          "Login failed \u2014 check EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD in the MCP server environment."
         );
       }
       throw error2;
@@ -28980,7 +28977,7 @@ async function runTool(work) {
 }
 function hintFor(error2) {
   if (error2.status === 401) {
-    return "Authentication failed even after re-minting \u2014 verify EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).";
+    return "Authentication failed even after re-minting \u2014 verify EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).";
   }
   if (error2.status === 403) {
     return "Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.";

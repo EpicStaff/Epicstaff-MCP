@@ -13,7 +13,7 @@ One responsibility: a working, org-scoped connection. Every other es-* skill ass
    `set_active_organization` with the chosen id. Never pick silently — entities are created
    inside the active organization.
 4. If `check_connection` fails: report the error hint verbatim. Auth failures mean a wrong
-   `EPICSTAFF_API_TOKEN` or `EPICSTAFF_EMAIL`/`EPICSTAFF_PASSWORD` (legacy: `ES_EMAIL`/
-   `ES_PASSWORD`) in the plugin's MCP environment — the user must fix the env, not the flow.
+   `EPICSTAFF_API_TOKEN` or `EPICSTAFF_USERNAME`/`EPICSTAFF_PASSWORD` in the plugin's MCP
+   environment — the user must fix the env, not the flow.
 
 Done when: `check_connection` succeeds and `activeOrgId` is set.

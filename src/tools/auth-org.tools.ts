@@ -27,7 +27,7 @@ export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typ
 
 function hintFor(error: ApiError): string | undefined {
   if (error.status === 401) {
-    return 'Authentication failed even after re-minting — verify EPICSTAFF_EMAIL / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).';
+    return 'Authentication failed even after re-minting — verify EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN).';
   }
   if (error.status === 403) {
     return 'Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.';

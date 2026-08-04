@@ -14,7 +14,11 @@ import { GraphPusher } from '../src/pusher/graph.js';
  * Verifies: dependency-ordered creation, $ref/$model/embedder substitution,
  * bulk-save payload with temp_ids, lockfile round-trip, and idempotent repush.
  */
-const ENV = { ES_URL: 'http://es.mock', ES_EMAIL: 'dev@example.com', ES_PASSWORD: 'pw' };
+const ENV = {
+  EPICSTAFF_BASE_URL: 'http://es.mock',
+  EPICSTAFF_USERNAME: 'dev@example.com',
+  EPICSTAFF_PASSWORD: 'pw',
+};
 const FIXTURE = join(import.meta.dirname, 'fixtures/flow-source/valid-basic');
 
 interface Received {

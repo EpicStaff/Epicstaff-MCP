@@ -16,7 +16,11 @@ import { registerCatalogTools } from '../src/tools/catalog.tools.js';
  * Note: calling handlers directly bypasses MCP's Zod parsing, so inputs are
  * passed fully-specified (defaults the schema would apply are not relied upon).
  */
-const ENV = { ES_URL: 'http://es.mock', ES_EMAIL: 'dev@example.com', ES_PASSWORD: 'pw' };
+const ENV = {
+  EPICSTAFF_BASE_URL: 'http://es.mock',
+  EPICSTAFF_USERNAME: 'dev@example.com',
+  EPICSTAFF_PASSWORD: 'pw',
+};
 
 interface Received {
   method: string;

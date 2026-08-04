@@ -5,12 +5,11 @@ import { z } from 'zod';
  *
  *   EPICSTAFF_BASE_URL   — EpicStaff server URL (required)
  *   EPICSTAFF_API_TOKEN  — pre-issued API key; used directly, no login
- *   EPICSTAFF_EMAIL      — login email; the server mints an API key
+ *   EPICSTAFF_USERNAME   — login email; the server mints an API key
  *   EPICSTAFF_PASSWORD   — login password
  *
- * Either the token or the email+password pair must be set (token wins when
- * both are). The pre-rename `ES_URL` / `ES_EMAIL` / `ES_PASSWORD` names are
- * accepted as legacy fallbacks.
+ * Either the token or the username+password pair must be set (token wins
+ * when both are).
  */
 export interface Config {
   /** Base API URL, always ending in `/api/` (matches the frontend ConfigService.apiUrl convention). */
@@ -26,7 +25,7 @@ const urlSchema = z
   .url('EPICSTAFF_BASE_URL must be a valid URL, e.g. http://127.0.0.1')
   .transform(normalizeApiUrl);
 
-const emailSchema = z.string().email('EPICSTAFF_EMAIL must be a valid email address');
+const emailSchema = z.string().email('EPICSTAFF_USERNAME must be a valid email address');
 
 /**
  * Normalize any user-supplied EpicStaff URL to the frontend convention:
@@ -46,19 +45,15 @@ function normalizeApiUrl(raw: string): string {
  * which turns unset variables into empty strings — treat those as absent.
  * Names are tried in order; the first non-empty value wins.
  */
-function readEnv(env: NodeJS.ProcessEnv, ...names: string[]): string | undefined {
-  for (const name of names) {
-    const value = env[name];
-    if (value) return value;
-  }
-  return undefined;
+function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const value = env[name];
+  return value ? value : undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const baseUrl = readEnv(env, 'EPICSTAFF_BASE_URL', 'ES_URL');
-  // EPICSTAFF_USERNAME is the pre-2.0 Python plugin's name for the login email.
-  const email = readEnv(env, 'EPICSTAFF_EMAIL', 'EPICSTAFF_USERNAME', 'ES_EMAIL');
-  const password = readEnv(env, 'EPICSTAFF_PASSWORD', 'ES_PASSWORD');
+  const baseUrl = readEnv(env, 'EPICSTAFF_BASE_URL');
+  const email = readEnv(env, 'EPICSTAFF_USERNAME');
+  const password = readEnv(env, 'EPICSTAFF_PASSWORD');
   const apiToken = readEnv(env, 'EPICSTAFF_API_TOKEN');
 
   const problems: string[] = [];
@@ -78,19 +73,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (apiToken === undefined) {
     if (email === undefined && password === undefined) {
       problems.push(
-        'set EPICSTAFF_API_TOKEN, or EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD to log in and mint a key',
+        'set EPICSTAFF_API_TOKEN, or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD to log in and mint a key',
       );
     } else if (email === undefined) {
-      problems.push('EPICSTAFF_EMAIL is not set (required with EPICSTAFF_PASSWORD)');
+      problems.push('EPICSTAFF_USERNAME is not set (required with EPICSTAFF_PASSWORD)');
     } else if (password === undefined) {
-      problems.push('EPICSTAFF_PASSWORD is not set (required with EPICSTAFF_EMAIL)');
+      problems.push('EPICSTAFF_PASSWORD is not set (required with EPICSTAFF_USERNAME)');
     }
   }
 
   if (email !== undefined) {
     const parsedEmail = emailSchema.safeParse(email);
     if (!parsedEmail.success) {
-      problems.push(parsedEmail.error.issues[0]?.message ?? 'EPICSTAFF_EMAIL is invalid');
+      problems.push(parsedEmail.error.issues[0]?.message ?? 'EPICSTAFF_USERNAME is invalid');
     }
   }
 
@@ -98,7 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(
       `Invalid EpicStaff MCP configuration — ${problems.join('; ')}. ` +
         'Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or ' +
-        'EPICSTAFF_EMAIL + EPICSTAFF_PASSWORD in the MCP server environment.',
+        'EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment.',
     );
   }
 
