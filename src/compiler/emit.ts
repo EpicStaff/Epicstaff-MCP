@@ -22,7 +22,10 @@
  *    directly against the `embedding-configs/` list (default = the org default).
  *  - subgraph flows:      `{$ref: "flows.<siblingFlowName>"}` or
  *    `{$ref: "flows.existing:<remoteName>"}`. Also no EntityPlan (no kind) —
- *    the pusher resolves flow names against the graphs list / sibling builds.
+ *    a subgraph always targets an already-pushed graph, so there is nothing to
+ *    create. `pusher/flow-refs.ts` resolves these to ids (remote name lookup via
+ *    `graph-light/`, or the sibling's `flow.lock.json` graphId) and the push_flow
+ *    tool merges them into the idMap before the graph is pushed.
  *
  * Numeric GraphState fields that carry refs (`agent_definition`, `surface_list`
  * entries, subgraph/crew `data.id`, `default_llm_config`, inline-surface tool /

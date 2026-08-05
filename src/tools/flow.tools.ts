@@ -14,6 +14,7 @@ import { decompileFlow } from '../flow-source/decompiler.js';
 import { hasErrors } from '../flow-source/diagnostics.js';
 import { createLock, getEntity, readLock, writeLock } from '../flow-source/lockfile.js';
 import { EntityPusher } from '../pusher/entities.js';
+import { resolveFlowRefs } from '../pusher/flow-refs.js';
 import { GraphPusher } from '../pusher/graph.js';
 import { err, ok, toContent } from '../util/result.js';
 import { runTool } from './auth-org.tools.js';
@@ -238,6 +239,13 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         lock = entityResult.lock;
         // Persist entity progress immediately — a later graph failure must not orphan created entities.
         await writeLock(flow_dir, lock);
+
+        // Subgraph refs carry no EntityPlan, so the entity pusher never saw them. Resolve
+        // them against the backend graph list / sibling lockfiles before substitution.
+        const flowRefs = await resolveFlowRefs(artifact, flow_dir, context);
+        for (const [refKey, graphId] of flowRefs) {
+          entityResult.idMap.set(refKey, graphId);
+        }
 
         const graphPusher = new GraphPusher(context);
         const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, {
