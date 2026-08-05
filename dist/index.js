@@ -29105,8 +29105,8 @@ function registerAuthOrgTools(server, context) {
 }
 
 // src/tools/flow.tools.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname, isAbsolute, join as join2 } from "node:path";
 
 // src/api/agent-definitions.ts
 function unwrap(response) {
@@ -32661,6 +32661,16 @@ function substituteRefs(value, resolve) {
   }
   return value;
 }
+function collectRefs(value, into = /* @__PURE__ */ new Set()) {
+  if (isSymbolicRef(value)) {
+    into.add(value.$ref);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectRefs(item, into);
+  } else if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) collectRefs(entry, into);
+  }
+  return into;
+}
 
 // src/compiler/template-refs.ts
 function isModelRef(value) {
@@ -33373,418 +33383,6 @@ function buildConditionalEdges(dto, registry2, warnings) {
   return builds;
 }
 
-// src/api/storage.ts
-var StorageApi = class {
-  constructor(client) {
-    this.client = client;
-  }
-  client;
-  /** Resolve an org-storage file path (e.g. "reports/summary.md") to its backend id. */
-  async resolveFileId(filePath) {
-    const normalized = filePath.replace(/^\/+/, "");
-    const lastSlash = normalized.lastIndexOf("/");
-    const directory = lastSlash === -1 ? "" : normalized.slice(0, lastSlash);
-    const fileName = lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
-    const listing = await this.client.get("storage/list/", {
-      query: { path: directory }
-    });
-    const match = listing.items.find((item) => item.type === "file" && item.name === fileName);
-    if (!match || match.id == null) {
-      const available = listing.items.filter((item) => item.type === "file").map((item) => item.name).slice(0, 15).join(", ");
-      throw new Error(
-        `Storage file "${filePath}" not found in org storage. Files in "${directory || "/"}": ${available || "none"}.`
-      );
-    }
-    return match.id;
-  }
-};
-
-// src/api/legacy-crew.ts
-function unwrap7(response) {
-  return Array.isArray(response) ? response : response.results;
-}
-var LegacyCrewApi = class {
-  constructor(client) {
-    this.client = client;
-  }
-  client;
-  async listCrews() {
-    return unwrap7(await this.client.get("crews/", { query: { limit: 1e3 } }));
-  }
-  async createCrew(request) {
-    return this.client.post("crews/", { body: request });
-  }
-};
-
-// src/pusher/entities.ts
-import { readFileSync as readFileSync3 } from "node:fs";
-var EntityPusher = class {
-  constructor(context) {
-    this.context = context;
-    this.llm = new LlmApi(context.client);
-    this.tools = new ToolsApi(context.client);
-    this.knowledge = new KnowledgeApi(context.client);
-    this.surfaces = new SurfacesApi(context.client);
-    this.agentDefinitions = new AgentDefinitionsApi(context.client);
-    this.crews = new LegacyCrewApi(context.client);
-    this.storage = new StorageApi(context.client);
-  }
-  context;
-  llm;
-  tools;
-  knowledge;
-  surfaces;
-  agentDefinitions;
-  crews;
-  storage;
-  modelIdByName = null;
-  builtinToolIdByName = null;
-  /**
-   * @param options.sections When set, only entity plans whose `section` is in
-   * this list are pushed — the rest are skipped entirely. Used by
-   * provision_knowledge to materialize just `llm_configs` + `knowledge` ahead of
-   * the full flow. Omitting `options` pushes everything (the default push_flow
-   * behavior, unchanged).
-   */
-  async push(artifact, lock, options) {
-    const idMap = /* @__PURE__ */ new Map();
-    const actions = [];
-    let currentLock = lock;
-    for (const plan of artifact.entities) {
-      if (options?.sections && !options.sections.includes(plan.section)) {
-        continue;
-      }
-      if (plan.action === "resolve-existing") {
-        const backendId2 = await this.resolveExisting(plan);
-        idMap.set(plan.key, backendId2);
-        actions.push({ key: plan.key, kind: plan.kind, action: "resolved-existing", backendId: backendId2 });
-        continue;
-      }
-      const resolvedPayload = await this.resolvePayload(plan.payload ?? {}, idMap, plan.key);
-      const hash = plan.contentHash ?? contentHash(plan.payload ?? {});
-      const lockEntry = getEntity(currentLock, plan.section, plan.name);
-      let backendId;
-      let action;
-      if (lockEntry && !isEntityDirty(currentLock, plan.section, plan.name, hash)) {
-        backendId = lockEntry.backendId;
-        action = "reused";
-      } else if (lockEntry) {
-        backendId = await this.updateEntity(plan, lockEntry.backendId, resolvedPayload);
-        action = "updated";
-      } else {
-        backendId = await this.createEntity(plan, resolvedPayload);
-        action = "created";
-      }
-      currentLock = setEntity(currentLock, plan.section, plan.name, { backendId, contentHash: hash });
-      idMap.set(plan.key, backendId);
-      actions.push({ key: plan.key, kind: plan.kind, action, backendId });
-      if (plan.kind === "knowledge_collection") {
-        currentLock = await this.pushCollectionExtras(plan, backendId, idMap, currentLock);
-      }
-    }
-    return { idMap, lock: currentLock, actions };
-  }
-  /**
-   * Substitute every placeholder kind the compiler emits:
-   * `{$ref}` (entity pushed earlier in this walk), `{$model}` (LLM model by name),
-   * `{$env}` (environment variable — secrets never live in flow source),
-   * `{$tool}` (built-in catalog tool by name), `{$storageFile}` (org storage path).
-   */
-  async resolvePayload(payload, idMap, forKey) {
-    const withTemplates = await this.substituteTemplateRefs(payload);
-    return substituteRefs(withTemplates, (refKey) => {
-      const id = idMap.get(refKey);
-      if (id === void 0) {
-        throw new Error(
-          `Internal ordering error: "${forKey}" references "${refKey}" before it was pushed. This is a compiler dependency-ordering bug.`
-        );
-      }
-      return id;
-    });
-  }
-  async substituteTemplateRefs(value) {
-    if (isModelRef(value)) {
-      return this.resolveModelId(value.$model, value.provider);
-    }
-    if (isEnvRef(value)) {
-      const resolved = process.env[value.$env];
-      if (resolved === void 0) {
-        throw new Error(
-          `Environment variable "${value.$env}" is not set for the MCP server. Secrets referenced in flow source ({$env}) must be provided in the plugin environment.`
-        );
-      }
-      return resolved;
-    }
-    if (isBuiltinToolRef(value)) {
-      return this.resolveBuiltinToolId(value.$tool);
-    }
-    if (isStorageFileRef(value)) {
-      return this.storage.resolveFileId(value.$storageFile);
-    }
-    if (Array.isArray(value)) {
-      return Promise.all(value.map((item) => this.substituteTemplateRefs(item)));
-    }
-    if (typeof value === "object" && value !== null && !isSymbolicRefLike(value)) {
-      const result = {};
-      for (const [key, entry] of Object.entries(value)) {
-        result[key] = await this.substituteTemplateRefs(entry);
-      }
-      return result;
-    }
-    return value;
-  }
-  async resolveBuiltinToolId(toolName) {
-    if (!this.builtinToolIdByName) {
-      const builtinTools = await this.tools.listBuiltinTools();
-      this.builtinToolIdByName = /* @__PURE__ */ new Map();
-      for (const tool of builtinTools) {
-        this.builtinToolIdByName.set(tool.name.toLowerCase(), tool.id);
-        if (tool.name_alias) this.builtinToolIdByName.set(tool.name_alias.toLowerCase(), tool.id);
-      }
-    }
-    const id = this.builtinToolIdByName.get(toolName.toLowerCase());
-    if (id === void 0) {
-      throw new Error(
-        `Built-in tool "${toolName}" not found. Use list_tools to see the available catalog.`
-      );
-    }
-    return id;
-  }
-  async resolveModelId(modelName, providerHint) {
-    if (!this.modelIdByName) {
-      const [models, providers] = await Promise.all([this.llm.listModels(), this.llm.listProviders()]);
-      const providerName = new Map(providers.map((provider) => [provider.id, provider.name.toLowerCase()]));
-      this.modelIdByName = /* @__PURE__ */ new Map();
-      for (const model of models) {
-        const key = model.name.toLowerCase();
-        this.modelIdByName.set(`${providerName.get(model.llm_provider) ?? ""}/${key}`, model.id);
-        if (!this.modelIdByName.has(key)) this.modelIdByName.set(key, model.id);
-      }
-    }
-    const id = (providerHint ? this.modelIdByName.get(`${providerHint.toLowerCase()}/${modelName.toLowerCase()}`) : void 0) ?? this.modelIdByName.get(modelName.toLowerCase());
-    if (id === void 0) {
-      const available = [...this.modelIdByName.keys()].filter((key) => !key.includes("/")).slice(0, 20).join(", ");
-      throw new Error(
-        `LLM model "${modelName}" not found on the backend. Available models include: ${available}. Use list_llm_models to see all options.`
-      );
-    }
-    return id;
-  }
-  async resolveExisting(plan) {
-    const remoteName = plan.remoteName ?? plan.name;
-    const found = await this.lookupByName(plan, remoteName);
-    if (found === void 0) {
-      throw new Error(
-        `existing: "${remoteName}" (${plan.kind}) was not found in the active organization. Check the name with the matching list_* tool, or define it locally in the flow source.`
-      );
-    }
-    return found;
-  }
-  async lookupByName(plan, remoteName) {
-    const nameMatches = (candidate) => (candidate.name ?? "").toLowerCase() === remoteName.toLowerCase();
-    switch (plan.kind) {
-      case "llm_config": {
-        const configs = await this.llm.listConfigs();
-        return configs.find((config2) => config2.custom_name.toLowerCase() === remoteName.toLowerCase())?.id;
-      }
-      case "tool_config":
-        return (await this.tools.listToolConfigs()).find(nameMatches)?.id;
-      case "python_code_tool":
-        return (await this.tools.listPythonCodeTools()).find(nameMatches)?.id;
-      case "mcp_tool":
-        return (await this.tools.listMcpTools()).find(nameMatches)?.id;
-      case "knowledge_collection": {
-        const collections = await this.knowledge.listCollections();
-        const match = collections.find(
-          (collection) => collection.collection_name.toLowerCase() === remoteName.toLowerCase()
-        );
-        return match?.collection_id ?? match?.id;
-      }
-      case "surface":
-        return (await this.surfaces.list()).find(nameMatches)?.id;
-      case "agent_definition":
-        return (await this.agentDefinitions.list()).find(nameMatches)?.id;
-      case "crew":
-        return (await this.crews.listCrews()).find(nameMatches)?.id;
-      default:
-        return void 0;
-    }
-  }
-  async createEntity(plan, payload) {
-    logger.info(`Creating ${plan.kind} "${plan.name}"`);
-    switch (plan.kind) {
-      case "llm_config":
-        return (await this.llm.createConfig(payload)).id;
-      case "tool_config":
-        return (await this.tools.createToolConfig(payload)).id;
-      case "python_code_tool":
-        return (await this.tools.createPythonCodeTool(payload)).id;
-      case "mcp_tool":
-        return (await this.tools.createMcpTool(payload)).id;
-      case "knowledge_collection": {
-        const collectionName = payload.collection_name ?? plan.name;
-        const existingId = await this.lookupByName(plan, collectionName);
-        if (existingId !== void 0) {
-          logger.info(`Reusing existing collection "${collectionName}" (#${existingId})`);
-          return existingId;
-        }
-        const collection = await this.knowledge.createCollection(collectionName);
-        const id = collection.collection_id ?? collection.id;
-        if (id === void 0) {
-          throw new Error("Backend did not return an id for the created collection.");
-        }
-        return id;
-      }
-      case "surface":
-        return (await this.surfaces.create(payload)).id;
-      case "agent_definition":
-        return (await this.agentDefinitions.create(payload)).id;
-      case "crew":
-        return (await this.crews.createCrew(payload)).id;
-      default:
-        throw new Error(`Unknown entity kind: ${plan.kind}`);
-    }
-  }
-  async updateEntity(plan, backendId, payload) {
-    logger.info(`Updating ${plan.kind} "${plan.name}" (#${backendId})`);
-    switch (plan.kind) {
-      case "llm_config":
-        await this.llm.updateConfig(backendId, payload);
-        return backendId;
-      case "python_code_tool":
-        await this.tools.updatePythonCodeTool(backendId, payload);
-        return backendId;
-      case "mcp_tool":
-        await this.tools.updateMcpTool(backendId, payload);
-        return backendId;
-      case "surface":
-        await this.surfaces.update(backendId, payload);
-        return backendId;
-      case "agent_definition":
-        await this.agentDefinitions.update(backendId, payload);
-        return backendId;
-      case "knowledge_collection":
-        return backendId;
-      case "tool_config":
-      case "crew":
-        logger.warn(`Update for ${plan.kind} is not supported \u2014 keeping existing #${backendId} unchanged.`);
-        return backendId;
-      default:
-        throw new Error(`Unknown entity kind: ${plan.kind}`);
-    }
-  }
-  /** Upload new/changed documents (content-hashed) and attach + index the RAG strategy once. */
-  async pushCollectionExtras(plan, collectionId, idMap, lock) {
-    let currentLock = lock;
-    const pendingUploads = [];
-    for (const documentPath of plan.documents ?? []) {
-      const hash = contentHash(readFileSync3(documentPath, "utf8"));
-      const existing = getDocument(currentLock, documentPath);
-      if (existing?.hash === hash && existing.uploadedTo === collectionId) {
-        continue;
-      }
-      pendingUploads.push(documentPath);
-      currentLock = setDocument(currentLock, documentPath, { hash, uploadedTo: collectionId });
-    }
-    if (pendingUploads.length > 0) {
-      logger.info(`Uploading ${pendingUploads.length} document(s) to collection #${collectionId}`);
-      await this.knowledge.uploadDocuments(collectionId, pendingUploads);
-    }
-    if (plan.rag) {
-      const ragKey = `${plan.name}#rag`;
-      const ragEntry = getEntity(currentLock, plan.section, ragKey);
-      const ragHash = contentHash(plan.rag);
-      if (!ragEntry || isEntityDirty(currentLock, plan.section, ragKey, ragHash)) {
-        const embedderId = await this.resolveRagRef(plan.rag.embedder, idMap);
-        let ragId;
-        if (plan.rag.strategy === "naive") {
-          ragId = await this.knowledge.createNaiveRag(collectionId, embedderId);
-          await this.applyNaiveChunking(ragId, plan.rag.document_chunking);
-        } else {
-          const llmId = await this.resolveRagRef(plan.rag.llm ?? 0, idMap);
-          ragId = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
-          if (plan.rag.index_config !== void 0) {
-            await this.knowledge.updateGraphRagIndexConfig(ragId, plan.rag.index_config);
-          }
-        }
-        await this.knowledge.startIndexing(ragId, plan.rag.strategy);
-        logger.info(`Attached ${plan.rag.strategy} RAG (#${ragId}) to collection #${collectionId}; indexing started`);
-        currentLock = setEntity(currentLock, plan.section, ragKey, { backendId: ragId, contentHash: ragHash });
-      } else if (pendingUploads.length > 0) {
-        if (plan.rag.strategy === "naive") {
-          await this.applyNaiveChunking(ragEntry.backendId, plan.rag.document_chunking);
-        }
-        await this.knowledge.startIndexing(ragEntry.backendId, plan.rag.strategy);
-        logger.info(`Re-indexing collection #${collectionId} after document changes`);
-      }
-    }
-    return currentLock;
-  }
-  /** Config-row init + author chunking for a naive RAG; see KnowledgeApi.applyNaiveDocumentChunking. */
-  async applyNaiveChunking(naiveRagId, chunking) {
-    const updated = await this.knowledge.applyNaiveDocumentChunking(naiveRagId, chunking);
-    if (updated > 0) {
-      logger.info(
-        `Applied chunking (size=${chunking?.chunk_size ?? "default"}, overlap=${chunking?.chunk_overlap ?? "default"}) to ${updated} document config(s) of naive RAG #${naiveRagId}`
-      );
-    }
-  }
-  async resolveRagRef(ref, idMap) {
-    if (typeof ref === "number") return ref;
-    const resolved = idMap.get(ref.$ref);
-    if (resolved !== void 0) return resolved;
-    if (ref.$ref.startsWith("embedders.")) {
-      const embedderName = ref.$ref.slice("embedders.".length).replace(/^existing:/, "");
-      const configs = await this.llm.listEmbeddingConfigs();
-      if (embedderName === "default") {
-        return this.resolveDefaultEmbedderId(configs);
-      }
-      const named = configs.find(
-        (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === embedderName.toLowerCase()
-      );
-      if (named) return named.id;
-      const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
-      throw new Error(
-        `Embedding config "${embedderName}" not found in the organization. Available embedding configs: ${available || "(none)"}. Fix knowledge.<name>.rag.embedder, or omit it to use the org default.`
-      );
-    }
-    throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
-  }
-  /**
-   * Resolve "the org default embedder" to a concrete EmbeddingConfig id.
-   *
-   * `default-embedding-config/` is NOT a pointer to a selectable EmbeddingConfig
-   * row — it returns only `{model, task_type, api_key}` (no id). So we resolve by
-   * matching that default's embedding *model* to a config that uses it; if that is
-   * ambiguous or absent we fall back to the sole config, and only error when the
-   * choice is genuinely undecidable.
-   */
-  async resolveDefaultEmbedderId(configs) {
-    if (configs.length === 0) {
-      throw new Error(
-        "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder)."
-      );
-    }
-    const defaultConfig = await this.context.client.get("default-embedding-config/").catch(() => void 0);
-    const defaultModelId = defaultConfig?.model;
-    if (defaultModelId !== void 0) {
-      const byModel = configs.find((config2) => config2.model === defaultModelId);
-      if (byModel) return byModel.id;
-    }
-    if (configs.length === 1) return configs[0].id;
-    const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
-    throw new Error(
-      `Cannot pick a default embedding config: the organization has several and none matches the configured default embedding model. Set knowledge.<name>.rag.embedder to one of: ${available}.`
-    );
-  }
-};
-function isSymbolicRefLike(value) {
-  return typeof value.$ref === "string" && Object.keys(value).length === 1;
-}
-
-// src/pusher/graph.ts
-init_graphs();
-
 // src/graph/bulk-save.ts
 function resolveNodeRef(uuid2, allNodes, idMap) {
   if (!uuid2) return { backendId: null, tempId: null };
@@ -34311,7 +33909,7 @@ function toCdtTableState(dto, uuidOf) {
     }
   };
 }
-function buildRemoteState(dto) {
+function buildUuidByBackendId(dto) {
   const uuidByBackendId = /* @__PURE__ */ new Map();
   const register = (type, items) => {
     for (const item of items ?? []) {
@@ -34333,6 +33931,21 @@ function buildRemoteState(dto) {
   register("decision-table", dto.decision_table_node_list);
   register("note", dto.graph_note_list);
   register("classification-decision-table", dto.classification_decision_table_node_list);
+  return uuidByBackendId;
+}
+function collectOrphanEdgeIds(dto) {
+  const uuidByBackendId = buildUuidByBackendId(dto);
+  const orphans = [];
+  for (const edge of dto.edge_list ?? []) {
+    if (edge.id == null) continue;
+    const sourceDangling = edge.start_node_id != null && !uuidByBackendId.has(edge.start_node_id);
+    const targetDangling = edge.end_node_id != null && !uuidByBackendId.has(edge.end_node_id);
+    if (sourceDangling || targetDangling) orphans.push(edge.id);
+  }
+  return orphans;
+}
+function buildRemoteState(dto) {
+  const uuidByBackendId = buildUuidByBackendId(dto);
   const uuidOf = (backendId) => backendId != null ? uuidByBackendId.get(backendId) ?? null : null;
   const nodes = [
     ...(dto.start_node_list ?? []).map(
@@ -34487,7 +34100,467 @@ function buildRemoteState(dto) {
   return { nodes, edges };
 }
 
+// src/api/storage.ts
+var StorageApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  /** Resolve an org-storage file path (e.g. "reports/summary.md") to its backend id. */
+  async resolveFileId(filePath) {
+    const normalized = filePath.replace(/^\/+/, "");
+    const lastSlash = normalized.lastIndexOf("/");
+    const directory = lastSlash === -1 ? "" : normalized.slice(0, lastSlash);
+    const fileName = lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
+    const listing = await this.client.get("storage/list/", {
+      query: { path: directory }
+    });
+    const match = listing.items.find((item) => item.type === "file" && item.name === fileName);
+    if (!match || match.id == null) {
+      const available = listing.items.filter((item) => item.type === "file").map((item) => item.name).slice(0, 15).join(", ");
+      throw new Error(
+        `Storage file "${filePath}" not found in org storage. Files in "${directory || "/"}": ${available || "none"}.`
+      );
+    }
+    return match.id;
+  }
+};
+
+// src/api/legacy-crew.ts
+function unwrap7(response) {
+  return Array.isArray(response) ? response : response.results;
+}
+var LegacyCrewApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async listCrews() {
+    return unwrap7(await this.client.get("crews/", { query: { limit: 1e3 } }));
+  }
+  async createCrew(request) {
+    return this.client.post("crews/", { body: request });
+  }
+};
+
+// src/pusher/entities.ts
+import { readFileSync as readFileSync3 } from "node:fs";
+var EntityPusher = class {
+  constructor(context) {
+    this.context = context;
+    this.llm = new LlmApi(context.client);
+    this.tools = new ToolsApi(context.client);
+    this.knowledge = new KnowledgeApi(context.client);
+    this.surfaces = new SurfacesApi(context.client);
+    this.agentDefinitions = new AgentDefinitionsApi(context.client);
+    this.crews = new LegacyCrewApi(context.client);
+    this.storage = new StorageApi(context.client);
+  }
+  context;
+  llm;
+  tools;
+  knowledge;
+  surfaces;
+  agentDefinitions;
+  crews;
+  storage;
+  modelIdByName = null;
+  builtinToolIdByName = null;
+  /**
+   * @param options.sections When set, only entity plans whose `section` is in
+   * this list are pushed — the rest are skipped entirely. Used by
+   * provision_knowledge to materialize just `llm_configs` + `knowledge` ahead of
+   * the full flow. Omitting `options` pushes everything (the default push_flow
+   * behavior, unchanged).
+   */
+  async push(artifact, lock, options) {
+    const idMap = /* @__PURE__ */ new Map();
+    const actions = [];
+    let currentLock = lock;
+    for (const plan of artifact.entities) {
+      if (options?.sections && !options.sections.includes(plan.section)) {
+        continue;
+      }
+      if (plan.action === "resolve-existing") {
+        const backendId2 = await this.resolveExisting(plan);
+        idMap.set(plan.key, backendId2);
+        actions.push({ key: plan.key, kind: plan.kind, action: "resolved-existing", backendId: backendId2 });
+        continue;
+      }
+      const resolvedPayload = await this.resolvePayload(plan.payload ?? {}, idMap, plan.key);
+      const hash = plan.contentHash ?? contentHash(plan.payload ?? {});
+      const lockEntry = getEntity(currentLock, plan.section, plan.name);
+      let backendId;
+      let action;
+      if (lockEntry && !isEntityDirty(currentLock, plan.section, plan.name, hash)) {
+        backendId = lockEntry.backendId;
+        action = "reused";
+      } else if (lockEntry) {
+        backendId = await this.updateEntity(plan, lockEntry.backendId, resolvedPayload);
+        action = "updated";
+      } else {
+        backendId = await this.createEntity(plan, resolvedPayload);
+        action = "created";
+      }
+      currentLock = setEntity(currentLock, plan.section, plan.name, { backendId, contentHash: hash });
+      idMap.set(plan.key, backendId);
+      actions.push({ key: plan.key, kind: plan.kind, action, backendId });
+      if (plan.kind === "knowledge_collection") {
+        currentLock = await this.pushCollectionExtras(plan, backendId, idMap, currentLock);
+      }
+    }
+    return { idMap, lock: currentLock, actions };
+  }
+  /**
+   * Substitute every placeholder kind the compiler emits:
+   * `{$ref}` (entity pushed earlier in this walk), `{$model}` (LLM model by name),
+   * `{$env}` (environment variable — secrets never live in flow source),
+   * `{$tool}` (built-in catalog tool by name), `{$storageFile}` (org storage path).
+   */
+  async resolvePayload(payload, idMap, forKey) {
+    const withTemplates = await this.substituteTemplateRefs(payload);
+    return substituteRefs(withTemplates, (refKey) => {
+      const id = idMap.get(refKey);
+      if (id === void 0) {
+        throw new Error(
+          `Internal ordering error: "${forKey}" references "${refKey}" before it was pushed. This is a compiler dependency-ordering bug.`
+        );
+      }
+      return id;
+    });
+  }
+  async substituteTemplateRefs(value) {
+    if (isModelRef(value)) {
+      return this.resolveModelId(value.$model, value.provider);
+    }
+    if (isEnvRef(value)) {
+      const resolved = process.env[value.$env];
+      if (resolved === void 0) {
+        throw new Error(
+          `Environment variable "${value.$env}" is not set for the MCP server. Secrets referenced in flow source ({$env}) must be provided in the plugin environment.`
+        );
+      }
+      return resolved;
+    }
+    if (isBuiltinToolRef(value)) {
+      return this.resolveBuiltinToolId(value.$tool);
+    }
+    if (isStorageFileRef(value)) {
+      return this.storage.resolveFileId(value.$storageFile);
+    }
+    if (Array.isArray(value)) {
+      return Promise.all(value.map((item) => this.substituteTemplateRefs(item)));
+    }
+    if (typeof value === "object" && value !== null && !isSymbolicRefLike(value)) {
+      const result = {};
+      for (const [key, entry] of Object.entries(value)) {
+        result[key] = await this.substituteTemplateRefs(entry);
+      }
+      return result;
+    }
+    return value;
+  }
+  async resolveBuiltinToolId(toolName) {
+    if (!this.builtinToolIdByName) {
+      const builtinTools = await this.tools.listBuiltinTools();
+      this.builtinToolIdByName = /* @__PURE__ */ new Map();
+      for (const tool of builtinTools) {
+        this.builtinToolIdByName.set(tool.name.toLowerCase(), tool.id);
+        if (tool.name_alias) this.builtinToolIdByName.set(tool.name_alias.toLowerCase(), tool.id);
+      }
+    }
+    const id = this.builtinToolIdByName.get(toolName.toLowerCase());
+    if (id === void 0) {
+      throw new Error(
+        `Built-in tool "${toolName}" not found. Use list_tools to see the available catalog.`
+      );
+    }
+    return id;
+  }
+  async resolveModelId(modelName, providerHint) {
+    if (!this.modelIdByName) {
+      const [models, providers] = await Promise.all([this.llm.listModels(), this.llm.listProviders()]);
+      const providerName = new Map(providers.map((provider) => [provider.id, provider.name.toLowerCase()]));
+      this.modelIdByName = /* @__PURE__ */ new Map();
+      for (const model of models) {
+        const key = model.name.toLowerCase();
+        this.modelIdByName.set(`${providerName.get(model.llm_provider) ?? ""}/${key}`, model.id);
+        if (!this.modelIdByName.has(key)) this.modelIdByName.set(key, model.id);
+      }
+    }
+    const id = (providerHint ? this.modelIdByName.get(`${providerHint.toLowerCase()}/${modelName.toLowerCase()}`) : void 0) ?? this.modelIdByName.get(modelName.toLowerCase());
+    if (id === void 0) {
+      const available = [...this.modelIdByName.keys()].filter((key) => !key.includes("/")).slice(0, 20).join(", ");
+      throw new Error(
+        `LLM model "${modelName}" not found on the backend. Available models include: ${available}. Use list_llm_models to see all options.`
+      );
+    }
+    return id;
+  }
+  async resolveExisting(plan) {
+    const remoteName = plan.remoteName ?? plan.name;
+    const found = await this.lookupByName(plan, remoteName);
+    if (found === void 0) {
+      throw new Error(
+        `existing: "${remoteName}" (${plan.kind}) was not found in the active organization. Check the name with the matching list_* tool, or define it locally in the flow source.`
+      );
+    }
+    return found;
+  }
+  async lookupByName(plan, remoteName) {
+    const nameMatches = (candidate) => (candidate.name ?? "").toLowerCase() === remoteName.toLowerCase();
+    switch (plan.kind) {
+      case "llm_config": {
+        const configs = await this.llm.listConfigs();
+        return configs.find((config2) => config2.custom_name.toLowerCase() === remoteName.toLowerCase())?.id;
+      }
+      case "tool_config":
+        return (await this.tools.listToolConfigs()).find(nameMatches)?.id;
+      case "python_code_tool":
+        return (await this.tools.listPythonCodeTools()).find(nameMatches)?.id;
+      case "mcp_tool":
+        return (await this.tools.listMcpTools()).find(nameMatches)?.id;
+      case "knowledge_collection": {
+        const collections = await this.knowledge.listCollections();
+        const match = collections.find(
+          (collection) => collection.collection_name.toLowerCase() === remoteName.toLowerCase()
+        );
+        return match?.collection_id ?? match?.id;
+      }
+      case "surface":
+        return (await this.surfaces.list()).find(nameMatches)?.id;
+      case "agent_definition":
+        return (await this.agentDefinitions.list()).find(nameMatches)?.id;
+      case "crew":
+        return (await this.crews.listCrews()).find(nameMatches)?.id;
+      default:
+        return void 0;
+    }
+  }
+  async createEntity(plan, payload) {
+    logger.info(`Creating ${plan.kind} "${plan.name}"`);
+    switch (plan.kind) {
+      case "llm_config":
+        return (await this.llm.createConfig(payload)).id;
+      case "tool_config":
+        return (await this.tools.createToolConfig(payload)).id;
+      case "python_code_tool":
+        return (await this.tools.createPythonCodeTool(payload)).id;
+      case "mcp_tool":
+        return (await this.tools.createMcpTool(payload)).id;
+      case "knowledge_collection": {
+        const collectionName = payload.collection_name ?? plan.name;
+        const existingId = await this.lookupByName(plan, collectionName);
+        if (existingId !== void 0) {
+          logger.info(`Reusing existing collection "${collectionName}" (#${existingId})`);
+          return existingId;
+        }
+        const collection = await this.knowledge.createCollection(collectionName);
+        const id = collection.collection_id ?? collection.id;
+        if (id === void 0) {
+          throw new Error("Backend did not return an id for the created collection.");
+        }
+        return id;
+      }
+      case "surface":
+        return (await this.surfaces.create(payload)).id;
+      case "agent_definition":
+        return (await this.agentDefinitions.create(payload)).id;
+      case "crew":
+        return (await this.crews.createCrew(payload)).id;
+      default:
+        throw new Error(`Unknown entity kind: ${plan.kind}`);
+    }
+  }
+  async updateEntity(plan, backendId, payload) {
+    logger.info(`Updating ${plan.kind} "${plan.name}" (#${backendId})`);
+    switch (plan.kind) {
+      case "llm_config":
+        await this.llm.updateConfig(backendId, payload);
+        return backendId;
+      case "python_code_tool":
+        await this.tools.updatePythonCodeTool(backendId, payload);
+        return backendId;
+      case "mcp_tool":
+        await this.tools.updateMcpTool(backendId, payload);
+        return backendId;
+      case "surface":
+        await this.surfaces.update(backendId, payload);
+        return backendId;
+      case "agent_definition":
+        await this.agentDefinitions.update(backendId, payload);
+        return backendId;
+      case "knowledge_collection":
+        return backendId;
+      case "tool_config":
+      case "crew":
+        logger.warn(`Update for ${plan.kind} is not supported \u2014 keeping existing #${backendId} unchanged.`);
+        return backendId;
+      default:
+        throw new Error(`Unknown entity kind: ${plan.kind}`);
+    }
+  }
+  /** Upload new/changed documents (content-hashed) and attach + index the RAG strategy once. */
+  async pushCollectionExtras(plan, collectionId, idMap, lock) {
+    let currentLock = lock;
+    const pendingUploads = [];
+    for (const documentPath of plan.documents ?? []) {
+      const hash = contentHash(readFileSync3(documentPath, "utf8"));
+      const existing = getDocument(currentLock, documentPath);
+      if (existing?.hash === hash && existing.uploadedTo === collectionId) {
+        continue;
+      }
+      pendingUploads.push(documentPath);
+      currentLock = setDocument(currentLock, documentPath, { hash, uploadedTo: collectionId });
+    }
+    if (pendingUploads.length > 0) {
+      logger.info(`Uploading ${pendingUploads.length} document(s) to collection #${collectionId}`);
+      await this.knowledge.uploadDocuments(collectionId, pendingUploads);
+    }
+    if (plan.rag) {
+      const ragKey = `${plan.name}#rag`;
+      const ragEntry = getEntity(currentLock, plan.section, ragKey);
+      const ragHash = contentHash(plan.rag);
+      if (!ragEntry || isEntityDirty(currentLock, plan.section, ragKey, ragHash)) {
+        const embedderId = await this.resolveRagRef(plan.rag.embedder, idMap);
+        let ragId;
+        if (plan.rag.strategy === "naive") {
+          ragId = await this.knowledge.createNaiveRag(collectionId, embedderId);
+          await this.applyNaiveChunking(ragId, plan.rag.document_chunking);
+        } else {
+          const llmId = await this.resolveRagRef(plan.rag.llm ?? 0, idMap);
+          ragId = await this.knowledge.createGraphRag(collectionId, embedderId, llmId);
+          if (plan.rag.index_config !== void 0) {
+            await this.knowledge.updateGraphRagIndexConfig(ragId, plan.rag.index_config);
+          }
+        }
+        await this.knowledge.startIndexing(ragId, plan.rag.strategy);
+        logger.info(`Attached ${plan.rag.strategy} RAG (#${ragId}) to collection #${collectionId}; indexing started`);
+        currentLock = setEntity(currentLock, plan.section, ragKey, { backendId: ragId, contentHash: ragHash });
+      } else if (pendingUploads.length > 0) {
+        if (plan.rag.strategy === "naive") {
+          await this.applyNaiveChunking(ragEntry.backendId, plan.rag.document_chunking);
+        }
+        await this.knowledge.startIndexing(ragEntry.backendId, plan.rag.strategy);
+        logger.info(`Re-indexing collection #${collectionId} after document changes`);
+      }
+    }
+    return currentLock;
+  }
+  /** Config-row init + author chunking for a naive RAG; see KnowledgeApi.applyNaiveDocumentChunking. */
+  async applyNaiveChunking(naiveRagId, chunking) {
+    const updated = await this.knowledge.applyNaiveDocumentChunking(naiveRagId, chunking);
+    if (updated > 0) {
+      logger.info(
+        `Applied chunking (size=${chunking?.chunk_size ?? "default"}, overlap=${chunking?.chunk_overlap ?? "default"}) to ${updated} document config(s) of naive RAG #${naiveRagId}`
+      );
+    }
+  }
+  async resolveRagRef(ref, idMap) {
+    if (typeof ref === "number") return ref;
+    const resolved = idMap.get(ref.$ref);
+    if (resolved !== void 0) return resolved;
+    if (ref.$ref.startsWith("embedders.")) {
+      const embedderName = ref.$ref.slice("embedders.".length).replace(/^existing:/, "");
+      const configs = await this.llm.listEmbeddingConfigs();
+      if (embedderName === "default") {
+        return this.resolveDefaultEmbedderId(configs);
+      }
+      const named = configs.find(
+        (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === embedderName.toLowerCase()
+      );
+      if (named) return named.id;
+      const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+      throw new Error(
+        `Embedding config "${embedderName}" not found in the organization. Available embedding configs: ${available || "(none)"}. Fix knowledge.<name>.rag.embedder, or omit it to use the org default.`
+      );
+    }
+    throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
+  }
+  /**
+   * Resolve "the org default embedder" to a concrete EmbeddingConfig id.
+   *
+   * `default-embedding-config/` is NOT a pointer to a selectable EmbeddingConfig
+   * row — it returns only `{model, task_type, api_key}` (no id). So we resolve by
+   * matching that default's embedding *model* to a config that uses it; if that is
+   * ambiguous or absent we fall back to the sole config, and only error when the
+   * choice is genuinely undecidable.
+   */
+  async resolveDefaultEmbedderId(configs) {
+    if (configs.length === 0) {
+      throw new Error(
+        "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder)."
+      );
+    }
+    const defaultConfig = await this.context.client.get("default-embedding-config/").catch(() => void 0);
+    const defaultModelId = defaultConfig?.model;
+    if (defaultModelId !== void 0) {
+      const byModel = configs.find((config2) => config2.model === defaultModelId);
+      if (byModel) return byModel.id;
+    }
+    if (configs.length === 1) return configs[0].id;
+    const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+    throw new Error(
+      `Cannot pick a default embedding config: the organization has several and none matches the configured default embedding model. Set knowledge.<name>.rag.embedder to one of: ${available}.`
+    );
+  }
+};
+function isSymbolicRefLike(value) {
+  return typeof value.$ref === "string" && Object.keys(value).length === 1;
+}
+
+// src/pusher/flow-refs.ts
+init_graphs();
+import { resolve as resolvePath } from "node:path";
+var FLOWS_PREFIX = "flows.";
+var EXISTING_PREFIX = "existing:";
+async function resolveFlowRefs(artifact, flowDir, context) {
+  const resolved = /* @__PURE__ */ new Map();
+  const flowKeys = [...collectRefs(artifact.graph)].filter((key) => key.startsWith(FLOWS_PREFIX));
+  if (flowKeys.length === 0) return resolved;
+  const graphs = new GraphsApi(context.client);
+  let remoteGraphs = null;
+  for (const key of flowKeys) {
+    const target = key.slice(FLOWS_PREFIX.length);
+    if (target.startsWith(EXISTING_PREFIX)) {
+      const remoteName = target.slice(EXISTING_PREFIX.length);
+      remoteGraphs ??= await graphs.listLight();
+      const matches = remoteGraphs.filter((graph) => graph.name === remoteName);
+      if (matches.length === 0) {
+        const available = remoteGraphs.map((graph) => `"${graph.name}"`).join(", ");
+        throw new Error(
+          `Subgraph node references graph { existing: "${remoteName}" }, which does not exist in this organization. Available graphs: ${available || "(none)"}.`
+        );
+      }
+      if (matches.length > 1) {
+        throw new Error(
+          `Subgraph node references graph { existing: "${remoteName}" }, but ${matches.length} graphs share that name (ids ${matches.map((graph) => graph.id).join(", ")}). Rename one, or reference the sibling flow directory instead.`
+        );
+      }
+      resolved.set(key, matches[0].id);
+      logger.info(`Subgraph ref { existing: "${remoteName}" } \u2192 graph #${matches[0].id}`);
+      continue;
+    }
+    const siblingDir = resolvePath(flowDir, "..", target);
+    const siblingLock = await readLock(siblingDir);
+    if (!siblingLock) {
+      throw new Error(
+        `Subgraph node references sibling flow "${target}", but no flow.lock.json was found at ${siblingDir}. Push that flow first, or reference the remote graph with { existing: "<graph name>" }.`
+      );
+    }
+    if (siblingLock.graphId === null) {
+      throw new Error(
+        `Subgraph node references sibling flow "${target}", but its flow.lock.json has no graphId \u2014 it has never been pushed. Push ${siblingDir} first.`
+      );
+    }
+    resolved.set(key, siblingLock.graphId);
+    logger.info(`Subgraph ref "${target}" \u2192 graph #${siblingLock.graphId}`);
+  }
+  return resolved;
+}
+
 // src/pusher/graph.ts
+init_graphs();
 var NODE_SECTION = "nodes";
 var CONDITIONAL_EDGE_SECTION = "conditional_edges";
 var GraphPusher = class {
@@ -34502,6 +34575,11 @@ var GraphPusher = class {
     const desired = substituteRefs(artifact.graph, (refKey) => {
       const id = idMap.get(refKey);
       if (id === void 0) {
+        if (refKey.startsWith("flows.")) {
+          throw new Error(
+            `Graph references subgraph "${refKey}" which was not resolved \u2014 the caller must merge resolveFlowRefs() into the idMap before pushing the graph (see pusher/flow-refs.ts).`
+          );
+        }
         throw new Error(`Graph references "${refKey}" which was not pushed \u2014 compiler ordering bug.`);
       }
       return id;
@@ -34527,14 +34605,20 @@ var GraphPusher = class {
       }
     }
     const remote = buildRemoteState(remoteDto);
-    const remoteBackendIds = new Set(
-      remote.nodes.map((node) => node.backendId).filter((id) => id != null)
-    );
+    const remoteTypeByBackendId = /* @__PURE__ */ new Map();
+    for (const node of remote.nodes) {
+      if (node.backendId != null) remoteTypeByBackendId.set(node.backendId, node.type);
+    }
     for (const node of desired.nodes) {
       const entry = getEntity(currentLock, NODE_SECTION, node.node_name);
-      if (entry && remoteBackendIds.has(entry.backendId)) {
+      if (entry && remoteTypeByBackendId.get(entry.backendId) === node.type) {
         node.backendId = entry.backendId;
       } else if (entry) {
+        if (remoteTypeByBackendId.has(entry.backendId)) {
+          logger.info(
+            `Node "${node.node_name}" changed type (${remoteTypeByBackendId.get(entry.backendId)} -> ${node.type}) \u2014 it will be recreated and the lockfile remapped to the new backend id.`
+          );
+        }
         currentLock = removeEntity(currentLock, NODE_SECTION, node.node_name);
       }
     }
@@ -34544,6 +34628,15 @@ var GraphPusher = class {
       remote,
       saveVersion: remoteDto.save_version
     });
+    const orphanEdgeIds = collectOrphanEdgeIds(remoteDto);
+    if (orphanEdgeIds.length > 0) {
+      const alreadyDeleting = new Set(payload.deleted.edge_ids);
+      const extra = orphanEdgeIds.filter((id) => !alreadyDeleting.has(id));
+      if (extra.length > 0) {
+        payload.deleted.edge_ids.push(...extra);
+        logger.info(`Reaping ${extra.length} orphaned edge(s) pointing at deleted nodes: ${extra.join(", ")}`);
+      }
+    }
     const response = await this.graphs.bulkSave(remoteDto.id, payload);
     const mapping = applySaveResponse(desired, remote, response);
     let created = 0;
@@ -34633,6 +34726,63 @@ var GraphPusher = class {
     return currentLock;
   }
 };
+
+// src/pusher/restore.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+function prepareRestoreState(dto) {
+  const state = buildRemoteState(dto);
+  const warnings = [];
+  const conditionalEdges = Array.isArray(dto.conditional_edge_list) ? dto.conditional_edge_list.length : 0;
+  if (conditionalEdges > 0) {
+    warnings.push(
+      `${conditionalEdges} conditional edge(s) were NOT restored \u2014 they use a dedicated endpoint that bulk-save does not cover. Recreate them by hand.`
+    );
+  }
+  let pythonCodeRows = 0;
+  let agentTasks = 0;
+  for (const node of state.nodes) {
+    node.backendId = null;
+    const data = node.data;
+    if (data == null) continue;
+    if (node.type === "python") {
+      const code = data;
+      if (code.id !== void 0) {
+        delete code.id;
+        pythonCodeRows += 1;
+      }
+    }
+    if (node.type === "agent") {
+      const tasks = data.tasks;
+      if (Array.isArray(tasks)) {
+        for (const task of tasks) {
+          if (task.id != null) {
+            delete task.id;
+            agentTasks += 1;
+          }
+        }
+      }
+    }
+  }
+  for (const edge of state.edges) edge.backendId = null;
+  const ids = /* @__PURE__ */ new Set();
+  for (const node of state.nodes) {
+    ids.add(node.id);
+    const tasks = node.data?.tasks;
+    if (Array.isArray(tasks)) {
+      for (const task of tasks) if (task.tempId) ids.add(task.tempId);
+    }
+  }
+  const ordered = [...ids].sort((left, right) => right.length - left.length);
+  const fresh = new Map(ordered.map((old) => [old, randomUUID2()]));
+  let json = JSON.stringify(state);
+  for (const old of ordered) json = json.split(old).join(fresh.get(old));
+  return {
+    state: JSON.parse(json),
+    detached: { python_code_rows: pythonCodeRows, agent_tasks: agentTasks },
+    remappedUuids: ordered.length,
+    warnings
+  };
+}
 
 // src/tools/flow.tools.ts
 var FLOW_TEMPLATE = `# EpicStaff flow source \u2014 edit and push with push_flow.
@@ -34747,6 +34897,172 @@ function registerFlowTools(server, context) {
     })
   );
   server.registerTool(
+    "dump_graph",
+    {
+      title: "Dump a graph's complete raw backend JSON (faithful backup)",
+      description: "Write a graph's ENTIRE backend representation to a local .json file, verbatim. Unlike pull_flow \u2014 which projects the graph through the flow-source compiler and silently discards every field flow source cannot express (end-node output_map, classification-decision-table prompt_configs and route codes, python stream_config/test_input, task output_schema, error routes) \u2014 this filters nothing. That makes it the only faithful snapshot of a graph, and the right thing to take before editing a production flow. Read-only against the backend: it never writes to EpicStaff. The output is an archival record for diffing and manual restore, not a pushable flow source.",
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the graph to dump"),
+        output_path: external_exports.string().describe("Absolute path of the .json file to write (parent dirs are created)")
+      }
+    },
+    async ({ graph_id, output_path }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      if (!isAbsolute(output_path)) {
+        throw new Error("output_path must be an absolute path to a .json file.");
+      }
+      const dto = await new GraphsApi(context.client).get(graph_id);
+      const body = `${JSON.stringify(dto, null, 2)}
+`;
+      mkdirSync2(dirname(output_path), { recursive: true });
+      writeFileSync2(output_path, body, "utf8");
+      const nodes = {};
+      for (const [key, value] of Object.entries(dto)) {
+        if (/_(node_)?list$/.test(key) && Array.isArray(value) && value.length > 0) {
+          nodes[key] = value.length;
+        }
+      }
+      const lossyFieldsCaptured = [];
+      const seen = /* @__PURE__ */ new Set();
+      const walk = (value) => {
+        if (Array.isArray(value)) {
+          for (const item of value) walk(item);
+          return;
+        }
+        if (value === null || typeof value !== "object") return;
+        for (const [key, child] of Object.entries(value)) {
+          if (["output_map", "prompt_configs", "stream_config", "output_schema", "test_input"].includes(key) && child != null && !(Array.isArray(child) && child.length === 0) && !(typeof child === "object" && !Array.isArray(child) && Object.keys(child).length === 0)) {
+            if (!seen.has(key)) {
+              seen.add(key);
+              lossyFieldsCaptured.push(key);
+            }
+          }
+          walk(child);
+        }
+      };
+      walk(dto);
+      return {
+        output_path,
+        graph_id,
+        graph_name: dto.name,
+        save_version: dto.save_version,
+        bytes: body.length,
+        nodes,
+        edges: Array.isArray(dto.edge_list) ? dto.edge_list.length : 0,
+        conditional_edges: Array.isArray(dto.conditional_edge_list) ? dto.conditional_edge_list.length : 0,
+        lossyFieldsCaptured: lossyFieldsCaptured.sort(),
+        next: "Archival snapshot \u2014 restore by hand in the editor, or diff against a later dump. pull_flow remains the way to get an editable flow source (lossy by design)."
+      };
+    })
+  );
+  server.registerTool(
+    "restore_graph",
+    {
+      title: "Restore a dump_graph JSON into a NEW graph (faithful copy)",
+      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python stream_config/test_input, task output_schema, and error routes. Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
+      inputSchema: {
+        dump_path: external_exports.string().describe("Absolute path of a JSON file previously written by dump_graph"),
+        name: external_exports.string().optional().describe("Name for the new graph (required unless target_graph_id is given)"),
+        description: external_exports.string().optional().describe("Description for the new graph"),
+        target_graph_id: external_exports.number().int().optional().describe(
+          "OVERWRITE an existing graph instead of creating one: every current node/edge is deleted and replaced by the dump in a single bulk-save. Destructive \u2014 dump the target first."
+        )
+      }
+    },
+    async ({ dump_path, name, description, target_graph_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      context.org.requireActiveOrg();
+      if (!isAbsolute(dump_path)) throw new Error("dump_path must be an absolute path.");
+      if (!existsSync3(dump_path)) throw new Error(`No dump file at ${dump_path} \u2014 run dump_graph first.`);
+      let dto;
+      try {
+        dto = JSON.parse(readFileSync4(dump_path, "utf8"));
+      } catch (error2) {
+        throw new Error(`${dump_path} is not valid JSON: ${error2 instanceof Error ? error2.message : error2}`);
+      }
+      if (dto == null || typeof dto !== "object" || !Array.isArray(dto.edge_list)) {
+        throw new Error(`${dump_path} does not look like a dump_graph snapshot (no edge_list).`);
+      }
+      const { state, detached, remappedUuids, warnings } = prepareRestoreState(dto);
+      const source = dto;
+      const graphs = new GraphsApi(context.client);
+      let targetId;
+      let targetName;
+      let baseSaveVersion;
+      let remote;
+      let createdGraph = false;
+      let replaced = 0;
+      if (target_graph_id != null) {
+        const targetDto = await graphs.get(target_graph_id);
+        remote = buildRemoteState(targetDto);
+        targetId = target_graph_id;
+        targetName = targetDto.name;
+        baseSaveVersion = targetDto.save_version;
+        replaced = remote.nodes.length;
+        if (target_graph_id === dto.id) {
+          warnings.push(`Target graph ${target_graph_id} IS the dump's source \u2014 this resets it to the snapshot.`);
+        }
+      } else {
+        if (!name) throw new Error("name is required when target_graph_id is not given.");
+        const shell = await graphs.create({
+          name,
+          description: description ?? `Faithful restore of "${dto.name}" (graph ${dto.id}) @ save_version ${dto.save_version}.`,
+          // Carry the source's own graph-level metadata rather than a fresh scaffold,
+          // so a dump of the restore diffs clean against the dump it came from.
+          metadata: source.metadata ?? {},
+          ...source.tags && source.tags.length > 0 ? { tags: source.tags } : {}
+        });
+        targetId = shell.id;
+        targetName = name;
+        baseSaveVersion = shell.save_version;
+        remote = { nodes: [], edges: [] };
+        createdGraph = true;
+      }
+      let saved;
+      try {
+        saved = await graphs.bulkSave(
+          targetId,
+          buildBulkSavePayload({ graphId: targetId, desired: state, remote, saveVersion: baseSaveVersion })
+        );
+      } catch (error2) {
+        const cause = error2 instanceof Error ? error2.message : String(error2);
+        throw new Error(
+          createdGraph ? `Graph shell #${targetId} ("${targetName}") was created but bulk-save failed, so it is empty \u2014 delete it and retry. Cause: ${cause}` : `Overwrite of graph #${targetId} ("${targetName}") failed; it is unchanged. Cause: ${cause}`
+        );
+      }
+      const labelIds = source.label_ids ?? [];
+      let labelsCopied = false;
+      if (labelIds.length > 0 && createdGraph) {
+        try {
+          await context.client.patch(`graphs/${targetId}/`, {
+            body: { save_version: saved.save_version, label_ids: labelIds }
+          });
+          labelsCopied = true;
+        } catch (error2) {
+          warnings.push(
+            `Could not copy label_ids ${JSON.stringify(labelIds)}: ${error2 instanceof Error ? error2.message : String(error2)}. Set them by hand if you need them.`
+          );
+        }
+      }
+      return {
+        graphId: targetId,
+        name: targetName,
+        mode: createdGraph ? "created" : "overwritten",
+        replacedNodes: replaced,
+        saveVersion: saved.save_version,
+        labels: { source: labelIds, copied: labelsCopied },
+        restoredFrom: { graph_id: dto.id, graph_name: dto.name, save_version: dto.save_version, dump_path },
+        nodes: state.nodes.length,
+        edges: state.edges.length,
+        detached,
+        remappedUuids,
+        warnings,
+        openInEditor: `${context.config.apiUrl.replace(/\/api\/$/, "")}/flows/${targetId}`,
+        next: "Verify with dump_graph on the new graph and diff it against the source dump."
+      };
+    })
+  );
+  server.registerTool(
     "diff_flow",
     {
       title: "Diff flow vs remote (dry run)",
@@ -34815,6 +35131,10 @@ function registerFlowTools(server, context) {
       const entityResult = await entityPusher.push(artifact, lock);
       lock = entityResult.lock;
       await writeLock(flow_dir, lock);
+      const flowRefs = await resolveFlowRefs(artifact, flow_dir, context);
+      for (const [refKey, graphId] of flowRefs) {
+        entityResult.idMap.set(refKey, graphId);
+      }
       const graphPusher = new GraphPusher(context);
       const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, {
         force,
@@ -35575,7 +35895,7 @@ function registerReferenceTools(server, context) {
 
 // src/tools/ui.tools.ts
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import { dirname as dirname2, isAbsolute as isAbsolute2 } from "node:path";
 init_graphs();
 
 // src/ui/chat-ui.ts
@@ -35895,7 +36215,7 @@ function registerUiTools(server, context) {
       }
     },
     async ({ graph_id, output_path, title, subtitle, input_path, reply_path, reset_variables, welcome, embed_api_key }) => runTool(async () => {
-      if (!isAbsolute(output_path)) {
+      if (!isAbsolute2(output_path)) {
         throw new Error("output_path must be an absolute path to a .html file.");
       }
       const apiKey = await context.auth.ensureAuthenticated();
@@ -35918,7 +36238,7 @@ function registerUiTools(server, context) {
         resetVariables: reset_variables,
         welcome
       });
-      mkdirSync3(dirname(output_path), { recursive: true });
+      mkdirSync3(dirname2(output_path), { recursive: true });
       writeFileSync3(output_path, html);
       return {
         output_path,
@@ -36593,7 +36913,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "3.0.0"
+      version: "3.0.1_legacy"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
