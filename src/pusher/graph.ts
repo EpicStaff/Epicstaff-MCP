@@ -13,7 +13,7 @@ import {
 } from '../flow-source/lockfile.js';
 import type { GraphState } from '../graph/graph-state.js';
 import { buildBulkSavePayload } from '../graph/bulk-save.js';
-import { buildRemoteState } from '../graph/remote-state.js';
+import { buildRemoteState, collectOrphanEdgeIds } from '../graph/remote-state.js';
 import { applySaveResponse } from '../graph/temp-id.js';
 import type { GraphDto } from '../models/graph.js';
 import { logger } from '../util/logger.js';
@@ -63,6 +63,12 @@ export class GraphPusher {
     const desired = substituteRefs(artifact.graph, (refKey) => {
       const id = idMap.get(refKey);
       if (id === undefined) {
+        if (refKey.startsWith('flows.')) {
+          throw new Error(
+            `Graph references subgraph "${refKey}" which was not resolved — the caller must merge ` +
+              `resolveFlowRefs() into the idMap before pushing the graph (see pusher/flow-refs.ts).`,
+          );
+        }
         throw new Error(`Graph references "${refKey}" which was not pushed — compiler ordering bug.`);
       }
       return id;
@@ -100,17 +106,32 @@ export class GraphPusher {
       }
     }
 
-    // 4. Give desired nodes their known backend ids from the lockfile,
-    //    dropping stale entries whose backend node no longer exists remotely.
+    // 4. Give desired nodes their known backend ids from the lockfile, dropping
+    //    stale entries whose backend node no longer exists remotely — or whose
+    //    TYPE changed.
+    //
+    //    The type check matters: nodes are diffed per type group (see graph/diff.ts),
+    //    so changing a node's type is a delete+create on the backend, not an update.
+    //    Inheriting the old id here would make step 6 below take the `node.backendId ??`
+    //    branch and record the DEAD id in the lockfile, leaving the graph wired to a
+    //    node that no longer exists.
     const remote = buildRemoteState(remoteDto);
-    const remoteBackendIds = new Set(
-      remote.nodes.map((node) => node.backendId).filter((id): id is number => id != null),
-    );
+    const remoteTypeByBackendId = new Map<number, string>();
+    for (const node of remote.nodes) {
+      if (node.backendId != null) remoteTypeByBackendId.set(node.backendId, node.type);
+    }
     for (const node of desired.nodes) {
       const entry = getEntity(currentLock, NODE_SECTION, node.node_name);
-      if (entry && remoteBackendIds.has(entry.backendId)) {
+      if (entry && remoteTypeByBackendId.get(entry.backendId) === node.type) {
         node.backendId = entry.backendId;
       } else if (entry) {
+        if (remoteTypeByBackendId.has(entry.backendId)) {
+          logger.info(
+            `Node "${node.node_name}" changed type ` +
+              `(${remoteTypeByBackendId.get(entry.backendId)} -> ${node.type}) — ` +
+              'it will be recreated and the lockfile remapped to the new backend id.',
+          );
+        }
         currentLock = removeEntity(currentLock, NODE_SECTION, node.node_name);
       }
     }
@@ -122,6 +143,20 @@ export class GraphPusher {
       remote,
       saveVersion: remoteDto.save_version,
     });
+
+    // Reap edges whose endpoints no longer resolve to a node. buildRemoteState cannot
+    // represent them, so the edge differ never sees them and they would otherwise stay
+    // on the graph forever (see collectOrphanEdgeIds).
+    const orphanEdgeIds = collectOrphanEdgeIds(remoteDto);
+    if (orphanEdgeIds.length > 0) {
+      const alreadyDeleting = new Set(payload.deleted.edge_ids);
+      const extra = orphanEdgeIds.filter((id) => !alreadyDeleting.has(id));
+      if (extra.length > 0) {
+        payload.deleted.edge_ids.push(...extra);
+        logger.info(`Reaping ${extra.length} orphaned edge(s) pointing at deleted nodes: ${extra.join(', ')}`);
+      }
+    }
+
     const response = await this.graphs.bulkSave(remoteDto.id, payload);
 
     // 6. Round-trip new backend ids into the lockfile.

@@ -218,7 +218,8 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
   };
 }
 
-export function buildRemoteState(dto: GraphDto): GraphState {
+/** backend node id → client uuid, for every node type the graph can hold. */
+function buildUuidByBackendId(dto: GraphDto): Map<number, string> {
   const uuidByBackendId = new Map<number, string>();
   const register = (type: GraphNodeType, items: Array<{ id: number }> | undefined): void => {
     for (const item of items ?? []) {
@@ -241,6 +242,39 @@ export function buildRemoteState(dto: GraphDto): GraphState {
   register('decision-table', dto.decision_table_node_list);
   register('note', dto.graph_note_list);
   register('classification-decision-table', dto.classification_decision_table_node_list);
+
+  return uuidByBackendId;
+}
+
+/**
+ * Backend ids of edges whose endpoints no longer resolve to a node.
+ *
+ * `buildRemoteState` deliberately skips these (an edge with a dangling endpoint
+ * cannot be expressed as GraphEdgeState), which means they never reach the edge
+ * differ and can never be scheduled for deletion — they stay on the graph forever,
+ * invisible to the tooling. Left behind by anything that deletes a node without
+ * its edges; most commonly changing a node's TYPE, which is a delete+create.
+ *
+ * The push merges these into the bulk-save `deleted.edge_ids` list so they get
+ * reaped instead of accumulating.
+ */
+export function collectOrphanEdgeIds(dto: GraphDto): number[] {
+  const uuidByBackendId = buildUuidByBackendId(dto);
+  const orphans: number[] = [];
+  for (const edge of dto.edge_list ?? []) {
+    if (edge.id == null) continue;
+    // Only an endpoint that IS a backend id yet matches no node proves the node was
+    // deleted. A null/absent endpoint id means the edge is expressed some other way
+    // (e.g. unresolved temp-id refs) — uninterpretable, not orphaned, so leave it be.
+    const sourceDangling = edge.start_node_id != null && !uuidByBackendId.has(edge.start_node_id);
+    const targetDangling = edge.end_node_id != null && !uuidByBackendId.has(edge.end_node_id);
+    if (sourceDangling || targetDangling) orphans.push(edge.id);
+  }
+  return orphans;
+}
+
+export function buildRemoteState(dto: GraphDto): GraphState {
+  const uuidByBackendId = buildUuidByBackendId(dto);
 
   const uuidOf: UuidResolver = (backendId) => (backendId != null ? (uuidByBackendId.get(backendId) ?? null) : null);
 

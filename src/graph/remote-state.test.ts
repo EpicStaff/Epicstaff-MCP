@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { GraphDto } from '../models/graph.js';
 import { buildUuidToBackendIdMap, getConnectionDiff, getNodeDiff, type NodeDiffByType } from './diff.js';
 import type { GraphNodeBase, GraphNodeType, GraphState, TaskGraphNode } from './graph-state.js';
-import { buildRemoteState, remoteNodeUuid } from './remote-state.js';
+import { buildRemoteState, collectOrphanEdgeIds, remoteNodeUuid } from './remote-state.js';
 
 interface FixtureMeta {
   position: { x: number; y: number };
@@ -566,5 +566,44 @@ describe('buildRemoteState', () => {
     expect(connectionDiff.toCreate).toStrictEqual([]);
     expect(connectionDiff.toDelete).toStrictEqual([]);
     expect(connectionDiff.toUpdate).toStrictEqual([]);
+  });
+});
+
+describe('collectOrphanEdgeIds', () => {
+  it('finds nothing when every endpoint resolves', () => {
+    expect(collectOrphanEdgeIds(makeDto())).toStrictEqual([]);
+  });
+
+  it('flags an edge whose endpoint id matches no node, and the differ cannot see it', () => {
+    const dto = makeDto();
+    // Mirrors a node type change: the old backend node is gone, its edge is not.
+    dto.edge_list = [...dto.edge_list!, { id: 999, start_node_id: 1, end_node_id: 4242, graph: 42, metadata: {} }];
+
+    expect(collectOrphanEdgeIds(dto)).toStrictEqual([999]);
+
+    // The reason the reaper has to exist: buildRemoteState drops the edge entirely,
+    // so it never reaches the connection differ's toDelete and would survive forever.
+    const remote = buildRemoteState(dto);
+    expect(remote.edges.map((edge) => edge.backendId)).not.toContain(999);
+    const connectionDiff = getConnectionDiff(remote, makeDesired(), buildUuidToBackendIdMap(makeDesired().nodes));
+    expect(connectionDiff.toDelete).toStrictEqual([]);
+  });
+
+  it('ignores edges with absent endpoint ids (unresolved temp-id refs, not orphans)', () => {
+    const dto = makeDto();
+    dto.edge_list = [
+      ...dto.edge_list!,
+      { id: 998, start_node_id: null, end_node_id: null, graph: 42, metadata: {} } as never,
+    ];
+    expect(collectOrphanEdgeIds(dto)).toStrictEqual([]);
+  });
+
+  it('flags a dangling source as well as a dangling target', () => {
+    const dto = makeDto();
+    dto.edge_list = [
+      { id: 501, start_node_id: 4242, end_node_id: 2, graph: 42, metadata: {} },
+      { id: 502, start_node_id: 1, end_node_id: 4243, graph: 42, metadata: {} },
+    ];
+    expect(collectOrphanEdgeIds(dto)).toStrictEqual([501, 502]);
   });
 });
