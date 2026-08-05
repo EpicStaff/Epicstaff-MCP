@@ -1,6 +1,6 @@
 {
   "name": "epicstaff-mcp",
-  "version": "3.0.0",
+  "version": "3.0.1_legacy",
   "description": "EpicStaff flow development MCP server — write, build, push, run, debug flows.",
   "type": "module",
   "private": true,
