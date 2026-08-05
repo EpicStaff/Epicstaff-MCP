@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
@@ -13,9 +13,14 @@ import { compileFlow } from '../compiler/index.js';
 import { decompileFlow } from '../flow-source/decompiler.js';
 import { hasErrors } from '../flow-source/diagnostics.js';
 import { createLock, getEntity, readLock, writeLock } from '../flow-source/lockfile.js';
+import { buildBulkSavePayload } from '../graph/bulk-save.js';
+import type { GraphState } from '../graph/graph-state.js';
+import { buildRemoteState } from '../graph/remote-state.js';
+import type { GraphDto } from '../models/graph.js';
 import { EntityPusher } from '../pusher/entities.js';
 import { resolveFlowRefs } from '../pusher/flow-refs.js';
 import { GraphPusher } from '../pusher/graph.js';
+import { prepareRestoreState } from '../pusher/restore.js';
 import { err, ok, toContent } from '../util/result.js';
 import { runTool } from './auth-org.tools.js';
 
@@ -144,6 +149,232 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           })),
           edges: artifact.graph.edges.length,
           diagnostics: artifact.diagnostics,
+        };
+      }),
+  );
+
+  server.registerTool(
+    'dump_graph',
+    {
+      title: 'Dump a graph\'s complete raw backend JSON (faithful backup)',
+      description:
+        "Write a graph's ENTIRE backend representation to a local .json file, verbatim. Unlike pull_flow — " +
+        'which projects the graph through the flow-source compiler and silently discards every field flow ' +
+        'source cannot express (end-node output_map, classification-decision-table prompt_configs and route ' +
+        'codes, python stream_config/test_input, task output_schema, error routes) — this filters nothing. ' +
+        'That makes it the only faithful snapshot of a graph, and the right thing to take before editing a ' +
+        'production flow. Read-only against the backend: it never writes to EpicStaff. The output is an ' +
+        'archival record for diffing and manual restore, not a pushable flow source.',
+      inputSchema: {
+        graph_id: z.number().int().describe('Backend id of the graph to dump'),
+        output_path: z.string().describe('Absolute path of the .json file to write (parent dirs are created)'),
+      },
+    },
+    async ({ graph_id, output_path }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+
+        if (!isAbsolute(output_path)) {
+          throw new Error('output_path must be an absolute path to a .json file.');
+        }
+
+        // The client returns the parsed response verbatim, so this object is the
+        // complete backend payload — GraphDto is only a compile-time view of it.
+        const dto = (await new GraphsApi(context.client).get(graph_id)) as unknown as Record<string, unknown>;
+
+        const body = `${JSON.stringify(dto, null, 2)}\n`;
+        mkdirSync(dirname(output_path), { recursive: true });
+        writeFileSync(output_path, body, 'utf8');
+
+        // Count nodes per *_node_list / *_list key so the caller can sanity-check coverage,
+        // and report which normally-lossy settings this snapshot actually captured.
+        const nodes: Record<string, number> = {};
+        for (const [key, value] of Object.entries(dto)) {
+          if (/_(node_)?list$/.test(key) && Array.isArray(value) && value.length > 0) {
+            nodes[key] = value.length;
+          }
+        }
+
+        const lossyFieldsCaptured: string[] = [];
+        const seen = new Set<string>();
+        const walk = (value: unknown): void => {
+          if (Array.isArray(value)) {
+            for (const item of value) walk(item);
+            return;
+          }
+          if (value === null || typeof value !== 'object') return;
+          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+            if (
+              ['output_map', 'prompt_configs', 'stream_config', 'output_schema', 'test_input'].includes(key) &&
+              child != null &&
+              !(Array.isArray(child) && child.length === 0) &&
+              !(typeof child === 'object' && !Array.isArray(child) && Object.keys(child).length === 0)
+            ) {
+              if (!seen.has(key)) {
+                seen.add(key);
+                lossyFieldsCaptured.push(key);
+              }
+            }
+            walk(child);
+          }
+        };
+        walk(dto);
+
+        return {
+          output_path,
+          graph_id,
+          graph_name: dto.name,
+          save_version: dto.save_version,
+          bytes: body.length,
+          nodes,
+          edges: Array.isArray(dto.edge_list) ? dto.edge_list.length : 0,
+          conditional_edges: Array.isArray(dto.conditional_edge_list) ? dto.conditional_edge_list.length : 0,
+          lossyFieldsCaptured: lossyFieldsCaptured.sort(),
+          next:
+            'Archival snapshot — restore by hand in the editor, or diff against a later dump. ' +
+            'pull_flow remains the way to get an editable flow source (lossy by design).',
+        };
+      }),
+  );
+
+  server.registerTool(
+    'restore_graph',
+    {
+      title: 'Restore a dump_graph JSON into a NEW graph (faithful copy)',
+      description:
+        'Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source ' +
+        'cannot express — end-node output_map, classification prompt_configs and route codes, python ' +
+        'stream_config/test_input, task output_schema, and error routes. Use it to make a restorable ' +
+        'backup, or to clone a flow when the backend copy/export endpoints mishandle classification and ' +
+        'agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot ' +
+        'damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, ' +
+        'not duplicated — but node-owned rows (python code, agent sub-tasks) are detached so editing the ' +
+        'copy can never change the original.',
+      inputSchema: {
+        dump_path: z.string().describe('Absolute path of a JSON file previously written by dump_graph'),
+        name: z.string().optional().describe('Name for the new graph (required unless target_graph_id is given)'),
+        description: z.string().optional().describe('Description for the new graph'),
+        target_graph_id: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            'OVERWRITE an existing graph instead of creating one: every current node/edge is deleted and ' +
+              'replaced by the dump in a single bulk-save. Destructive — dump the target first.',
+          ),
+      },
+    },
+    async ({ dump_path, name, description, target_graph_id }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        context.org.requireActiveOrg();
+
+        if (!isAbsolute(dump_path)) throw new Error('dump_path must be an absolute path.');
+        if (!existsSync(dump_path)) throw new Error(`No dump file at ${dump_path} — run dump_graph first.`);
+
+        let dto: GraphDto;
+        try {
+          dto = JSON.parse(readFileSync(dump_path, 'utf8')) as GraphDto;
+        } catch (error) {
+          throw new Error(`${dump_path} is not valid JSON: ${error instanceof Error ? error.message : error}`);
+        }
+        if (dto == null || typeof dto !== 'object' || !Array.isArray(dto.edge_list)) {
+          throw new Error(`${dump_path} does not look like a dump_graph snapshot (no edge_list).`);
+        }
+
+        const { state, detached, remappedUuids, warnings } = prepareRestoreState(dto);
+
+        const source = dto as unknown as { metadata?: Record<string, unknown>; tags?: string[]; label_ids?: number[] };
+        const graphs = new GraphsApi(context.client);
+
+        // Two modes. Creating starts from an empty `remote` so everything is a create.
+        // Overwriting passes the target's CURRENT state as `remote`, so the differ marks
+        // every existing node toDelete and every restored node toCreate — one atomic save.
+        let targetId: number;
+        let targetName: string;
+        let baseSaveVersion: number;
+        let remote: { nodes: GraphState['nodes']; edges: GraphState['edges'] };
+        let createdGraph = false;
+        let replaced = 0;
+
+        if (target_graph_id != null) {
+          const targetDto = await graphs.get(target_graph_id);
+          remote = buildRemoteState(targetDto);
+          targetId = target_graph_id;
+          targetName = targetDto.name;
+          baseSaveVersion = targetDto.save_version;
+          replaced = remote.nodes.length;
+          if (target_graph_id === dto.id) {
+            warnings.push(`Target graph ${target_graph_id} IS the dump's source — this resets it to the snapshot.`);
+          }
+        } else {
+          if (!name) throw new Error('name is required when target_graph_id is not given.');
+          const shell = await graphs.create({
+            name,
+            description:
+              description ?? `Faithful restore of "${dto.name}" (graph ${dto.id}) @ save_version ${dto.save_version}.`,
+            // Carry the source's own graph-level metadata rather than a fresh scaffold,
+            // so a dump of the restore diffs clean against the dump it came from.
+            metadata: source.metadata ?? {},
+            ...(source.tags && source.tags.length > 0 ? { tags: source.tags } : {}),
+          });
+          targetId = shell.id;
+          targetName = name;
+          baseSaveVersion = shell.save_version;
+          remote = { nodes: [], edges: [] };
+          createdGraph = true;
+        }
+
+        let saved;
+        try {
+          saved = await graphs.bulkSave(
+            targetId,
+            buildBulkSavePayload({ graphId: targetId, desired: state, remote, saveVersion: baseSaveVersion }),
+          );
+        } catch (error) {
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            createdGraph
+              ? `Graph shell #${targetId} ("${targetName}") was created but bulk-save failed, so it is empty — ` +
+                `delete it and retry. Cause: ${cause}`
+              : `Overwrite of graph #${targetId} ("${targetName}") failed; it is unchanged. Cause: ${cause}`,
+          );
+        }
+
+        // Labels are not part of the create body, so they need a follow-up PATCH.
+        // Non-fatal: the graph content is already correct without them.
+        const labelIds = source.label_ids ?? [];
+        let labelsCopied = false;
+        if (labelIds.length > 0 && createdGraph) {
+          try {
+            // PATCH is optimistically locked like bulk-save — save_version is mandatory.
+            await context.client.patch(`graphs/${targetId}/`, {
+              body: { save_version: saved.save_version, label_ids: labelIds },
+            });
+            labelsCopied = true;
+          } catch (error) {
+            warnings.push(
+              `Could not copy label_ids ${JSON.stringify(labelIds)}: ` +
+                `${error instanceof Error ? error.message : String(error)}. Set them by hand if you need them.`,
+            );
+          }
+        }
+
+        return {
+          graphId: targetId,
+          name: targetName,
+          mode: createdGraph ? 'created' : 'overwritten',
+          replacedNodes: replaced,
+          saveVersion: saved.save_version,
+          labels: { source: labelIds, copied: labelsCopied },
+          restoredFrom: { graph_id: dto.id, graph_name: dto.name, save_version: dto.save_version, dump_path },
+          nodes: state.nodes.length,
+          edges: state.edges.length,
+          detached,
+          remappedUuids,
+          warnings,
+          openInEditor: `${context.config.apiUrl.replace(/\/api\/$/, '')}/flows/${targetId}`,
+          next: 'Verify with dump_graph on the new graph and diff it against the source dump.',
         };
       }),
   );
