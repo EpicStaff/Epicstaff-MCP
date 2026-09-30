@@ -28668,6 +28668,7 @@ var EpicStaffClient = class {
     }
     logger.debug(`${method} ${url}`);
     const response = await fetch(url, init);
+    options.onResponseHeaders?.(response.headers);
     const isAuthEndpoint = /\/api\/auth\//.test(url);
     if (response.status === 401 && !isAuthEndpoint && !options.skipAuth && !options.bearerToken && !isRetry && this.reauthenticate) {
       logger.info("Got 401 \u2014 re-authenticating and retrying once");
@@ -28702,9 +28703,15 @@ var EpicStaffClient = class {
       const { apiKey, bearerAccessToken } = this.store.get();
       if (apiKey) {
         headers.set("X-Api-Key", apiKey);
-      } else if (bearerAccessToken) {
+      } else if (bearerAccessToken && this.store.get().jwtOnly) {
         headers.set("Authorization", `Bearer ${bearerAccessToken}`);
       }
+    }
+    if (options.cookies) {
+      headers.set(
+        "Cookie",
+        Object.entries(options.cookies).map(([name, value]) => `${name}=${value}`).join("; ")
+      );
     }
     if (!options.skipAuth && !ORG_HEADER_SKIP.some((pattern) => pattern.test(url))) {
       const { activeOrgId } = this.store.get();
@@ -28718,6 +28725,29 @@ var EpicStaffClient = class {
 
 // src/http/auth.ts
 import { hostname as hostname2 } from "node:os";
+var REFRESH_COOKIE_NAME = "auth.refresh";
+var ACCESS_TOKEN_EXPIRY_MARGIN_SECONDS = 30;
+function refreshTokenFromCookies(headers) {
+  for (const cookie of headers.getSetCookie()) {
+    const [pair] = cookie.split(";");
+    const separator = pair?.indexOf("=") ?? -1;
+    if (pair !== void 0 && separator > 0 && pair.slice(0, separator).trim() === REFRESH_COOKIE_NAME) {
+      const value = pair.slice(separator + 1).trim();
+      return value === "" ? null : value;
+    }
+  }
+  return null;
+}
+function isJwtExpired(token, nowSeconds = Date.now() / 1e3) {
+  const payload = token.split(".")[1];
+  if (payload === void 0) return true;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims.exp !== "number" || claims.exp - ACCESS_TOKEN_EXPIRY_MARGIN_SECONDS <= nowSeconds;
+  } catch {
+    return true;
+  }
+}
 var AuthService = class {
   constructor(config2, store, client) {
     this.config = config2;
@@ -28729,6 +28759,7 @@ var AuthService = class {
   store;
   client;
   bootstrapPromise = null;
+  sessionPromise = null;
   /** Ensure a working credential exists; validate/refresh the stored one or establish fresh. */
   async ensureAuthenticated() {
     if (this.bootstrapPromise) {
@@ -28738,6 +28769,42 @@ var AuthService = class {
       this.bootstrapPromise = null;
     });
     return this.bootstrapPromise;
+  }
+  /**
+   * {@link UserSession}: a valid JWT access token for JWT-only routes. Reuses the stored
+   * token, refreshes it through the refresh cookie, and logs in only when neither works.
+   */
+  async accessToken() {
+    const { bearerAccessToken } = this.store.get();
+    if (bearerAccessToken && !isJwtExpired(bearerAccessToken)) {
+      return bearerAccessToken;
+    }
+    return this.renewAccessToken();
+  }
+  /** {@link UserSession}: the stored access token was rejected — obtain a fresh one. */
+  async renewAccessToken() {
+    if (this.sessionPromise) {
+      return this.sessionPromise;
+    }
+    this.sessionPromise = this.renewSession().finally(() => {
+      this.sessionPromise = null;
+    });
+    return this.sessionPromise;
+  }
+  async renewSession() {
+    const { bearerRefreshToken } = this.store.get();
+    if (bearerRefreshToken) {
+      const refreshed = await this.refreshSession(bearerRefreshToken);
+      if (refreshed !== null) return refreshed;
+    }
+    if (this.config.email === void 0 || this.config.password === void 0) {
+      throw new Error(
+        "This operation needs a signed-in user session (EpicStaff does not accept API keys here \u2014 e.g. managing org secrets). Set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment, or create the secret in the EpicStaff UI."
+      );
+    }
+    const session = await this.login();
+    this.store.update({ bearerAccessToken: session.access, bearerRefreshToken: session.refresh });
+    return session.access;
   }
   async forceRemint() {
     if (this.bootstrapPromise) {
@@ -28750,12 +28817,13 @@ var AuthService = class {
     if (this.config.apiToken !== void 0) {
       return this.useProvidedToken(this.config.apiToken);
     }
-    const { apiKey, bearerRefreshToken } = this.store.get();
+    const { apiKey, bearerRefreshToken, jwtOnly } = this.store.get();
     if (apiKey && await this.isKeyValid()) {
       return apiKey;
     }
-    if (!apiKey && bearerRefreshToken) {
-      return this.refreshBearer(bearerRefreshToken);
+    if (jwtOnly && !apiKey && bearerRefreshToken) {
+      const refreshed = await this.refreshSession(bearerRefreshToken);
+      if (refreshed !== null) return refreshed;
     }
     return this.establishCredential();
   }
@@ -28766,7 +28834,7 @@ var AuthService = class {
    * when the token is rejected AND credentials are configured.
    */
   async useProvidedToken(token) {
-    this.store.update({ apiKey: token, keyPrefix: token.slice(0, 8) });
+    this.store.update({ apiKey: token, keyPrefix: token.slice(0, 8), jwtOnly: false });
     if (await this.isKeyValid()) {
       return token;
     }
@@ -28792,41 +28860,54 @@ var AuthService = class {
     }
   }
   /**
-   * Refresh a legacy backend's JWT access token via its refresh token. Falls back to a
-   * fresh login when the refresh token itself is rejected (expired or revoked).
+   * Exchange the refresh token for a new access token (POST auth/refresh/). Current
+   * backends read the token only from the `auth.refresh` cookie; legacy ones read the
+   * `refresh` body field — both are sent. Returns null when the refresh token itself is
+   * rejected (expired or revoked), after clearing the session.
    */
-  async refreshBearer(refreshToken) {
+  async refreshSession(refreshToken) {
+    let rotatedCookie = null;
     let refreshed;
     try {
       refreshed = await this.client.post("auth/refresh/", {
         skipAuth: true,
-        body: { refresh: refreshToken }
+        cookies: { [REFRESH_COOKIE_NAME]: refreshToken },
+        body: { refresh: refreshToken },
+        onResponseHeaders: (headers) => {
+          rotatedCookie = refreshTokenFromCookies(headers);
+        }
       });
     } catch (error2) {
       if (error2 instanceof ApiError && (error2.status === 401 || error2.status === 403)) {
-        logger.info("Stored refresh token is no longer valid \u2014 logging in again");
+        logger.info("Stored refresh token is no longer valid \u2014 a fresh login is needed");
         this.store.update({ bearerAccessToken: null, bearerRefreshToken: null });
-        return this.establishCredential();
+        return null;
       }
       throw error2;
     }
     this.store.update({
       bearerAccessToken: refreshed.access,
-      bearerRefreshToken: refreshed.refresh ?? refreshToken
+      bearerRefreshToken: rotatedCookie ?? refreshed.refresh ?? refreshToken
     });
     return refreshed.access;
   }
-  async establishCredential() {
+  async login() {
     const { email: email2, password } = this.config;
     if (email2 === void 0 || password === void 0) {
-      throw new Error("establishCredential() called without credentials \u2014 this is a bug in AuthService.");
+      throw new Error("login() called without credentials \u2014 this is a bug in AuthService.");
     }
-    logger.info("Logging in to establish a credential");
+    logger.info("Logging in to establish a user session");
+    let refreshCookie = null;
     let tokens;
     try {
       tokens = await this.client.post("auth/login/", {
         skipAuth: true,
-        body: { email: email2, password }
+        // remember_me: the refresh cookie lives for REFRESH_TOKEN_LIFETIME instead of 30 minutes,
+        // so later processes refresh instead of logging in again.
+        body: { email: email2, password, remember_me: true },
+        onResponseHeaders: (headers) => {
+          refreshCookie = refreshTokenFromCookies(headers);
+        }
       });
     } catch (error2) {
       if (error2 instanceof ApiError && error2.status === 401) {
@@ -28836,18 +28917,33 @@ var AuthService = class {
           "Login failed \u2014 check EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD in the MCP server environment."
         );
       }
+      if (error2 instanceof ApiError && error2.status === 429) {
+        throw new ApiError(
+          error2.status,
+          error2.url,
+          "Login is rate-limited by the server (too many logins) \u2014 wait a minute and retry."
+        );
+      }
       throw error2;
     }
+    return { access: tokens.access, refresh: refreshCookie ?? tokens.refresh ?? null };
+  }
+  async establishCredential() {
+    if (this.config.email === void 0 || this.config.password === void 0) {
+      throw new Error("establishCredential() called without credentials \u2014 this is a bug in AuthService.");
+    }
+    const session = await this.login();
     try {
-      const minted = await this.client.post("auth/api-key/", {
-        bearerToken: tokens.access,
-        body: { name: `es-mcp (${hostname2()})`, scopes: [] }
+      const minted = await this.client.post("profile/api-keys/", {
+        bearerToken: session.access,
+        body: { name: `es-mcp (${hostname2()})` }
       });
       this.store.update({
         apiKey: minted.api_key,
         keyPrefix: minted.prefix,
-        bearerAccessToken: null,
-        bearerRefreshToken: null
+        bearerAccessToken: session.access,
+        bearerRefreshToken: session.refresh,
+        jwtOnly: false
       });
       logger.info(`Minted API key ${minted.prefix}\u2026 and persisted it`);
       return minted.api_key;
@@ -28855,14 +28951,15 @@ var AuthService = class {
       if (!(error2 instanceof ApiError && error2.status === 404)) {
         throw error2;
       }
-      logger.info("auth/api-key/ not found \u2014 this backend has no API-key system; using JWT bearer auth instead");
+      logger.info("profile/api-keys/ not found \u2014 this backend has no API-key system; using JWT bearer auth instead");
       this.store.update({
         apiKey: null,
         keyPrefix: null,
-        bearerAccessToken: tokens.access,
-        bearerRefreshToken: tokens.refresh
+        bearerAccessToken: session.access,
+        bearerRefreshToken: session.refresh,
+        jwtOnly: true
       });
-      return tokens.access;
+      return session.access;
     }
   }
 };
@@ -28931,12 +29028,15 @@ var stateSchema = external_exports.object({
   apiKey: external_exports.string().nullable(),
   keyPrefix: external_exports.string().nullable(),
   /**
-   * JWT fallback for legacy backends with no auth/api-key/ minting route: the access
-   * token is sent as `Authorization: Bearer`, refreshed via auth/refresh/ using the
-   * refresh token. Mutually exclusive with apiKey — only one scheme is active at a time.
+   * The user's JWT session (login access token + refresh token). Used as the request
+   * scheme only when `jwtOnly` is set (a legacy backend without API-key minting); on
+   * current backends it is kept next to the API key solely for the JWT-only routes an
+   * API key may not call (`secrets/`). The client always prefers `apiKey`.
    */
   bearerAccessToken: external_exports.string().nullable(),
   bearerRefreshToken: external_exports.string().nullable(),
+  /** The backend has no API-key minting route — authenticate every request with the JWT. */
+  jwtOnly: external_exports.boolean().default(false),
   activeOrgId: external_exports.number().nullable()
 });
 function stateDir() {
@@ -28965,6 +29065,7 @@ var StateStore = class {
       keyPrefix: null,
       bearerAccessToken: null,
       bearerRefreshToken: null,
+      jwtOnly: false,
       activeOrgId: null
     };
     if (!existsSync(this.filePath)) {
@@ -29145,6 +29246,7 @@ init_graphs();
 // src/api/knowledge.ts
 import { readFileSync as readFileSync2 } from "node:fs";
 import { basename } from "node:path";
+var SELECTABLE_RAG_STATUSES = "new,processing,completed,warning,partial,outdated";
 function unwrap3(response) {
   return Array.isArray(response) ? response : response.results;
 }
@@ -29165,6 +29267,12 @@ var KnowledgeApi = class {
   }
   async createCollection(collectionName) {
     return this.client.post("source-collections/", { body: { collection_name: collectionName } });
+  }
+  /** RAGs attached to a collection that a knowledge-retriever node may search. */
+  async listAvailableRags(collectionId) {
+    return this.client.get(`source-collections/${collectionId}/available-rags/`, {
+      query: { status: SELECTABLE_RAG_STATUSES }
+    });
   }
   /** Upload local files as collection documents (multipart `files`, like the frontend). */
   async uploadDocuments(collectionId, filePaths) {
@@ -29317,8 +29425,8 @@ var LlmApi = class {
   async updateConfig(id, request) {
     return this.client.patch(`llm-configs/${id}/`, { body: request });
   }
-  async getDefaultConfig() {
-    return this.client.get("default-llm-config/").catch(() => void 0);
+  async getDefaultModels() {
+    return this.client.get("default-models/");
   }
   async listEmbeddingConfigs() {
     return unwrap4(
@@ -29328,6 +29436,23 @@ var LlmApi = class {
     );
   }
 };
+async function resolveDefaultEmbeddingConfigId(llm) {
+  const [configs, defaults] = await Promise.all([llm.listEmbeddingConfigs(), llm.getDefaultModels()]);
+  if (configs.length === 0) {
+    throw new Error(
+      "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder)."
+    );
+  }
+  const defaultId = defaults.memory_embedding_config;
+  if (defaultId != null && configs.some((config2) => config2.id === defaultId)) {
+    return defaultId;
+  }
+  if (configs.length === 1) return configs[0].id;
+  const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+  throw new Error(
+    `Cannot pick a default embedding config: the organization has several and no default embedding config is set (Settings \u2192 Default models). Name one explicitly: ${available}.`
+  );
+}
 
 // src/api/surfaces.ts
 function unwrap5(response) {
@@ -29365,22 +29490,33 @@ var ToolsApi = class {
     this.client = client;
   }
   client;
+  /** Built-in catalog tools: the `built_in` rows of `python-code-tool/`. */
   async listBuiltinTools() {
-    return unwrap6(await this.client.get("tools/", { query: { limit: 1e3 } }));
+    return (await this.listPythonCodeTools()).filter((tool) => tool.built_in === true);
   }
   async listToolConfigs() {
-    return unwrap6(await this.client.get("tool-configs/", { query: { limit: 1e3 } }));
+    return unwrap6(
+      await this.client.get("python-code-tool-configs/", {
+        query: { limit: 1e3 }
+      })
+    );
   }
+  /** Every python-code tool visible to the org: its custom tools plus the built-in catalog. */
   async listPythonCodeTools() {
     return unwrap6(
-      await this.client.get("python-code-tool/", { query: { limit: 1e3 } })
+      await this.client.get("python-code-tool/", {
+        query: { limit: 1e3 }
+      })
     );
   }
   async listMcpTools() {
     return unwrap6(await this.client.get("mcp-tools/", { query: { limit: 1e3 } }));
   }
   async createToolConfig(request) {
-    return this.client.post("tool-configs/", { body: request });
+    return this.client.post("python-code-tool-configs/", { body: request });
+  }
+  async updateToolConfig(id, request) {
+    return this.client.patch(`python-code-tool-configs/${id}/`, { body: request });
   }
   async createPythonCodeTool(request) {
     return this.client.post("python-code-tool/", { body: request });
@@ -29565,7 +29701,11 @@ var catalogSurfaceSchema = external_exports.strictObject({
 var surfacesSectionSchema = external_exports.record(symbolicNameSchema, catalogSurfaceSchema).default({}).describe("Catalog surfaces, keyed by symbolic name.");
 
 // src/flow-source/schema/flow.ts
-var FORBIDDEN_NODE_TYPES = ["llm", "code-agent"];
+var FORBIDDEN_NODE_TYPES = ["llm", "code-agent", "crew"];
+var FORBIDDEN_NODE_TYPE_SET = new Set(FORBIDDEN_NODE_TYPES);
+function isForbiddenNodeType(type) {
+  return FORBIDDEN_NODE_TYPE_SET.has(type);
+}
 var outputVariablePathField = external_exports.string().optional().describe(`Dot path in flow state where this node's output is stored, e.g. "variables.research_result".`);
 var positionField = positionSchema.optional();
 var inputMapField = inputMapSchema.default({});
@@ -29647,7 +29787,9 @@ var webhookTriggerNodeSchema = external_exports.strictObject({
 var telegramTriggerNodeSchema = external_exports.strictObject({
   type: external_exports.literal("telegram-trigger"),
   position: positionField,
-  bot_token_env: external_exports.string().optional().describe("Environment variable holding the Telegram bot token. The token never lives in flow source."),
+  bot_token_env: external_exports.string().optional().describe(
+    'Environment variable holding the Telegram bot token. The token never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the node references that secret.'
+  ),
   output_variable_path: outputVariablePathField
 });
 var scheduleTriggerNodeSchema = external_exports.strictObject({
@@ -29690,15 +29832,42 @@ var audioToTextNodeSchema = external_exports.strictObject({
   input_map: inputMapField,
   output_variable_path: outputVariablePathField
 });
-var crewNodeSchema = external_exports.strictObject({
-  type: external_exports.literal("crew"),
+var knowledgeRetrieverNodeSchema = external_exports.strictObject({
+  type: external_exports.literal("knowledge-retriever"),
   position: positionField,
-  crew: existingRefSchema.optional().describe("Remote crew (legacy project) to run. Crews cannot be defined in flow source."),
+  collection: entityRef("The knowledge collection this node searches."),
+  rag: external_exports.enum(["naive", "graph"]).optional().describe(
+    "Which RAG of the collection to search. Defaults to the local collection's rag.strategy; REQUIRED for an {existing: ...} collection."
+  ),
+  query: external_exports.string().min(1).describe(
+    `Search query template. {name} placeholders are filled from this node's input_map keys at run time, e.g. query: "{question}" with input_map: { question: variables.question }.`
+  ),
+  search_method: external_exports.enum(["basic", "local", "global", "drift"]).optional().describe('Graph RAG only: the graph search method. Backend default "basic" when omitted.'),
+  search_configs: external_exports.strictObject({
+    naive: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("Naive search params, e.g. { search_limit, similarity_threshold }."),
+    graph: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("Graph search params keyed by method, e.g. { basic: { k: 10 } }.")
+  }).optional().describe("Optional per-node search parameters, passed through to the backend as-is."),
   input_map: inputMapField,
   output_variable_path: outputVariablePathField
 });
+var keyValueEntrySchema = external_exports.strictObject({
+  key: external_exports.string().min(1).describe(
+    'Stored key. Letters, digits and _ (not starting with a digit), plus {variables.<path>} placeholders, e.g. "profile_{variables.user_id}".'
+  ),
+  value: external_exports.string().optional().describe(
+    "Flow-state path. read: where the stored value is written (no |default). write: where the value to store is read from (may end in |default). Omit for delete."
+  )
+});
+var keyValueNodeSchema = external_exports.strictObject({
+  type: external_exports.literal("key-value"),
+  position: positionField,
+  table: external_exports.string().min(1).describe("Name of the organization Key-Value table. Created on push when no table with this name exists."),
+  mode: external_exports.enum(["read", "write", "delete"]).default("read").describe("What the node does with its entries."),
+  entries: external_exports.array(keyValueEntrySchema).default([]).describe("Keys to read / write / delete (at most 500).")
+});
 var forbiddenLlmNodeSchema = external_exports.object({ type: external_exports.literal("llm") }).passthrough();
 var forbiddenCodeAgentNodeSchema = external_exports.object({ type: external_exports.literal("code-agent") }).passthrough();
+var forbiddenCrewNodeSchema = external_exports.object({ type: external_exports.literal("crew") }).passthrough();
 var nodeSchema = external_exports.discriminatedUnion("type", [
   startNodeSchema,
   agentNodeSchema,
@@ -29714,10 +29883,15 @@ var nodeSchema = external_exports.discriminatedUnion("type", [
   decisionTableNodeSchema,
   classificationDecisionTableNodeSchema,
   audioToTextNodeSchema,
-  crewNodeSchema,
+  knowledgeRetrieverNodeSchema,
+  keyValueNodeSchema,
   forbiddenLlmNodeSchema,
-  forbiddenCodeAgentNodeSchema
+  forbiddenCodeAgentNodeSchema,
+  forbiddenCrewNodeSchema
 ]).describe('A flow node, discriminated by its "type" field.');
+function isWritableNode(node) {
+  return !isForbiddenNodeType(node.type);
+}
 var edgeConditionSchema = external_exports.strictObject({
   code: external_exports.string().optional().describe(
     "Inline Python decision code: the entrypoint receives the mapped inputs and returns the name of the next node. Provide exactly one of code / code_file."
@@ -29808,7 +29982,7 @@ var llmConfigSchema = external_exports.strictObject({
   max_tokens: external_exports.number().int().positive().optional().describe("Maximum tokens per completion. Backend default when omitted."),
   base_url: external_exports.string().optional().describe("Custom API base URL for self-hosted or proxied providers."),
   api_key_env: external_exports.string().optional().describe(
-    "Name of the environment variable that holds the provider API key. The key value itself never lives in flow source."
+    'Name of the environment variable that holds the provider API key. The key value itself never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the LLM config references that secret.'
   ),
   params: external_exports.record(external_exports.string(), external_exports.unknown()).default({}).describe("Extra provider-specific parameters, passed through to the backend as-is.")
 }).describe("One named LLM configuration.");
@@ -30150,9 +30324,9 @@ function collectNodeTypeDiagnostics(source, provenance) {
       );
     } else if (node.type === "crew") {
       diagnostics.push(
-        makeWarning(
+        makeError(
           `${nodePath}.type`,
-          "node type 'crew' is deprecated \u2014 prefer 'agent' and 'task' nodes",
+          `node type 'crew' was removed from EpicStaff (EST-3849: crews/projects no longer exist) \u2014 rewrite it as an 'agent' node (one agent, ordered tasks) or 'task' nodes, with the agent defined under 'agents:' or referenced via { existing: "<agent name>" }`,
           file
         )
       );
@@ -30383,14 +30557,8 @@ function resolveFlow(source) {
         }
         break;
       }
-      case "crew": {
-        if (node.crew !== void 0) {
-          references.push({
-            path: `${basePath}.crew`,
-            section: "crews",
-            ref: { kind: "existing", remoteName: node.crew.existing }
-          });
-        }
+      case "knowledge-retriever": {
+        resolveEntity(node.collection, "knowledge", `${basePath}.collection`);
         break;
       }
       default:
@@ -30412,6 +30580,158 @@ function knownNamesHint(section, known) {
   const shown = known.slice(0, MAX_KNOWN_NAMES_IN_MESSAGE).map((name) => `'${name}'`);
   const suffix = known.length > MAX_KNOWN_NAMES_IN_MESSAGE ? ", \u2026" : "";
   return `known ${SECTION_LABELS[section]}s: ${shown.join(", ")}${suffix}`;
+}
+
+// src/compiler/key-value-entries.ts
+var KEY_VALUE_MAX_ENTRIES = 500;
+var KEY_VALUE_MAX_KEY_LENGTH = 512;
+var KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var STATE_PATH = /^variables\.\w+(?:\.\w+|\[(?:0|[1-9]\d*)\])*$/;
+var PATH_NAME = /\w+/g;
+var PATH_SEGMENT = /\w+|\[(?:0|[1-9]\d*)\]/g;
+var PLACEHOLDER = /\{([^{}]+)\}/g;
+var DOTDICT_METHOD_NAMES = /* @__PURE__ */ new Set([
+  "add_property",
+  "add_setter",
+  "clear",
+  "copy",
+  "deep_dump",
+  "fromkeys",
+  "get",
+  "items",
+  "keys",
+  "model_dump",
+  "pop",
+  "popitem",
+  "setdefault",
+  "update",
+  "values"
+]);
+function validateKeyValueEntries(mode, entries) {
+  const issues = [];
+  if (entries.length > KEY_VALUE_MAX_ENTRIES) {
+    issues.push({ index: null, message: `A Key-Value node can have at most ${KEY_VALUE_MAX_ENTRIES} keys.` });
+  }
+  const writtenKeys = /* @__PURE__ */ new Map();
+  const readTargets = [];
+  entries.forEach((entry, index) => {
+    let error2 = entryError(mode, entry);
+    if (error2 === null && mode === "write") {
+      error2 = duplicateKeyError(entry.key, index, writtenKeys);
+    } else if (error2 === null && mode === "read") {
+      error2 = targetConflictError((entry.value ?? "").trim(), index, readTargets);
+    }
+    if (error2 !== null) {
+      issues.push({ index, message: error2 });
+    }
+  });
+  return issues;
+}
+function entryError(mode, entry) {
+  if (mode === "delete" && entry.value !== void 0) {
+    return "unknown fields ['value'] for mode 'delete'.";
+  }
+  if (entry.key.trim() === "") {
+    return "'key' must be a non-empty string.";
+  }
+  if (mode !== "delete" && (entry.value === void 0 || entry.value.trim() === "")) {
+    return "'value' must be a non-empty string.";
+  }
+  if (entry.key.length > KEY_VALUE_MAX_KEY_LENGTH) {
+    return `'key' must be at most ${KEY_VALUE_MAX_KEY_LENGTH} characters.`;
+  }
+  const keyError = keyTemplateError(entry.key);
+  if (keyError !== null || mode === "delete") {
+    return keyError;
+  }
+  const path6 = (entry.value ?? "").trim();
+  if (mode === "read" && path6.includes("|")) {
+    return "'value' is where the stored value goes: use a plain state path like 'variables.user.name', without '|default'.";
+  }
+  return statePathError(path6.split("|", 1)[0] ?? "", "'value'");
+}
+function keyTemplateError(key) {
+  const leftover = key.replace(PLACEHOLDER, "");
+  if (leftover.includes("{") || leftover.includes("}")) {
+    return "'key' has an empty or unbalanced placeholder; use '{variables.<path>}', e.g. 'profile_{variables.user.id}'.";
+  }
+  for (const match of key.matchAll(PLACEHOLDER)) {
+    const path6 = (match[1] ?? "").trim();
+    const error2 = statePathError(path6, `'key' placeholder '${path6}'`);
+    if (error2 !== null) {
+      return error2;
+    }
+  }
+  if (!KEY_PATTERN.test(key.replace(PLACEHOLDER, "_"))) {
+    return "'key' must use only letters, digits and _ outside {placeholders}, and must not start with a digit, e.g. 'profile_{variables.user.id}'.";
+  }
+  return null;
+}
+function duplicateKeyError(key, index, writtenKeys) {
+  const first = writtenKeys.get(key);
+  if (first === void 0) {
+    writtenKeys.set(key, index);
+    return null;
+  }
+  return `key '${key}' is already written by entry ${first}; use a different key.`;
+}
+function targetConflictError(target, index, readTargets) {
+  const segments = target.match(PATH_SEGMENT) ?? [];
+  for (const earlier of readTargets) {
+    const shared = Math.min(segments.length, earlier.segments.length);
+    if (segments.slice(0, shared).join("\0") !== earlier.segments.slice(0, shared).join("\0")) {
+      continue;
+    }
+    if (segments.length === earlier.segments.length) {
+      return `'${target}' is already filled by entry ${earlier.index}; use a different variable.`;
+    }
+    if (segments.length > shared) {
+      return `'${target}' is inside '${earlier.target}' (entry ${earlier.index}); use a different variable.`;
+    }
+    return `'${target}' contains '${earlier.target}' (entry ${earlier.index}); use a different variable.`;
+  }
+  readTargets.push({ segments, target, index });
+  return null;
+}
+function statePathError(statePath, label) {
+  if (!STATE_PATH.test(statePath)) {
+    return `${label} must be a state path like 'variables.user.name'.`;
+  }
+  for (const name of statePath.match(PATH_NAME) ?? []) {
+    if (name.startsWith("_")) {
+      return `${label} names '${name}'; use a variable name without the leading '_'.`;
+    }
+    if (DOTDICT_METHOD_NAMES.has(name)) {
+      return `${label} names '${name}', a built-in method; use a different variable name.`;
+    }
+  }
+  return null;
+}
+function keyPlaceholderPaths(key) {
+  return [...key.matchAll(PLACEHOLDER)].map((match) => (match[1] ?? "").trim());
+}
+
+// src/compiler/node-io.ts
+function nodeWritePaths(node, nodePath) {
+  if (node.type === "key-value") {
+    if (node.mode !== "read") return [];
+    return node.entries.flatMap(
+      (entry, index) => entry.value !== void 0 ? [{ at: `${nodePath}.entries[${index}].value`, path: entry.value }] : []
+    );
+  }
+  const writePath = node.output_variable_path;
+  if (typeof writePath !== "string" || writePath.trim() === "") return [];
+  return [{ at: `${nodePath}.output_variable_path`, path: writePath }];
+}
+function nodeReadPaths(node, nodePath) {
+  if (node.type === "key-value") {
+    return node.entries.flatMap((entry, index) => [
+      ...keyPlaceholderPaths(entry.key).map((path6) => ({ at: `${nodePath}.entries[${index}].key`, path: path6 })),
+      ...node.mode === "write" && entry.value !== void 0 ? [{ at: `${nodePath}.entries[${index}].value`, path: entry.value }] : []
+    ]);
+  }
+  const inputMap = node.input_map ?? {};
+  return Object.entries(inputMap).map(([key, path6]) => ({ at: `${nodePath}.input_map.${key}`, path: path6 }));
 }
 
 // src/compiler/varpath.ts
@@ -30460,36 +30780,36 @@ function validateDataflow(source) {
   const producedByNode = /* @__PURE__ */ new Map();
   const producedAll = [];
   for (const [nodeName, node] of Object.entries(nodes)) {
-    const writePath = node.output_variable_path;
-    if (typeof writePath !== "string" || writePath.trim() === "") continue;
-    const parsed = parseVarPath(writePath);
-    if (isVarPathError(parsed)) {
-      diagnostics.push(makeError(`flow.nodes.${nodeName}.output_variable_path`, parsed.error));
-      continue;
+    for (const write2 of nodeWritePaths(node, `flow.nodes.${nodeName}`)) {
+      const parsed = parseVarPath(write2.path);
+      if (isVarPathError(parsed)) {
+        diagnostics.push(makeError(write2.at, parsed.error));
+        continue;
+      }
+      if (parsed.isShared) continue;
+      const list = producedByNode.get(nodeName) ?? [];
+      list.push(parsed.segments);
+      producedByNode.set(nodeName, list);
+      producedAll.push({ node: nodeName, segments: parsed.segments });
     }
-    if (parsed.isShared) continue;
-    const list = producedByNode.get(nodeName) ?? [];
-    list.push(parsed.segments);
-    producedByNode.set(nodeName, list);
-    producedAll.push({ node: nodeName, segments: parsed.segments });
   }
   const ancestors = buildAncestors(source);
   for (const [nodeName, node] of Object.entries(nodes)) {
-    const inputMap = node.input_map;
-    if (inputMap) {
-      checkReads(inputMap, nodeName, `flow.nodes.${nodeName}.input_map`);
-    }
+    checkReads(nodeReadPaths(node, `flow.nodes.${nodeName}`), nodeName);
   }
   source.flow.edges.forEach((edge, index) => {
     if (edge.condition?.input_map) {
-      checkReads(edge.condition.input_map, edge.from, `flow.edges[${index}].condition.input_map`);
+      const basePath = `flow.edges[${index}].condition.input_map`;
+      checkReads(
+        Object.entries(edge.condition.input_map).map(([key, path6]) => ({ at: `${basePath}.${key}`, path: path6 })),
+        edge.from
+      );
     }
   });
   return diagnostics;
-  function checkReads(inputMap, readerNode, basePath) {
-    for (const [key, rawValue] of Object.entries(inputMap)) {
+  function checkReads(reads, readerNode) {
+    for (const { at: readPath, path: rawValue } of reads) {
       if (rawValue === "__all__") continue;
-      const readPath = `${basePath}.${key}`;
       const parsed = parseVarPath(rawValue);
       if (isVarPathError(parsed)) {
         diagnostics.push(makeError(readPath, parsed.error));
@@ -30703,13 +31023,13 @@ function sortRecord(record2) {
 // src/compiler/variable-domain.ts
 function producedTopLevelNames(source) {
   const names = /* @__PURE__ */ new Set();
-  for (const node of Object.values(source.flow.nodes)) {
-    const writePath = node.output_variable_path;
-    if (typeof writePath !== "string" || writePath.trim() === "") continue;
-    const parsed = parseVarPath(writePath);
-    if (isVarPathError(parsed) || parsed.isShared) continue;
-    const [root] = parsed.segments;
-    if (root !== void 0) names.add(root);
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    for (const write2 of nodeWritePaths(node, `flow.nodes.${nodeName}`)) {
+      const parsed = parseVarPath(write2.path);
+      if (isVarPathError(parsed) || parsed.isShared) continue;
+      const [root] = parsed.segments;
+      if (root !== void 0) names.add(root);
+    }
   }
   return [...names];
 }
@@ -30839,23 +31159,15 @@ function toDecisionTableComparable(node, allNodes) {
 function toStartComparable(node) {
   return { variables: node.data.initialState ?? {}, metadata: toNodeMetadata(node) };
 }
-function toCrewComparable(node) {
-  return {
-    node_name: node.node_name,
-    crew_id: node.data.id,
-    input_map: node.input_map || {},
-    output_variable_path: node.output_variable_path || null,
-    stream_config: node.stream_config ?? {},
-    metadata: toNodeMetadata(node)
-  };
-}
 function toPythonComparable(node) {
   return {
     node_name: node.node_name,
-    python_code: node.data,
+    // secret_ids order is incidental (which secret record happened to resolve first), not a
+    // real difference — sort it so two independent reconstructions of the same set don't
+    // register as a change.
+    python_code: { ...node.data, secret_ids: [...node.data.secret_ids || []].sort() },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
-    stream_config: node.stream_config ?? {},
     test_input: node.test_input ?? {},
     metadata: toNodeMetadata(node)
   };
@@ -30935,7 +31247,10 @@ function toSubgraphComparable(node) {
 function toWebhookComparable(node) {
   return {
     node_name: node.node_name,
-    python_code: node.data.python_code,
+    python_code: {
+      ...node.data.python_code,
+      secret_ids: [...node.data.python_code.secret_ids || []].sort()
+    },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
     webhook_trigger_path: "",
@@ -30946,7 +31261,7 @@ function toWebhookComparable(node) {
 function toTelegramComparable(node) {
   return {
     node_name: node.node_name,
-    telegram_bot_api_key: node.data.telegram_bot_api_key,
+    telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
     webhook_trigger: node.data.webhook_trigger,
     fields: node.data.fields,
     metadata: toNodeMetadata(node)
@@ -30974,6 +31289,32 @@ function toNoteComparable(node) {
     node_name: node.node_name,
     content: node.data.content,
     metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null }
+  };
+}
+function toKnowledgeRetrieverComparable(node) {
+  const data = node.data;
+  return {
+    node_name: node.node_name,
+    input_map: node.input_map || {},
+    output_variable_path: node.output_variable_path || null,
+    source_collection: data?.source_collection ?? null,
+    rag_type: data?.rag_type ?? null,
+    rag_id: data?.rag_id ?? null,
+    query: data?.query ?? "",
+    search_method: data?.search_method ?? null,
+    search_configs: data?.search_configs ?? null,
+    metadata: toNodeMetadata(node)
+  };
+}
+function toKeyValueComparable(node) {
+  return {
+    node_name: node.node_name,
+    input_map: node.input_map || {},
+    output_variable_path: node.output_variable_path || null,
+    key_value_table: node.data?.key_value_table ?? null,
+    mode: node.data?.mode ?? "read",
+    entries: node.data?.entries ?? [],
+    metadata: toNodeMetadata(node)
   };
 }
 function toCdtComparable(node, allNodes) {
@@ -31020,6 +31361,8 @@ function toCdtComparable(node, allNodes) {
     post_output_variable_path: tableData?.post_computation?.output_variable_path || tableData?.post_output_variable_path || null,
     pre_libraries: tableData?.pre_computation?.libraries || [],
     post_libraries: tableData?.post_computation?.libraries || [],
+    pre_secret_ids: [...tableData?.pre_computation?.secret_ids || []].sort(),
+    post_secret_ids: [...tableData?.post_computation?.secret_ids || []].sort(),
     metadata: toNodeMetadata(node)
   };
 }
@@ -31029,11 +31372,6 @@ function getNodeDiff(previous, current) {
       nodesByType(previous.nodes, "start"),
       nodesByType(current.nodes, "start"),
       toStartComparable
-    ),
-    crewNodes: diffNodesByBackendId(
-      nodesByType(previous.nodes, "crew"),
-      nodesByType(current.nodes, "crew"),
-      toCrewComparable
     ),
     pythonNodes: diffNodesByBackendId(
       nodesByType(previous.nodes, "python"),
@@ -31099,6 +31437,16 @@ function getNodeDiff(previous, current) {
       nodesByType(previous.nodes, "classification-decision-table"),
       nodesByType(current.nodes, "classification-decision-table"),
       (node) => toCdtComparable(node, current.nodes)
+    ),
+    knowledgeRetrieverNodes: diffNodesByBackendId(
+      nodesByType(previous.nodes, "knowledge-retriever"),
+      nodesByType(current.nodes, "knowledge-retriever"),
+      toKnowledgeRetrieverComparable
+    ),
+    keyValueNodes: diffNodesByBackendId(
+      nodesByType(previous.nodes, "key-value"),
+      nodesByType(current.nodes, "key-value"),
+      toKeyValueComparable
     )
   };
 }
@@ -31178,7 +31526,6 @@ function applySaveResponse(desired, remote, response) {
       mapping.set(startCreated[0].id, startCandidates[0].id);
     }
   }
-  mapByNewIds(nodeDiff.crewNodes.toCreate, response.crew_node_list ?? [], existingIdsByType("crew"));
   mapByNewIds(nodeDiff.pythonNodes.toCreate, response.python_node_list ?? [], existingIdsByType("python"));
   mapByNewIds(nodeDiff.taskNodes.toCreate, response.task_node_list ?? [], existingIdsByType("task"));
   mapByNewIds(nodeDiff.agentNodes.toCreate, response.agent_node_list ?? [], existingIdsByType("agent"));
@@ -31220,7 +31567,53 @@ function applySaveResponse(desired, remote, response) {
     response.classification_decision_table_node_list ?? [],
     existingIdsByType("classification-decision-table")
   );
+  mapByNewIds(
+    nodeDiff.knowledgeRetrieverNodes.toCreate,
+    response.knowledge_node_list ?? [],
+    existingIdsByType("knowledge-retriever")
+  );
+  mapByNewIds(nodeDiff.keyValueNodes.toCreate, response.key_value_node_list ?? [], existingIdsByType("key-value"));
   return mapping;
+}
+
+// src/compiler/artifact.ts
+function isSymbolicRef(value) {
+  return typeof value === "object" && value !== null && typeof value.$ref === "string" && Object.keys(value).length === 1;
+}
+function substituteRefs(value, resolve) {
+  if (isSymbolicRef(value)) {
+    return resolve(value.$ref);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => substituteRefs(item, resolve));
+  }
+  if (typeof value === "object" && value !== null) {
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = substituteRefs(entry, resolve);
+    }
+    return result;
+  }
+  return value;
+}
+function collectRefs(value, into = /* @__PURE__ */ new Set()) {
+  if (isSymbolicRef(value)) {
+    into.add(value.$ref);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectRefs(item, into);
+  } else if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) collectRefs(entry, into);
+  }
+  return into;
+}
+function ragRefKey(collectionRefKey, ragType) {
+  return `${collectionRefKey}#rag:${ragType}`;
+}
+var RAG_REF_KEY = /^(.+)#rag:(naive|graph)$/;
+function parseRagRefKey(refKey) {
+  const match = RAG_REF_KEY.exec(refKey);
+  if (!match) return null;
+  return { collectionRefKey: match[1], ragType: match[2] };
 }
 
 // src/compiler/layout.ts
@@ -31229,7 +31622,6 @@ var LAYOUT_NODE_TYPES = {
   TASK: "task",
   TOOL: "tool",
   LLM: "llm",
-  PROJECT: "project",
   PYTHON: "python",
   EDGE: "edge",
   START: "start",
@@ -31243,7 +31635,8 @@ var LAYOUT_NODE_TYPES = {
   SUBGRAPH: "subgraph",
   AUDIO_TO_TEXT: "audio-to-text-node",
   SCHEDULE_TRIGGER: "schedule-trigger",
-  CODE_AGENT: "code-agent"
+  KNOWLEDGE_RETRIEVER: "knowledge-retriever",
+  KEY_VALUE: "key-value"
 };
 var GRID_CELL_SIZE = 20;
 var HORIZONTAL_GAP = 360;
@@ -31541,11 +31934,27 @@ function computeAutoArrangePositions(nodes, connections) {
   return positions;
 }
 
+// src/compiler/template-refs.ts
+function isModelRef(value) {
+  return typeof value === "object" && value !== null && typeof value.$model === "string";
+}
+function isEnvRef(value) {
+  return typeof value === "object" && value !== null && typeof value.$env === "string";
+}
+function isBuiltinToolRef(value) {
+  return typeof value === "object" && value !== null && typeof value.$tool === "string";
+}
+function isStorageFileRef(value) {
+  return typeof value === "object" && value !== null && typeof value.$storageFile === "string";
+}
+var SECRET_NAME_PREFIX = "es-mcp:";
+function secretName(envName) {
+  return `${SECRET_NAME_PREFIX}${envName}`;
+}
+
 // src/compiler/emit.ts
 var NODE_COLORS = {
   start: "#d3d3d3",
-  crew: "#5672cd",
-  // frontend NodeType.PROJECT
   python: "#ffcf3f",
   task: "#2aba6b",
   agent: "#685fff",
@@ -31559,11 +31968,12 @@ var NODE_COLORS = {
   "schedule-trigger": "#FF5C00",
   "decision-table": "#00aaff",
   // frontend NodeType.TABLE
-  "classification-decision-table": "#2a5bd7"
+  "classification-decision-table": "#2a5bd7",
+  "knowledge-retriever": "#D9D9DE",
+  "key-value": "#14B8A6"
 };
 var NODE_ICONS = {
   start: "ti ti-player-play-filled",
-  crew: "ti ti-folder",
   python: "ti ti-brand-python",
   task: "ti ti-circle-check",
   agent: "ti ti-robot",
@@ -31576,7 +31986,9 @@ var NODE_ICONS = {
   "telegram-trigger": "ti ti-brand-telegram",
   "schedule-trigger": "ti ti-calendar",
   "decision-table": "ti ti-table",
-  "classification-decision-table": "ti ti-table-options"
+  "classification-decision-table": "ti ti-table-options",
+  "knowledge-retriever": "ti ti-books",
+  "key-value": "ti ti-database"
 };
 var DEFAULT_NODE_SIZE = { width: 320, height: 80 };
 var NODE_SIZES = {
@@ -31584,7 +31996,6 @@ var NODE_SIZES = {
 };
 var LAYOUT_TYPE_BY_NODE_TYPE = {
   start: LAYOUT_NODE_TYPES.START,
-  crew: LAYOUT_NODE_TYPES.PROJECT,
   python: LAYOUT_NODE_TYPES.PYTHON,
   task: LAYOUT_NODE_TYPES.TASK,
   agent: LAYOUT_NODE_TYPES.AGENT,
@@ -31599,10 +32010,47 @@ var LAYOUT_TYPE_BY_NODE_TYPE = {
   "schedule-trigger": LAYOUT_NODE_TYPES.SCHEDULE_TRIGGER,
   "decision-table": LAYOUT_NODE_TYPES.TABLE,
   // 'table' — enum value differs
-  "classification-decision-table": LAYOUT_NODE_TYPES.CLASSIFICATION_TABLE
+  "classification-decision-table": LAYOUT_NODE_TYPES.CLASSIFICATION_TABLE,
+  "knowledge-retriever": LAYOUT_NODE_TYPES.KNOWLEDGE_RETRIEVER,
+  "key-value": LAYOUT_NODE_TYPES.KEY_VALUE
 };
 var RefRegistry = class {
   existingBySection = /* @__PURE__ */ new Map();
+  /** Environment variable names a credential is read from — one Secret each. */
+  secretEnvNames = /* @__PURE__ */ new Set();
+  keyValueTableNames = /* @__PURE__ */ new Set();
+  /** `{$ref}` to the org Secret holding the value of environment variable `envName`. */
+  secret(envName) {
+    this.secretEnvNames.add(envName);
+    return { $ref: entityKey("secrets", envName) };
+  }
+  /** `{$ref}` to the org Key-Value table named `tableName`. */
+  keyValueTable(tableName) {
+    this.keyValueTableNames.add(tableName);
+    return { $ref: entityKey("key_value_tables", tableName) };
+  }
+  secretPlans() {
+    return [...this.secretEnvNames].sort().map((envName) => ({
+      key: entityKey("secrets", envName),
+      section: "secrets",
+      name: envName,
+      kind: "secret",
+      action: "ensure",
+      remoteName: secretName(envName),
+      payload: { name: secretName(envName), value: { $env: envName } }
+    }));
+  }
+  keyValueTablePlans() {
+    return [...this.keyValueTableNames].sort().map((tableName) => ({
+      key: entityKey("key_value_tables", tableName),
+      section: "key_value_tables",
+      name: tableName,
+      kind: "key_value_table",
+      action: "ensure",
+      remoteName: tableName,
+      payload: { name: tableName }
+    }));
+  }
   ref(section, entityRef2) {
     if (typeof entityRef2 === "string") {
       return { $ref: `${section}.${entityRef2}` };
@@ -31648,21 +32096,22 @@ function upsertPlan(section, name, kind, sourceDefinition, payload, extra) {
     ...extra?.rag !== void 0 ? { rag: extra.rag } : {}
   };
 }
-function buildLlmConfigPlans(source) {
+function buildLlmConfigPlans(source, registry2) {
   return Object.entries(source.llm_configs).map(([name, config2]) => {
     const model = {
       $model: config2.model,
       ...config2.provider !== void 0 ? { provider: config2.provider } : {},
       ...config2.base_url !== void 0 ? { base_url: config2.base_url } : {}
     };
-    const apiKey = config2.api_key_env !== void 0 ? { $env: config2.api_key_env } : "";
     const payload = {
       custom_name: name,
       // `model` is a numeric id on the wire; flow source only knows the model
       // NAME, so a {$model} template ref sits here — the pusher resolves it
       // via the llm-models list (see template-refs.ts).
       model,
-      api_key: apiKey,
+      // The key is an org Secret (LLMConfigSerializer.api_key_secret_id), never a raw value.
+      // Omitted without api_key_env so an update never clears a secret attached in the UI.
+      ...config2.api_key_env !== void 0 ? { api_key_secret_id: registry2.secret(config2.api_key_env) } : {},
       ...config2.temperature !== void 0 ? { temperature: config2.temperature } : {},
       ...config2.max_tokens !== void 0 ? { max_tokens: config2.max_tokens } : {},
       // Extra provider params (top_p, timeout, …) pass through at top level.
@@ -31902,11 +32351,12 @@ async function buildGraph(source, flowDir, registry2, diagnostics) {
     });
   };
   let nodeNumber = 0;
-  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+  for (const [nodeName, parsedNode] of Object.entries(source.flow.nodes)) {
     nodeNumber += 1;
     const uuid2 = uuidOf(nodeName);
     const nodePath = `flow.nodes.${nodeName}`;
-    invariant(node.type !== "llm" && node.type !== "code-agent", "forbidden node type");
+    invariant(isWritableNode(parsedNode), "forbidden node type");
+    const node = parsedNode;
     const type = node.type;
     const base = {
       id: uuid2,
@@ -32015,15 +32465,6 @@ Expected output: ${node.expected_output}` : node.task;
           data: { id: registry2.ref("flows", node.graph) }
         });
         break;
-      case "crew": {
-        invariant(node.crew !== void 0, `crew node '${nodeName}' has no crew reference`);
-        nodes.push({
-          ...base,
-          type: "crew",
-          data: { id: registry2.ref("crews", node.crew) }
-        });
-        break;
-      }
       case "webhook-trigger":
         nodes.push({
           ...base,
@@ -32039,9 +32480,9 @@ Expected output: ${node.expected_output}` : node.task;
           ...base,
           type: "telegram-trigger",
           data: {
-            // {$env} ref in a string position — the token itself never lives
-            // in flow source; the pusher substitutes the env value.
-            telegram_bot_api_key: node.bot_token_env !== void 0 ? { $env: node.bot_token_env } : "",
+            // {$ref: "secrets.<ENV>"} in a numeric position — the token itself never
+            // lives in flow source or the graph; the pusher stores it as an org Secret.
+            telegram_bot_api_key_secret_id: node.bot_token_env !== void 0 ? registry2.secret(node.bot_token_env) : null,
             webhook_trigger: null,
             fields: []
           }
@@ -32166,6 +32607,48 @@ Expected output: ${node.expected_output}` : node.task;
         }
         break;
       }
+      case "knowledge-retriever": {
+        const collectionRef = registry2.ref("knowledge", node.collection);
+        const ragType = node.rag ?? (typeof node.collection === "string" ? source.knowledge[node.collection]?.rag.strategy : void 0);
+        invariant(ragType !== void 0, `knowledge-retriever '${nodeName}' has no rag type`);
+        const searchMethod = node.search_method ?? (node.search_configs?.graph !== void 0 ? "basic" : null);
+        nodes.push({
+          ...base,
+          type: "knowledge-retriever",
+          data: {
+            source_collection: collectionRef,
+            rag_type: ragType,
+            rag_id: { $ref: ragRefKey(collectionRef.$ref, ragType) },
+            query: node.query,
+            search_method: searchMethod,
+            search_configs: node.search_configs !== void 0 ? {
+              ...node.search_configs.naive !== void 0 ? { naive: node.search_configs.naive } : {},
+              ...node.search_configs.graph !== void 0 ? {
+                graph: {
+                  ...node.search_configs.graph,
+                  search_method: searchMethod ?? "basic"
+                }
+              } : {}
+            } : null
+          }
+        });
+        break;
+      }
+      case "key-value":
+        nodes.push({
+          ...base,
+          type: "key-value",
+          // The backend always stores null — no key-value mode writes a node output.
+          output_variable_path: null,
+          data: {
+            key_value_table: registry2.keyValueTable(node.table),
+            mode: node.mode,
+            entries: node.entries.map(
+              (entry) => node.mode === "delete" ? { key: entry.key } : { key: entry.key, value: (entry.value ?? "").trim() }
+            )
+          }
+        });
+        break;
       default: {
         invariant(false, `unhandled node type '${node.type}'`);
       }
@@ -32195,7 +32678,7 @@ function applyLayout(source, nodes, layoutConnections) {
   const computed = computeAutoArrangePositions(layoutNodes, layoutConnections);
   const pinnedByName = /* @__PURE__ */ new Map();
   for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
-    if (node.type === "llm" || node.type === "code-agent") {
+    if (!isWritableNode(node)) {
       continue;
     }
     if (node.position !== void 0) {
@@ -32244,7 +32727,7 @@ function layoutBounds(nodes) {
 async function emitFlow(source, flowDir) {
   const diagnostics = [];
   const registry2 = new RefRegistry();
-  const llmPlans = buildLlmConfigPlans(source);
+  const llmPlans = buildLlmConfigPlans(source, registry2);
   const toolConfigPlans = buildToolConfigPlans(source);
   const pythonToolPlans = await buildPythonToolPlans(source, flowDir, diagnostics);
   const mcpToolPlans = buildMcpToolPlans(source, diagnostics);
@@ -32259,6 +32742,9 @@ async function emitFlow(source, flowDir) {
   );
   applyLayout(source, nodes, layoutConnections);
   const entities = [
+    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    ...registry2.secretPlans(),
+    ...registry2.keyValueTablePlans(),
     ...registry2.existingPlans("llm_configs", "llm_config"),
     ...llmPlans,
     ...registry2.existingPlans("tools.tool_configs", "tool_config"),
@@ -32272,14 +32758,13 @@ async function emitFlow(source, flowDir) {
     ...registry2.existingPlans("surfaces", "surface"),
     ...surfacePlans,
     ...registry2.existingPlans("agents", "agent_definition"),
-    ...agentPlans,
-    ...registry2.existingPlans("crews", "crew")
+    ...agentPlans
   ];
   const nodesPerType = {};
   for (const node of nodes) {
     nodesPerType[node.type] = (nodesPerType[node.type] ?? 0) + 1;
   }
-  const plansPerAction = { upsert: 0, "resolve-existing": 0 };
+  const plansPerAction = { upsert: 0, "resolve-existing": 0, ensure: 0 };
   for (const plan of entities) {
     plansPerAction[plan.action] = (plansPerAction[plan.action] ?? 0) + 1;
   }
@@ -32313,8 +32798,81 @@ function validateFlow(source, resolved) {
   validateSurfaceBodies(source, diagnostics);
   validateOwnerAgentAttachments(source, diagnostics);
   validateTopology(source, diagnostics);
+  validateKnowledgeRetrieverNodes(source, diagnostics);
+  validateKeyValueNodes(source, diagnostics);
   validateUnusedEntities(source, resolved, diagnostics);
   return diagnostics;
+}
+var QUERY_PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+function validateKnowledgeRetrieverNodes(source, diagnostics) {
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    if (node.type !== "knowledge-retriever") continue;
+    const nodePath = `flow.nodes.${nodeName}`;
+    let ragType = node.rag;
+    if (typeof node.collection === "string") {
+      const strategy = source.knowledge[node.collection]?.rag.strategy;
+      if (strategy !== void 0 && ragType !== void 0 && ragType !== strategy) {
+        diagnostics.push(
+          makeError(
+            `${nodePath}.rag`,
+            `rag '${ragType}' does not match collection '${node.collection}', whose rag.strategy is '${strategy}'`
+          )
+        );
+      }
+      ragType ??= strategy;
+    } else if (ragType === void 0) {
+      diagnostics.push(
+        makeError(
+          `${nodePath}.rag`,
+          `collection { existing: "${node.collection.existing}" } is remote \u2014 set rag: naive | graph to pick which of its RAGs to search`
+        )
+      );
+    }
+    if (ragType === "naive" && node.search_method !== void 0) {
+      diagnostics.push(makeError(`${nodePath}.search_method`, "search_method applies to graph RAG only"));
+    }
+    if (ragType === "naive" && node.search_configs?.graph !== void 0) {
+      diagnostics.push(makeError(`${nodePath}.search_configs.graph`, "graph search configs apply to graph RAG only"));
+    }
+    if (ragType === "graph" && node.search_configs?.naive !== void 0) {
+      diagnostics.push(makeError(`${nodePath}.search_configs.naive`, "naive search configs apply to naive RAG only"));
+    }
+    for (const match of node.query.matchAll(QUERY_PLACEHOLDER)) {
+      const placeholder = match[1] ?? "";
+      if (!(placeholder in node.input_map)) {
+        diagnostics.push(
+          makeWarning(
+            `${nodePath}.query`,
+            `query placeholder '{${placeholder}}' has no input_map entry \u2014 it is sent to the search literally`
+          )
+        );
+      }
+    }
+    if (node.output_variable_path === void 0) {
+      diagnostics.push(
+        makeWarning(nodePath, "knowledge-retriever node has no output_variable_path \u2014 its search results are discarded")
+      );
+    }
+  }
+}
+var PULL_PLACEHOLDER_NAMES = /* @__PURE__ */ new Set(["UNRESOLVED", "UNASSIGNED"]);
+function validateKeyValueNodes(source, diagnostics) {
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    if (node.type !== "key-value") continue;
+    const nodePath = `flow.nodes.${nodeName}`;
+    if (PULL_PLACEHOLDER_NAMES.has(node.table)) {
+      diagnostics.push(
+        makeError(`${nodePath}.table`, `'${node.table}' is a pull_flow placeholder \u2014 set the Key-Value table name`)
+      );
+    }
+    if (node.entries.length === 0) {
+      diagnostics.push(makeWarning(`${nodePath}.entries`, "key-value node has no entries \u2014 it does nothing at run time"));
+    }
+    for (const issue2 of validateKeyValueEntries(node.mode, node.entries)) {
+      const at = issue2.index === null ? `${nodePath}.entries` : `${nodePath}.entries[${issue2.index}]`;
+      diagnostics.push(makeError(at, issue2.message));
+    }
+  }
 }
 function refIdentity(ref) {
   return typeof ref === "string" ? `local:${ref}` : `existing:${ref.existing}`;
@@ -32573,14 +33131,6 @@ function validateTopology(source, diagnostics) {
     if (node.type === "task" && node.task.trim() === "") {
       diagnostics.push(makeError(`${nodePath}.task`, "task text must not be blank"));
     }
-    if (node.type === "crew" && node.crew === void 0) {
-      diagnostics.push(
-        makeError(
-          `${nodePath}.crew`,
-          'crew node needs a crew reference ({existing: "<remote crew name>"}) \u2014 there is nothing to run without one'
-        )
-      );
-    }
     if (node.type === "decision-table") {
       node.rules.forEach((rule, index) => {
         if (rule.next_node === nodeName) {
@@ -32639,51 +33189,6 @@ function validateUnusedEntities(source, resolved, diagnostics) {
       }
     }
   }
-}
-
-// src/compiler/artifact.ts
-function isSymbolicRef(value) {
-  return typeof value === "object" && value !== null && typeof value.$ref === "string" && Object.keys(value).length === 1;
-}
-function substituteRefs(value, resolve) {
-  if (isSymbolicRef(value)) {
-    return resolve(value.$ref);
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => substituteRefs(item, resolve));
-  }
-  if (typeof value === "object" && value !== null) {
-    const result = {};
-    for (const [key, entry] of Object.entries(value)) {
-      result[key] = substituteRefs(entry, resolve);
-    }
-    return result;
-  }
-  return value;
-}
-function collectRefs(value, into = /* @__PURE__ */ new Set()) {
-  if (isSymbolicRef(value)) {
-    into.add(value.$ref);
-  } else if (Array.isArray(value)) {
-    for (const item of value) collectRefs(item, into);
-  } else if (typeof value === "object" && value !== null) {
-    for (const entry of Object.values(value)) collectRefs(entry, into);
-  }
-  return into;
-}
-
-// src/compiler/template-refs.ts
-function isModelRef(value) {
-  return typeof value === "object" && value !== null && typeof value.$model === "string";
-}
-function isEnvRef(value) {
-  return typeof value === "object" && value !== null && typeof value.$env === "string";
-}
-function isBuiltinToolRef(value) {
-  return typeof value === "object" && value !== null && typeof value.$tool === "string";
-}
-function isStorageFileRef(value) {
-  return typeof value === "object" && value !== null && typeof value.$storageFile === "string";
 }
 
 // src/compiler/index.ts
@@ -32827,10 +33332,11 @@ async function fetchReferencedEntityNames(deps, dto) {
   );
   const needsPythonTools = inlineSurfaces.some((surface) => (surface.python_tools ?? []).length > 0);
   const needsMcpTools = inlineSurfaces.some((surface) => (surface.mcp_tools ?? []).length > 0);
-  const needsCollections = inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0);
-  const needsGraphList = dto.subgraph_node_list.some((node) => !node.subgraph_detail?.name);
+  const needsCollections = inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0) || (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
+  const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
+  const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
   const emptyMap = () => /* @__PURE__ */ new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames] = await Promise.all([
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] = await Promise.all([
     mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
     mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
     needsLlmConfigs ? deps.llm.listConfigs().then((configs) => new Map(configs.map((config2) => [config2.id, config2.custom_name]))) : Promise.resolve(emptyMap()),
@@ -32841,15 +33347,16 @@ async function fetchReferencedEntityNames(deps, dto) {
         list.map((collection) => [collection.collection_id ?? collection.id, collection.collection_name]).filter((pair) => typeof pair[0] === "number")
       )
     ) : Promise.resolve(emptyMap()),
-    needsGraphList ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name]))) : Promise.resolve(emptyMap())
+    needsGraphList ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name]))) : Promise.resolve(emptyMap()),
+    needsKeyValueTables ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name]))) : Promise.resolve(emptyMap())
   ]);
   const subgraphs = new Map(graphNames);
   for (const node of dto.subgraph_node_list) {
-    if (node.subgraph_detail?.name) {
+    if (node.subgraph != null && node.subgraph_detail?.name) {
       subgraphs.set(node.subgraph, node.subgraph_detail.name);
     }
   }
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
 }
 async function mapFromFetches(ids, fetchOne, nameOf) {
   const pairs = await Promise.all(ids.map(async (id) => [id, nameOf(await fetchOne(id))]));
@@ -32894,7 +33401,6 @@ function collectNodes(dto, warnings) {
       (node) => ({ type: "audio-to-text", dto: node })
     ),
     ...dto.subgraph_node_list.map((node) => ({ type: "subgraph", dto: node })),
-    ...dto.crew_node_list.map((node) => ({ type: "crew", dto: node })),
     ...dto.webhook_trigger_node_list.map(
       (node) => ({ type: "webhook-trigger", dto: node })
     ),
@@ -32909,7 +33415,11 @@ function collectNodes(dto, warnings) {
     ),
     ...dto.classification_decision_table_node_list.map(
       (node) => ({ type: "classification-decision-table", dto: node })
-    )
+    ),
+    ...(dto.knowledge_node_list ?? []).map(
+      (node) => ({ type: "knowledge-retriever", dto: node })
+    ),
+    ...(dto.key_value_node_list ?? []).map((node) => ({ type: "key-value", dto: node }))
   ];
   const sorted = [...entries].sort(
     (a, b) => nodeNumberOf(metadataOf(a.dto)) - nodeNumberOf(metadataOf(b.dto))
@@ -33097,8 +33607,10 @@ function buildNodeBody(collected, registry2, names, warnings) {
       if (entry.dto.use_storage) {
         warnings.push(`${atPath}: use_storage is not representable in flow source and resets on the next push`);
       }
-      if (Object.keys(entry.dto.stream_config ?? {}).length > 0) {
-        warnings.push(`${atPath}: stream_config is not representable in flow source and resets on the next push`);
+      if ((entry.dto.python_code.secrets ?? []).length > 0) {
+        warnings.push(
+          `${atPath}: declared secrets are not representable in flow source \u2014 they are kept on the next push`
+        );
       }
       if (Object.keys(entry.dto.test_input ?? {}).length > 0) {
         warnings.push(`${atPath}: test_input is not representable in flow source and resets on the next push`);
@@ -33143,22 +33655,12 @@ function buildNodeBody(collected, registry2, names, warnings) {
         ...outputVariablePathField2(entry.dto.output_variable_path)
       };
     case "subgraph": {
-      const subgraphName = names.subgraphs.get(entry.dto.subgraph) ?? missingName(`subgraph flow #${entry.dto.subgraph}`, atPath, warnings);
+      const subgraphId = entry.dto.subgraph;
+      const subgraphName = subgraphId == null ? missingName("subgraph flow (it was deleted \u2014 the node points at nothing)", atPath, warnings) : names.subgraphs.get(subgraphId) ?? missingName(`subgraph flow #${subgraphId}`, atPath, warnings);
       return {
         type: "subgraph",
         position,
         graph: existingRef(subgraphName),
-        ...inputMapField2(entry.dto.input_map, atPath, warnings),
-        ...outputVariablePathField2(entry.dto.output_variable_path)
-      };
-    }
-    case "crew": {
-      const crew = entry.dto.crew;
-      const crewName = typeof crew === "object" && crew !== null && typeof crew.name === "string" ? crew.name : missingName("crew name (the serializer did not nest it)", atPath, warnings);
-      return {
-        type: "crew",
-        position,
-        crew: existingRef(crewName),
         ...inputMapField2(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField2(entry.dto.output_variable_path)
       };
@@ -33172,6 +33674,11 @@ function buildNodeBody(collected, registry2, names, warnings) {
       if (Object.keys(entry.dto.input_map ?? {}).length > 0) {
         warnings.push(`${atPath}: input_map is not representable on webhook-trigger nodes and resets on the next push`);
       }
+      if (entry.dto.webhook_trigger != null) {
+        warnings.push(
+          `${atPath}: the attached webhook trigger (#${entry.dto.webhook_trigger}) is not representable in flow source \u2014 it is kept on the next push`
+        );
+      }
       return {
         type: "webhook-trigger",
         position,
@@ -33179,9 +33686,9 @@ function buildNodeBody(collected, registry2, names, warnings) {
       };
     }
     case "telegram-trigger": {
-      if (entry.dto.telegram_bot_api_key !== "") {
+      if (entry.dto.telegram_bot_api_key_secret_id != null) {
         warnings.push(
-          `${atPath}: the Telegram bot token is a secret and is not pulled \u2014 set bot_token_env locally or the token resets on the next push`
+          `${atPath}: the Telegram bot token lives in org secret #${entry.dto.telegram_bot_api_key_secret_id} and is not pulled \u2014 it is kept on the next push unless you set bot_token_env`
         );
       }
       if ((entry.dto.fields ?? []).length > 0) {
@@ -33199,7 +33706,54 @@ function buildNodeBody(collected, registry2, names, warnings) {
       return buildDecisionTableBody(entry.dto, name, position, registry2, warnings);
     case "classification-decision-table":
       return buildClassificationBody(entry.dto, name, position, registry2, names, warnings);
+    case "knowledge-retriever":
+      return buildKnowledgeRetrieverBody(entry.dto, name, position, names, warnings);
+    case "key-value":
+      return buildKeyValueBody(entry.dto, name, position, names, warnings);
   }
+}
+function buildKnowledgeRetrieverBody(dto, name, position, names, warnings) {
+  const atPath = `flow.nodes.${name}`;
+  const collectionName = dto.source_collection == null ? missingName("knowledge collection (none selected on the remote node)", atPath, warnings) : names.collections.get(dto.source_collection) ?? missingName(`knowledge collection #${dto.source_collection}`, atPath, warnings);
+  let query = dto.query ?? "";
+  if (query.trim() === "") {
+    warnings.push(`${atPath}.query: the remote node has no query \u2014 placeholder written, fill it in`);
+    query = "TODO: search query";
+  }
+  if (dto.rag_type == null) {
+    warnings.push(`${atPath}.rag: the remote node has no RAG selected \u2014 set rag: naive | graph before pushing`);
+  }
+  const searchMethod = dto.search_method ?? dto.search_configs?.graph?.search_method ?? void 0;
+  const graphConfigs = dto.search_configs?.graph ? Object.fromEntries(Object.entries(dto.search_configs.graph).filter(([key]) => key !== "search_method")) : void 0;
+  const searchConfigs = {
+    ...dto.search_configs?.naive ? { naive: dto.search_configs.naive } : {},
+    ...graphConfigs !== void 0 ? { graph: graphConfigs } : {}
+  };
+  return {
+    type: "knowledge-retriever",
+    position,
+    collection: existingRef(collectionName),
+    ...dto.rag_type != null ? { rag: dto.rag_type } : {},
+    query,
+    ...dto.rag_type === "graph" && searchMethod != null ? { search_method: searchMethod } : {},
+    ...Object.keys(searchConfigs).length > 0 ? { search_configs: searchConfigs } : {},
+    ...inputMapField2(dto.input_map, atPath, warnings),
+    ...outputVariablePathField2(dto.output_variable_path)
+  };
+}
+function buildKeyValueBody(dto, name, position, names, warnings) {
+  const atPath = `flow.nodes.${name}`;
+  const tableName = dto.key_value_table == null ? missingName("key-value table (none selected on the remote node)", atPath, warnings) : names.keyValueTables.get(dto.key_value_table) ?? missingName(`key-value table #${dto.key_value_table}`, atPath, warnings);
+  const mode = dto.mode ?? "read";
+  return {
+    type: "key-value",
+    position,
+    table: tableName,
+    mode,
+    entries: (dto.entries ?? []).map(
+      (entry) => mode === "delete" || !("value" in entry) ? { key: entry.key } : { key: entry.key, value: entry.value }
+    )
+  };
 }
 function buildDecisionTableBody(dto, name, position, registry2, warnings) {
   const atPath = `flow.nodes.${name}`;
@@ -33488,7 +34042,12 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
       group_name: group.group_name,
       order: typeof group.order === "number" ? group.order : index + 1,
       expression: group.expression || null,
-      prompt_id: group.prompt_id || null,
+      // Link the group to its prompt by prompt_key (group.prompt_id holds the
+      // key). The backend resolves it node-locally, so a prompt created in
+      // this same save connects in one payload. `prompt` (numeric id) is
+      // still sent for back-compat; the backend prefers prompt_key.
+      prompt_key: group.prompt_id ?? null,
+      prompt: tableData?.prompts?.[group.prompt_id ?? ""]?.backendId ?? null,
       manipulation: group.manipulation || null,
       continue_flag: !!(group.continue_flag ?? group.continue),
       route_code: group.route_code || null,
@@ -33516,6 +34075,8 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
   }
   const defaultRef = resolveNodeRef(defaultTargetUuid, allNodes, idMap);
   const errorRef = resolveNodeRef(errorTargetUuid, allNodes, idMap);
+  const preSecretIds = preComputation.secret_ids || [];
+  const postSecretIds = postComputation.secret_ids || [];
   const promptConfigs = Object.entries(tableData?.prompts || {}).map(([key, config2]) => ({
     prompt_key: key,
     prompt_text: config2.prompt_text ?? "",
@@ -33527,21 +34088,23 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
   return {
     graph: graphId,
     node_name: node.node_name,
-    pre_python_code: preCodeValue.trim() === "" ? null : {
+    pre_python_code: preCodeValue.trim() === "" && !preSecretIds.length ? null : {
       code: preCodeValue,
-      libraries: preComputation.libraries || [],
+      libraries: preComputation.libraries ?? [],
       entrypoint: "main",
-      global_kwargs: {}
+      global_kwargs: {},
+      secret_ids: preSecretIds
     },
-    pre_input_map: preComputation.input_map || tableData?.pre_input_map || {},
+    pre_input_map: preComputation.input_map ?? tableData?.pre_input_map ?? {},
     pre_output_variable_path: preComputation.output_variable_path || tableData?.pre_output_variable_path || null,
-    post_python_code: postCodeValue.trim() === "" ? null : {
+    post_python_code: postCodeValue.trim() === "" && !postSecretIds.length ? null : {
       code: postCodeValue,
-      libraries: postComputation.libraries || [],
+      libraries: postComputation.libraries ?? [],
       entrypoint: "main",
-      global_kwargs: {}
+      global_kwargs: {},
+      secret_ids: postSecretIds
     },
-    post_input_map: postComputation.input_map || tableData?.post_input_map || {},
+    post_input_map: postComputation.input_map ?? tableData?.post_input_map ?? {},
     post_output_variable_path: postComputation.output_variable_path || tableData?.post_output_variable_path || null,
     prompt_configs: promptConfigs,
     default_llm_config: tableData?.default_llm_config ?? null,
@@ -33621,7 +34184,6 @@ function buildBulkSavePayload(options) {
   });
   const deleted = {
     start_node_ids: nodeDiff.startNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
-    crew_node_ids: nodeDiff.crewNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     python_node_ids: nodeDiff.pythonNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     task_node_ids: nodeDiff.taskNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     agent_node_ids: nodeDiff.agentNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
@@ -33635,8 +34197,9 @@ function buildBulkSavePayload(options) {
     schedule_trigger_node_ids: nodeDiff.scheduleNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     decision_table_node_ids: nodeDiff.decisionTableNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     graph_note_ids: nodeDiff.noteNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
-    code_agent_node_ids: [],
     classification_decision_table_node_ids: nodeDiff.classificationDecisionTableNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
+    knowledge_node_ids: nodeDiff.knowledgeRetrieverNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
+    key_value_node_ids: nodeDiff.keyValueNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     edge_ids: connectionDiff.toDelete.map((edge) => edge.backendId).filter((id) => id != null)
   };
   return {
@@ -33644,15 +34207,6 @@ function buildBulkSavePayload(options) {
     start_node_list: nodeItems(nodeDiff.startNodes, (node) => ({
       graph: graphId,
       variables: node.data.initialState ?? {},
-      metadata: toNodeMetadata(node)
-    })),
-    crew_node_list: nodeItems(nodeDiff.crewNodes, (node) => ({
-      node_name: node.node_name,
-      graph: graphId,
-      crew_id: node.data.id,
-      input_map: node.input_map || {},
-      output_variable_path: node.output_variable_path || null,
-      stream_config: node.stream_config ?? {},
       metadata: toNodeMetadata(node)
     })),
     python_node_list: nodeItems(nodeDiff.pythonNodes, (node) => {
@@ -33663,7 +34217,6 @@ function buildBulkSavePayload(options) {
         python_code: pythonCode,
         input_map: node.input_map || {},
         output_variable_path: node.output_variable_path || null,
-        stream_config: node.stream_config ?? {},
         use_storage: use_storage ?? false,
         test_input: node.test_input ?? {},
         metadata: toNodeMetadata(node)
@@ -33733,7 +34286,7 @@ function buildBulkSavePayload(options) {
     telegram_trigger_node_list: nodeItems(nodeDiff.telegramNodes, (node) => ({
       node_name: node.node_name,
       graph: graphId,
-      telegram_bot_api_key: node.data.telegram_bot_api_key,
+      telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
       webhook_trigger: node.data.webhook_trigger,
       fields: node.data.fields,
       metadata: toNodeMetadata(node)
@@ -33759,6 +34312,29 @@ function buildBulkSavePayload(options) {
       nodeDiff.classificationDecisionTableNodes,
       (node) => buildCdtNodePayload(node, graphId, desired.nodes, idMap, desired.edges)
     ),
+    knowledge_node_list: nodeItems(nodeDiff.knowledgeRetrieverNodes, (node) => ({
+      node_name: node.node_name,
+      graph: graphId,
+      input_map: node.input_map || {},
+      output_variable_path: node.output_variable_path || null,
+      source_collection: node.data?.source_collection ?? null,
+      rag_type: node.data?.rag_type ?? null,
+      rag_id: node.data?.rag_id ?? null,
+      query: node.data?.query ?? "",
+      search_method: node.data?.search_method ?? null,
+      search_configs: node.data?.search_configs ?? null,
+      metadata: toNodeMetadata(node)
+    })),
+    key_value_node_list: nodeItems(nodeDiff.keyValueNodes, (node) => ({
+      node_name: node.node_name,
+      graph: graphId,
+      input_map: node.input_map || {},
+      output_variable_path: null,
+      key_value_table: node.data?.key_value_table ?? null,
+      mode: node.data?.mode ?? "read",
+      entries: node.data?.entries ?? [],
+      metadata: toNodeMetadata(node)
+    })),
     edge_list: [...edgeList, ...edgeUpdateList],
     deleted
   };
@@ -33787,6 +34363,9 @@ function baseNode(type, dto) {
     output_variable_path: dto.output_variable_path ?? null
   };
 }
+function toSecretIds(secrets) {
+  return (secrets ?? []).map((secret) => secret.id);
+}
 function toCustomPythonCode(code, fallbackName) {
   const withName = code;
   return {
@@ -33794,15 +34373,9 @@ function toCustomPythonCode(code, fallbackName) {
     name: withName.name ?? fallbackName,
     libraries: withName.libraries,
     code: withName.code,
-    entrypoint: withName.entrypoint
+    entrypoint: withName.entrypoint,
+    secret_ids: toSecretIds(withName.secrets)
   };
-}
-function crewIdOf(crew) {
-  if (typeof crew === "number") return crew;
-  if (typeof crew === "object" && crew !== null && typeof crew.id === "number") {
-    return crew.id;
-  }
-  return 0;
 }
 function toAgentTasks(dto) {
   return [...dto.tasks ?? []].sort((a, b) => a.order - b.order).map((task) => ({
@@ -33869,6 +34442,7 @@ function toCdtTableState(dto, uuidOf) {
   const prompts = {};
   for (const config2 of dto.prompt_configs ?? []) {
     prompts[config2.prompt_key] = {
+      backendId: config2.id,
       prompt_text: config2.prompt_text,
       llm_config: config2.llm_config,
       output_schema: config2.output_schema,
@@ -33881,7 +34455,8 @@ function toCdtTableState(dto, uuidOf) {
       group_name: group.group_name,
       order: group.order,
       expression: group.expression,
-      prompt_id: group.prompt_id,
+      // Mirrors the frontend load mapper: the group's prompt key, looked up by prompt id.
+      prompt_id: (dto.prompt_configs ?? []).find((config2) => config2.id === group.prompt)?.prompt_key ?? null,
       manipulation: group.manipulation,
       continue_flag: group.continue_flag,
       route_code: group.route_code,
@@ -33899,13 +34474,15 @@ function toCdtTableState(dto, uuidOf) {
       code: dto.pre_python_code?.code ?? "",
       libraries: dto.pre_python_code?.libraries ?? [],
       input_map: dto.pre_input_map ?? {},
-      output_variable_path: dto.pre_output_variable_path ?? null
+      output_variable_path: dto.pre_output_variable_path ?? null,
+      secret_ids: toSecretIds(dto.pre_python_code?.secrets)
     },
     post_computation: {
       code: dto.post_python_code?.code ?? "",
       libraries: dto.post_python_code?.libraries ?? [],
       input_map: dto.post_input_map ?? {},
-      output_variable_path: dto.post_output_variable_path ?? null
+      output_variable_path: dto.post_output_variable_path ?? null,
+      secret_ids: toSecretIds(dto.post_python_code?.secrets)
     }
   };
 }
@@ -33917,7 +34494,6 @@ function buildUuidByBackendId(dto) {
     }
   };
   register("start", dto.start_node_list);
-  register("crew", dto.crew_node_list);
   register("python", dto.python_node_list);
   register("task", dto.task_node_list);
   register("agent", dto.agent_node_list);
@@ -33931,6 +34507,8 @@ function buildUuidByBackendId(dto) {
   register("decision-table", dto.decision_table_node_list);
   register("note", dto.graph_note_list);
   register("classification-decision-table", dto.classification_decision_table_node_list);
+  register("knowledge-retriever", dto.knowledge_node_list);
+  register("key-value", dto.key_value_node_list);
   return uuidByBackendId;
 }
 function collectOrphanEdgeIds(dto) {
@@ -33955,14 +34533,6 @@ function buildRemoteState(dto) {
         data: { initialState: node.variables ?? {} }
       })
     ),
-    ...(dto.crew_node_list ?? []).map(
-      (node) => ({
-        ...baseNode("crew", node),
-        type: "crew",
-        data: { id: crewIdOf(node.crew) },
-        ...node.stream_config !== void 0 ? { stream_config: node.stream_config } : {}
-      })
-    ),
     ...(dto.python_node_list ?? []).map(
       (node) => ({
         ...baseNode("python", node),
@@ -33971,7 +34541,6 @@ function buildRemoteState(dto) {
           ...toCustomPythonCode(node.python_code, node.node_name),
           ...node.use_storage !== void 0 ? { use_storage: node.use_storage } : {}
         },
-        ...node.stream_config !== void 0 ? { stream_config: node.stream_config } : {},
         test_input: node.test_input ?? {}
       })
     ),
@@ -34036,7 +34605,7 @@ function buildRemoteState(dto) {
         ...baseNode("telegram-trigger", node),
         type: "telegram-trigger",
         data: {
-          telegram_bot_api_key: node.telegram_bot_api_key,
+          telegram_bot_api_key_secret_id: node.telegram_bot_api_key_secret_id ?? null,
           webhook_trigger: node.webhook_trigger ?? null,
           fields: (node.fields ?? []).map((field) => ({
             ...field.id !== void 0 ? { id: field.id } : {},
@@ -34079,6 +34648,35 @@ function buildRemoteState(dto) {
         type: "classification-decision-table",
         data: { table: toCdtTableState(node, uuidOf) }
       })
+    ),
+    ...(dto.knowledge_node_list ?? []).map(
+      (node) => ({
+        ...baseNode("knowledge-retriever", node),
+        type: "knowledge-retriever",
+        data: {
+          source_collection: node.source_collection ?? null,
+          rag_type: node.rag_type ?? null,
+          rag_id: node.rag_id ?? null,
+          query: node.query ?? "",
+          // search_method is write-only on the backend; the read-back search_configs
+          // carries the effective graph method, so recover it from there.
+          search_method: node.search_method ?? node.search_configs?.graph?.search_method ?? null,
+          search_configs: node.search_configs ?? null
+        }
+      })
+    ),
+    ...(dto.key_value_node_list ?? []).map(
+      (node) => ({
+        ...baseNode("key-value", node),
+        type: "key-value",
+        data: {
+          key_value_table: node.key_value_table ?? null,
+          mode: node.mode ?? "read",
+          entries: node.entries ?? []
+        },
+        // No key-value mode writes an output; read values go to each entry's own path.
+        output_variable_path: null
+      })
     )
   ];
   const edges = [];
@@ -34099,6 +34697,28 @@ function buildRemoteState(dto) {
   }
   return { nodes, edges };
 }
+
+// src/api/key-value-tables.ts
+var KeyValueTablesApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async list() {
+    const response = await this.client.get("key-value-tables/", {
+      query: { limit: 1e3 }
+    });
+    return Array.isArray(response) ? response : response.results;
+  }
+  /** Table names are unique per org, case-insensitively (KeyValueTableSerializer). */
+  async findByName(name) {
+    const wanted = name.toLowerCase();
+    return (await this.list()).find((table) => table.name.toLowerCase() === wanted);
+  }
+  async create(request) {
+    return this.client.post("key-value-tables/", { body: request });
+  }
+};
 
 // src/api/storage.ts
 var StorageApi = class {
@@ -34126,20 +34746,59 @@ var StorageApi = class {
   }
 };
 
-// src/api/legacy-crew.ts
-function unwrap7(response) {
-  return Array.isArray(response) ? response : response.results;
+// src/api/secrets.ts
+var TAIL_LENGTH = 4;
+var MIN_LENGTH_FOR_TAIL = 9;
+function secretTail(value) {
+  return value.length >= MIN_LENGTH_FOR_TAIL ? value.slice(-TAIL_LENGTH) : "";
 }
-var LegacyCrewApi = class {
-  constructor(client) {
+var SecretsApi = class {
+  constructor(client, session) {
     this.client = client;
+    this.session = session;
   }
   client;
-  async listCrews() {
-    return unwrap7(await this.client.get("crews/", { query: { limit: 1e3 } }));
+  session;
+  async list() {
+    const response = await this.withSession(
+      (bearerToken) => this.client.get("secrets/", { bearerToken, query: { limit: 1e3 } })
+    );
+    return Array.isArray(response) ? response : response.results;
   }
-  async createCrew(request) {
-    return this.client.post("crews/", { body: request });
+  async findByName(name) {
+    return (await this.list()).find((secret) => secret.name === name);
+  }
+  /**
+   * Create a secret. Errors are re-thrown WITHOUT the response body: validation bodies
+   * echo the submitted `value`, which must never reach logs or the MCP client.
+   */
+  async create(name, value) {
+    try {
+      return await this.withSession(
+        (bearerToken) => this.client.post("secrets/", { bearerToken, body: { name, value } })
+      );
+    } catch (error2) {
+      if (error2 instanceof ApiError) {
+        const reasons = (error2.validationErrors ?? []).filter((issue2) => issue2.field !== "value").map((issue2) => `${issue2.field}: ${issue2.reason}`);
+        const valueRejected = (error2.validationErrors ?? []).some((issue2) => issue2.field === "value");
+        throw new ApiError(
+          error2.status,
+          error2.url,
+          `Creating secret "${name}" failed with HTTP ${error2.status}` + (reasons.length > 0 ? ` \u2014 ${reasons.join("; ")}` : "") + (valueRejected ? " \u2014 the secret value was rejected (value not shown)" : "")
+        );
+      }
+      throw error2;
+    }
+  }
+  async withSession(call) {
+    try {
+      return await call(await this.session.accessToken());
+    } catch (error2) {
+      if (error2 instanceof ApiError && error2.status === 401) {
+        return call(await this.session.renewAccessToken());
+      }
+      throw error2;
+    }
   }
 };
 
@@ -34153,8 +34812,9 @@ var EntityPusher = class {
     this.knowledge = new KnowledgeApi(context.client);
     this.surfaces = new SurfacesApi(context.client);
     this.agentDefinitions = new AgentDefinitionsApi(context.client);
-    this.crews = new LegacyCrewApi(context.client);
     this.storage = new StorageApi(context.client);
+    this.secrets = new SecretsApi(context.client, context.auth);
+    this.keyValueTables = new KeyValueTablesApi(context.client);
   }
   context;
   llm;
@@ -34162,8 +34822,9 @@ var EntityPusher = class {
   knowledge;
   surfaces;
   agentDefinitions;
-  crews;
   storage;
+  secrets;
+  keyValueTables;
   modelIdByName = null;
   builtinToolIdByName = null;
   /**
@@ -34187,6 +34848,12 @@ var EntityPusher = class {
         actions.push({ key: plan.key, kind: plan.kind, action: "resolved-existing", backendId: backendId2 });
         continue;
       }
+      if (plan.action === "ensure") {
+        const { backendId: backendId2, created } = await this.ensureEntity(plan);
+        idMap.set(plan.key, backendId2);
+        actions.push({ key: plan.key, kind: plan.kind, action: created ? "created" : "reused", backendId: backendId2 });
+        continue;
+      }
       const resolvedPayload = await this.resolvePayload(plan.payload ?? {}, idMap, plan.key);
       const hash = plan.contentHash ?? contentHash(plan.payload ?? {});
       const lockEntry = getEntity(currentLock, plan.section, plan.name);
@@ -34207,6 +34874,10 @@ var EntityPusher = class {
       actions.push({ key: plan.key, kind: plan.kind, action, backendId });
       if (plan.kind === "knowledge_collection") {
         currentLock = await this.pushCollectionExtras(plan, backendId, idMap, currentLock);
+        const ragEntry = plan.rag ? getEntity(currentLock, plan.section, `${plan.name}#rag`) : void 0;
+        if (plan.rag && ragEntry) {
+          idMap.set(ragRefKey(plan.key, plan.rag.strategy), ragEntry.backendId);
+        }
       }
     }
     return { idMap, lock: currentLock, actions };
@@ -34234,13 +34905,7 @@ var EntityPusher = class {
       return this.resolveModelId(value.$model, value.provider);
     }
     if (isEnvRef(value)) {
-      const resolved = process.env[value.$env];
-      if (resolved === void 0) {
-        throw new Error(
-          `Environment variable "${value.$env}" is not set for the MCP server. Secrets referenced in flow source ({$env}) must be provided in the plugin environment.`
-        );
-      }
-      return resolved;
+      return this.readEnv(value.$env);
     }
     if (isBuiltinToolRef(value)) {
       return this.resolveBuiltinToolId(value.$tool);
@@ -34260,13 +34925,66 @@ var EntityPusher = class {
     }
     return value;
   }
+  /**
+   * `ensure` plans: org-level rows identified by name. Looked up on every push (a lock
+   * entry could point at a deleted row) and created only when missing.
+   */
+  async ensureEntity(plan) {
+    const name = plan.remoteName ?? plan.name;
+    switch (plan.kind) {
+      case "secret":
+        return this.ensureSecret(plan, name);
+      case "key_value_table": {
+        const existing = await this.keyValueTables.findByName(name);
+        if (existing) return { backendId: existing.id, created: false };
+        logger.info(`Creating key-value table "${name}"`);
+        return { backendId: (await this.keyValueTables.create({ name })).id, created: true };
+      }
+      default:
+        throw new Error(`Entity kind ${plan.kind} has no ensure path \u2014 compiler bug.`);
+    }
+  }
+  /**
+   * Store the value of the plan's environment variable as the org Secret `name`.
+   * Secrets are immutable, so an existing secret is reused only when its visible tail
+   * matches the current value; a mismatch means the env value was rotated and the user
+   * must delete the old secret (it may still be referenced elsewhere). The value is
+   * never logged, echoed, or written to the lockfile.
+   */
+  async ensureSecret(plan, name) {
+    const payload = plan.payload ?? {};
+    const envRef = payload["value"];
+    if (!isEnvRef(envRef)) {
+      throw new Error(`Secret plan "${plan.key}" carries no {$env} value \u2014 compiler bug.`);
+    }
+    const value = this.readEnv(envRef.$env);
+    const existing = await this.secrets.findByName(name);
+    if (existing) {
+      if (existing.tail !== secretTail(value)) {
+        throw new Error(
+          `Org secret "${name}" already exists but holds a different value than ${envRef.$env} (tail ${existing.tail ? `\u2026${existing.tail}` : "hidden"}). EpicStaff secrets are immutable \u2014 delete "${name}" in EpicStaff (Settings \u2192 Secrets) and push again, or restore the previous value of ${envRef.$env}.`
+        );
+      }
+      return { backendId: existing.id, created: false };
+    }
+    logger.info(`Creating org secret "${name}" from ${envRef.$env}`);
+    return { backendId: (await this.secrets.create(name, value)).id, created: true };
+  }
+  readEnv(envName) {
+    const resolved = process.env[envName];
+    if (resolved === void 0 || resolved === "") {
+      throw new Error(
+        `Environment variable "${envName}" is not set for the MCP server. Secrets referenced in flow source must be provided in the plugin environment.`
+      );
+    }
+    return resolved;
+  }
   async resolveBuiltinToolId(toolName) {
     if (!this.builtinToolIdByName) {
       const builtinTools = await this.tools.listBuiltinTools();
       this.builtinToolIdByName = /* @__PURE__ */ new Map();
       for (const tool of builtinTools) {
         this.builtinToolIdByName.set(tool.name.toLowerCase(), tool.id);
-        if (tool.name_alias) this.builtinToolIdByName.set(tool.name_alias.toLowerCase(), tool.id);
       }
     }
     const id = this.builtinToolIdByName.get(toolName.toLowerCase());
@@ -34331,8 +35049,6 @@ var EntityPusher = class {
         return (await this.surfaces.list()).find(nameMatches)?.id;
       case "agent_definition":
         return (await this.agentDefinitions.list()).find(nameMatches)?.id;
-      case "crew":
-        return (await this.crews.listCrews()).find(nameMatches)?.id;
       default:
         return void 0;
     }
@@ -34366,8 +35082,6 @@ var EntityPusher = class {
         return (await this.surfaces.create(payload)).id;
       case "agent_definition":
         return (await this.agentDefinitions.create(payload)).id;
-      case "crew":
-        return (await this.crews.createCrew(payload)).id;
       default:
         throw new Error(`Unknown entity kind: ${plan.kind}`);
     }
@@ -34393,8 +35107,7 @@ var EntityPusher = class {
       case "knowledge_collection":
         return backendId;
       case "tool_config":
-      case "crew":
-        logger.warn(`Update for ${plan.kind} is not supported \u2014 keeping existing #${backendId} unchanged.`);
+        await this.tools.updateToolConfig(backendId, payload);
         return backendId;
       default:
         throw new Error(`Unknown entity kind: ${plan.kind}`);
@@ -34462,10 +35175,10 @@ var EntityPusher = class {
     if (resolved !== void 0) return resolved;
     if (ref.$ref.startsWith("embedders.")) {
       const embedderName = ref.$ref.slice("embedders.".length).replace(/^existing:/, "");
-      const configs = await this.llm.listEmbeddingConfigs();
       if (embedderName === "default") {
-        return this.resolveDefaultEmbedderId(configs);
+        return resolveDefaultEmbeddingConfigId(this.llm);
       }
+      const configs = await this.llm.listEmbeddingConfigs();
       const named = configs.find(
         (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === embedderName.toLowerCase()
       );
@@ -34477,36 +35190,41 @@ var EntityPusher = class {
     }
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
   }
-  /**
-   * Resolve "the org default embedder" to a concrete EmbeddingConfig id.
-   *
-   * `default-embedding-config/` is NOT a pointer to a selectable EmbeddingConfig
-   * row — it returns only `{model, task_type, api_key}` (no id). So we resolve by
-   * matching that default's embedding *model* to a config that uses it; if that is
-   * ambiguous or absent we fall back to the sole config, and only error when the
-   * choice is genuinely undecidable.
-   */
-  async resolveDefaultEmbedderId(configs) {
-    if (configs.length === 0) {
-      throw new Error(
-        "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder)."
-      );
-    }
-    const defaultConfig = await this.context.client.get("default-embedding-config/").catch(() => void 0);
-    const defaultModelId = defaultConfig?.model;
-    if (defaultModelId !== void 0) {
-      const byModel = configs.find((config2) => config2.model === defaultModelId);
-      if (byModel) return byModel.id;
-    }
-    if (configs.length === 1) return configs[0].id;
-    const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
-    throw new Error(
-      `Cannot pick a default embedding config: the organization has several and none matches the configured default embedding model. Set knowledge.<name>.rag.embedder to one of: ${available}.`
-    );
-  }
 };
 function isSymbolicRefLike(value) {
   return typeof value.$ref === "string" && Object.keys(value).length === 1;
+}
+
+// src/pusher/rag-refs.ts
+async function resolveRagRefs(artifact, idMap, context) {
+  const resolved = /* @__PURE__ */ new Map();
+  const knowledge = new KnowledgeApi(context.client);
+  for (const refKey of collectRefs(artifact.graph)) {
+    const ragRef = parseRagRefKey(refKey);
+    if (ragRef === null || idMap.has(refKey)) continue;
+    const collectionId = idMap.get(ragRef.collectionRefKey);
+    if (collectionId === void 0) {
+      throw new Error(
+        `Knowledge-retriever RAG ref "${refKey}" names collection "${ragRef.collectionRefKey}", which was not resolved \u2014 compiler ordering bug.`
+      );
+    }
+    const candidates = (await knowledge.listAvailableRags(collectionId)).filter(
+      (rag) => rag.rag_type === ragRef.ragType
+    );
+    if (candidates.length === 0) {
+      throw new Error(
+        `Collection #${collectionId} (${ragRef.collectionRefKey}) has no ${ragRef.ragType} RAG. Attach and index one in EpicStaff, or set rag: to the type it has.`
+      );
+    }
+    const newest = [...candidates].sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))[0];
+    if (candidates.length > 1) {
+      logger.info(
+        `Collection #${collectionId} has ${candidates.length} ${ragRef.ragType} RAGs \u2014 using the newest (#${newest.rag_id})`
+      );
+    }
+    resolved.set(refKey, newest.rag_id);
+  }
+  return resolved;
 }
 
 // src/pusher/flow-refs.ts
@@ -34622,6 +35340,7 @@ var GraphPusher = class {
         currentLock = removeEntity(currentLock, NODE_SECTION, node.node_name);
       }
     }
+    inheritUnrepresentableFields(desired, remote);
     const payload = buildBulkSavePayload({
       graphId: remoteDto.id,
       desired,
@@ -34726,6 +35445,25 @@ var GraphPusher = class {
     return currentLock;
   }
 };
+function inheritUnrepresentableFields(desired, remote) {
+  const remoteById = /* @__PURE__ */ new Map();
+  for (const node of remote.nodes) {
+    if (node.backendId != null) remoteById.set(node.backendId, node);
+  }
+  for (const node of desired.nodes) {
+    const previous = node.backendId != null ? remoteById.get(node.backendId) : void 0;
+    if (previous === void 0 || previous.type !== node.type) continue;
+    if (node.type === "webhook-trigger" && previous.type === "webhook-trigger") {
+      node.data.webhook_trigger ??= previous.data.webhook_trigger;
+      node.data.python_code.secret_ids ??= previous.data.python_code.secret_ids;
+    } else if (node.type === "telegram-trigger" && previous.type === "telegram-trigger") {
+      node.data.webhook_trigger ??= previous.data.webhook_trigger;
+      node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
+    } else if (node.type === "python" && previous.type === "python") {
+      node.data.secret_ids ??= previous.data.secret_ids;
+    }
+  }
+}
 
 // src/pusher/restore.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -34744,12 +35482,10 @@ function prepareRestoreState(dto) {
     node.backendId = null;
     const data = node.data;
     if (data == null) continue;
-    if (node.type === "python") {
-      const code = data;
-      if (code.id !== void 0) {
-        delete code.id;
-        pythonCodeRows += 1;
-      }
+    const code = node.type === "python" ? data : node.type === "webhook-trigger" ? data["python_code"] : void 0;
+    if (code?.id !== void 0) {
+      delete code.id;
+      pythonCodeRows += 1;
     }
     if (node.type === "agent") {
       const tasks = data.tasks;
@@ -34764,6 +35500,17 @@ function prepareRestoreState(dto) {
     }
   }
   for (const edge of state.edges) edge.backendId = null;
+  const detachedTriggers = state.nodes.filter(
+    (node) => (node.type === "webhook-trigger" || node.type === "telegram-trigger") && node.data.webhook_trigger != null
+  );
+  for (const node of detachedTriggers) {
+    if (node.type === "webhook-trigger" || node.type === "telegram-trigger") node.data.webhook_trigger = null;
+  }
+  if (detachedTriggers.length > 0) {
+    warnings.push(
+      `${detachedTriggers.length} trigger node(s) had a webhook trigger attached; it was NOT copied (sharing it would make the copy fire on the original webhook). Attach a webhook trigger to the restored node(s) in the EpicStaff editor.`
+    );
+  }
   const ids = /* @__PURE__ */ new Set();
   for (const node of state.nodes) {
     ids.add(node.id);
@@ -34900,7 +35647,7 @@ function registerFlowTools(server, context) {
     "dump_graph",
     {
       title: "Dump a graph's complete raw backend JSON (faithful backup)",
-      description: "Write a graph's ENTIRE backend representation to a local .json file, verbatim. Unlike pull_flow \u2014 which projects the graph through the flow-source compiler and silently discards every field flow source cannot express (end-node output_map, classification-decision-table prompt_configs and route codes, python stream_config/test_input, task output_schema, error routes) \u2014 this filters nothing. That makes it the only faithful snapshot of a graph, and the right thing to take before editing a production flow. Read-only against the backend: it never writes to EpicStaff. The output is an archival record for diffing and manual restore, not a pushable flow source.",
+      description: "Write a graph's ENTIRE backend representation to a local .json file, verbatim. Unlike pull_flow \u2014 which projects the graph through the flow-source compiler and silently discards every field flow source cannot express (end-node output_map, classification-decision-table prompt_configs and route codes, python test_input and secrets, task output_schema, error routes) \u2014 this filters nothing. That makes it the only faithful snapshot of a graph, and the right thing to take before editing a production flow. Read-only against the backend: it never writes to EpicStaff. The output is an archival record for diffing and manual restore, not a pushable flow source.",
       inputSchema: {
         graph_id: external_exports.number().int().describe("Backend id of the graph to dump"),
         output_path: external_exports.string().describe("Absolute path of the .json file to write (parent dirs are created)")
@@ -34931,7 +35678,7 @@ function registerFlowTools(server, context) {
         }
         if (value === null || typeof value !== "object") return;
         for (const [key, child] of Object.entries(value)) {
-          if (["output_map", "prompt_configs", "stream_config", "output_schema", "test_input"].includes(key) && child != null && !(Array.isArray(child) && child.length === 0) && !(typeof child === "object" && !Array.isArray(child) && Object.keys(child).length === 0)) {
+          if (["output_map", "prompt_configs", "secrets", "output_schema", "test_input"].includes(key) && child != null && !(Array.isArray(child) && child.length === 0) && !(typeof child === "object" && !Array.isArray(child) && Object.keys(child).length === 0)) {
             if (!seen.has(key)) {
               seen.add(key);
               lossyFieldsCaptured.push(key);
@@ -34959,7 +35706,7 @@ function registerFlowTools(server, context) {
     "restore_graph",
     {
       title: "Restore a dump_graph JSON into a NEW graph (faithful copy)",
-      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python stream_config/test_input, task output_schema, and error routes. Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
+      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python test_input and secrets, task output_schema, and error routes. Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
       inputSchema: {
         dump_path: external_exports.string().describe("Absolute path of a JSON file previously written by dump_graph"),
         name: external_exports.string().optional().describe("Name for the new graph (required unless target_graph_id is given)"),
@@ -35083,6 +35830,9 @@ function registerFlowTools(server, context) {
         if (plan.action === "resolve-existing") {
           return { key: plan.key, kind: plan.kind, wouldDo: "resolve-existing", remoteName: plan.remoteName };
         }
+        if (plan.action === "ensure") {
+          return { key: plan.key, kind: plan.kind, wouldDo: "reuse-or-create-by-name", remoteName: plan.remoteName };
+        }
         const entry = getEntity(lock, plan.section, plan.name);
         if (!entry) return { key: plan.key, kind: plan.kind, wouldDo: "create" };
         if (plan.contentHash && entry.contentHash !== plan.contentHash) {
@@ -35110,7 +35860,7 @@ function registerFlowTools(server, context) {
     "push_flow",
     {
       title: "Push flow to EpicStaff",
-      description: "Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order (llm-configs \u2192 tools \u2192 knowledge+documents+RAG \u2192 surfaces \u2192 agent-definitions), then create/update the graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) \u2014 never duplicates. Fails on remote save_version conflict unless force is set.",
+      description: "Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order (secrets + key-value tables \u2192 llm-configs \u2192 tools \u2192 knowledge+documents+RAG \u2192 surfaces \u2192 agent-definitions), then create/update the graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) \u2014 never duplicates. Fails on remote save_version conflict unless force is set.",
       inputSchema: {
         flow_dir: external_exports.string().describe("Absolute path of the flow directory"),
         force: external_exports.boolean().optional().describe("Overwrite remote graph changes on save_version conflict (default false)")
@@ -35134,6 +35884,10 @@ function registerFlowTools(server, context) {
       const flowRefs = await resolveFlowRefs(artifact, flow_dir, context);
       for (const [refKey, graphId] of flowRefs) {
         entityResult.idMap.set(refKey, graphId);
+      }
+      const ragRefs = await resolveRagRefs(artifact, entityResult.idMap, context);
+      for (const [refKey, ragId] of ragRefs) {
+        entityResult.idMap.set(refKey, ragId);
       }
       const graphPusher = new GraphPusher(context);
       const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, {
@@ -35215,7 +35969,8 @@ function registerFlowTools(server, context) {
           surfaces: new SurfacesApi(context.client),
           llm: new LlmApi(context.client),
           tools: new ToolsApi(context.client),
-          knowledge: new KnowledgeApi(context.client)
+          knowledge: new KnowledgeApi(context.client),
+          keyValueTables: new KeyValueTablesApi(context.client)
         },
         graph_id,
         target_dir
@@ -35285,10 +36040,6 @@ var SessionsApi = class {
     return this.client.get("graph-session-messages/", {
       query: { session_id: sessionId, limit, offset }
     });
-  }
-  /** Respond to a wait_for_user human-input request mid-run. */
-  async answerToLlm(request) {
-    return this.client.post("answer-to-llm/", { body: request });
   }
 };
 function summarizeMessages(messages) {
@@ -35368,7 +36119,7 @@ function registerRunTools(server, context) {
     "get_session_updates",
     {
       title: "Poll session status",
-      description: "Lightweight status poll for a running session (the headless substitute for the UI SSE stream). Statuses: pending, run, wait_for_user (needs answer_to_llm), end, error, stop, expired.",
+      description: "Lightweight status poll for a running session (the headless substitute for the UI SSE stream). Statuses: pending, run, wait_for_user (waiting for human input \u2014 the MCP has no reply tool; answer-to-llm was removed upstream), end, error, stop, expired.",
       inputSchema: {
         session_id: external_exports.number().int()
       }
@@ -35431,25 +36182,6 @@ function registerRunTools(server, context) {
       await context.auth.ensureAuthenticated();
       await sessions.stopSession(session_id);
       return { stopped: session_id };
-    })
-  );
-  server.registerTool(
-    "answer_to_llm",
-    {
-      title: "Answer a human-input request",
-      description: "Respond to a session in wait_for_user status. The waiting prompt and its crew_id/execution_order/name are in the session status_data / messages.",
-      inputSchema: {
-        session_id: external_exports.number().int(),
-        crew_id: external_exports.number().int(),
-        execution_order: external_exports.number().int(),
-        name: external_exports.string(),
-        answer: external_exports.string()
-      }
-    },
-    async (request) => runTool(async () => {
-      await context.auth.ensureAuthenticated();
-      await sessions.answerToLlm(request);
-      return { answered: request.session_id };
     })
   );
   server.registerTool(
@@ -35578,12 +36310,17 @@ var NODE_REFERENCE = {
   "webhook-trigger": {
     summary: "Starts the flow on an incoming webhook; its payload seeds flow state.",
     whenToUse: "Event-driven flows started by an external HTTP call. The trigger is the interface.",
-    caveats: []
+    caveats: [
+      "The node is pushed without a webhook trigger (path / provider); attach one in the EpicStaff UI \u2014 a repush keeps the attached trigger."
+    ]
   },
   "telegram-trigger": {
     summary: "Starts the flow on a Telegram message.",
     whenToUse: "Telegram-bot-driven flows. Supply the bot token via env, never in flow source.",
-    caveats: []
+    caveats: [
+      'bot_token_env is stored as the org Secret "es-mcp:<ENV>" on push, which needs a user session (EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD) \u2014 EpicStaff does not let API keys manage secrets.',
+      "The node is pushed without a webhook trigger; attach one (ngrok provider) in the EpicStaff UI so Telegram can reach it."
+    ]
   },
   "schedule-trigger": {
     summary: "Starts the flow on a cron schedule.",
@@ -35610,11 +36347,23 @@ var NODE_REFERENCE = {
     whenToUse: "Speech-to-text steps inside a flow.",
     caveats: []
   },
-  crew: {
-    summary: "DEPRECATED \u2014 runs a legacy remote crew (project). Prefer agent/task nodes.",
-    whenToUse: "Only when the user explicitly needs the legacy crew path. Emits a deprecation warning.",
+  "knowledge-retriever": {
+    summary: "Searches one RAG (naive or graph) of a knowledge collection with a query template and writes the joined results to output_variable_path.",
+    whenToUse: "Explicit retrieval as a flow step (RAG results as data), instead of giving an agent the collection through a surface.",
     caveats: [
-      'Deprecated. Crews cannot be defined in flow source \u2014 only referenced via {existing: "<name>"}.'
+      "The query is a template: {name} placeholders are filled from the node's input_map keys; an empty resulting query fails the run.",
+      "The collection must have an indexed RAG of the chosen type before the flow runs \u2014 push_flow picks the RAG, wait_for_collections waits for indexing. For an {existing: \u2026} collection set rag: naive | graph.",
+      'No matches is not an error: the output is the text "No relevant results were found in the knowledge collection."',
+      "search_method without graph search_configs cannot be read back from EpicStaff (write-only field), so such a node is re-sent (unchanged) on every push."
+    ]
+  },
+  "key-value": {
+    summary: "Reads, writes or deletes keys of an organization Key-Value table (persistent across sessions and flows).",
+    whenToUse: "Remembering small values between runs (user profiles, counters, cached results) without a python node.",
+    caveats: [
+      "The table is org-wide and shared by every flow that names it; it is created on push when missing.",
+      "read: each entry's value is the state path the stored value is written to (None when the key is missing, no |default). write: value is the state path to store (may end in |default). delete: key only.",
+      "Keys use letters, digits and _ plus {variables.<path>} placeholders; the node writes no output_variable_path."
     ]
   }
 };
@@ -35642,7 +36391,7 @@ function introspectNodeSchemas() {
         required: !field.isOptional()
       });
     }
-    result.push({ type: typeName, deprecated: typeName === "crew", fields });
+    result.push({ type: typeName, fields });
   }
   return result;
 }
@@ -35653,7 +36402,6 @@ var NODE_LIST_KEYS = [
   "agent_node_list",
   "task_node_list",
   "python_node_list",
-  "crew_node_list",
   "end_node_list",
   "graph_note_list",
   "file_extractor_node_list",
@@ -35663,7 +36411,9 @@ var NODE_LIST_KEYS = [
   "schedule_trigger_node_list",
   "decision_table_node_list",
   "classification_decision_table_node_list",
-  "audio_transcription_node_list"
+  "audio_transcription_node_list",
+  "knowledge_node_list",
+  "key_value_node_list"
 ];
 function summarizeGraph(graph) {
   const raw = graph;
@@ -35676,7 +36426,8 @@ function summarizeGraph(graph) {
         node_name: node.node_name,
         ...node.agent_definition !== void 0 && { agent_definition: node.agent_definition },
         ...node.surface_list !== void 0 && { surface_list: node.surface_list },
-        ...node.crew_id !== void 0 && { crew_id: node.crew_id }
+        ...node.source_collection !== void 0 && { source_collection: node.source_collection },
+        ...node.key_value_table !== void 0 && { key_value_table: node.key_value_table }
       }));
     }
   }
@@ -35773,13 +36524,15 @@ function registerReferenceTools(server, context) {
     "list_llm_configs",
     {
       title: "List LLM configs",
-      description: "List LLM configs (what agents reference as llm_config). Includes the org default when available.",
+      description: "List LLM configs (what agents reference as llm_config). Includes the org default agent LLM when one is set.",
       inputSchema: {}
     },
     async () => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      const [configs, defaultConfig] = await Promise.all([llm.listConfigs(), llm.getDefaultConfig()]);
+      const [configs, defaults] = await Promise.all([llm.listConfigs(), llm.getDefaultModels()]);
+      const defaultConfig = configs.find((config2) => config2.id === defaults.agent_llm_config);
       return {
+        // The org's default agent LLM (default-models/ → agent_llm_config).
         default: defaultConfig ? { id: defaultConfig.id, custom_name: defaultConfig.custom_name } : null,
         configs: configs.map((config2) => ({
           id: config2.id,
@@ -35828,7 +36581,7 @@ function registerReferenceTools(server, context) {
     "list_tools",
     {
       title: "List tools",
-      description: "List all three tool kinds agents can use: configured built-in tools, python-code tools, MCP tools. Surfaces reference python/MCP tools by id.",
+      description: "List all tool kinds agents can use: python-code tools (built_in = EpicStaff catalog tool), tool configs (named configurations of a python-code tool), MCP tools. Surfaces reference python/MCP tools by id.",
       inputSchema: {}
     },
     async () => runTool(async () => {
@@ -35840,7 +36593,12 @@ function registerReferenceTools(server, context) {
       ]);
       return {
         tool_configs: toolConfigs.map((tool) => ({ id: tool.id, name: tool.name, tool: tool.tool })),
-        python_code_tools: pythonCodeTools.map((tool) => ({ id: tool.id, name: tool.name, description: tool.description })),
+        python_code_tools: pythonCodeTools.map((tool) => ({
+          id: tool.id,
+          name: tool.name,
+          description: tool.description,
+          built_in: tool.built_in ?? false
+        })),
         mcp_tools: mcpTools.map((tool) => ({ id: tool.id, name: tool.name, tool_name: tool.tool_name }))
       };
     })
@@ -36381,9 +37139,9 @@ async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
   }
   return id;
 }
-async function resolveEmbedderRef(ref, llm, client) {
-  const configs = await llm.listEmbeddingConfigs();
+async function resolveEmbedderRef(ref, llm) {
   if (typeof ref === "number") return ref;
+  const configs = await llm.listEmbeddingConfigs();
   if (typeof ref === "string") {
     const wanted = ref.trim().toLowerCase();
     const named = configs.find(
@@ -36395,25 +37153,7 @@ async function resolveEmbedderRef(ref, llm, client) {
       `Embedding config "${ref}" not found in the organization. Available: ${available || "(none)"}.`
     );
   }
-  return resolveDefaultEmbedderId(configs, client);
-}
-async function resolveDefaultEmbedderId(configs, client) {
-  if (configs.length === 0) {
-    throw new Error(
-      "No embedding config exists in this organization \u2014 create one in EpicStaff settings (knowledge indexing needs an embedder), or pass rag.embedder explicitly."
-    );
-  }
-  const defaultConfig = await client.get("default-embedding-config/").catch(() => void 0);
-  const defaultModelId = defaultConfig?.model;
-  if (defaultModelId !== void 0) {
-    const byModel = configs.find((config2) => config2.model === defaultModelId);
-    if (byModel) return byModel.id;
-  }
-  if (configs.length === 1) return configs[0].id;
-  const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
-  throw new Error(
-    `Cannot pick a default embedding config: the organization has several and none matches the configured default embedding model. Pass rag.embedder as one of: ${available}.`
-  );
+  return resolveDefaultEmbeddingConfigId(llm);
 }
 function isAlreadyExistsError(error2) {
   if (error2.status === 409) return true;
@@ -36844,7 +37584,7 @@ function mergeSurfaceBody(current, newName, body) {
   return { name: newName ?? current.name, body: merged };
 }
 async function attachAndIndexRag(collectionId, rag, ctx) {
-  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm, ctx.client);
+  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm);
   if (rag.strategy === "naive") {
     if (rag.entity_types !== void 0 || rag.max_gleanings !== void 0) {
       throw new Error('entity_types and max_gleanings apply to graph RAG only \u2014 remove them or use strategy "graph".');
@@ -36902,9 +37642,11 @@ var EPICSTAFF_INSTRUCTIONS = [
   'scoped to exactly "user" or "organization".',
   "",
   "Invariants: agent nodes need at least one task (tasks:); no parallel fan-out \u2014 one active path,",
-  'branch with a decision-table or conditional edge; never use node types "llm" or "code-agent"',
-  '("crew" is deprecated, prefer agent/task nodes). Call describe_node_types for the full node',
-  "catalog (fields + runtime caveats).",
+  'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
+  '"crew" (removed from EpicStaff \u2014 use agent/task nodes). A key-value node writes its read entries',
+  "to their own state paths, not output_variable_path. Credentials come from env vars",
+  "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source.",
+  "Call describe_node_types for the full node catalog (fields + runtime caveats).",
   "",
   "Build flows with the es-* skills (front door: es-deliver \u2192 es-write-flow \u2192 build \u2192 push \u2192 test)."
 ].join("\n");
@@ -36913,7 +37655,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "3.0.1_legacy"
+      version: "3.1.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
