@@ -21,8 +21,12 @@ export interface RequestOptions {
   formData?: FormData;
   /** Skip API-key + org headers (auth endpoints). */
   skipAuth?: boolean;
-  /** Use a one-off bearer token instead of the API key (bootstrap: minting the key). */
+  /** Use a one-off bearer token instead of the API key (minting the key, JWT-only routes). */
   bearerToken?: string;
+  /** Cookies to send (the backend reads the refresh token only from its HttpOnly cookie). */
+  cookies?: Record<string, string>;
+  /** Receives the raw response headers (auth reads `Set-Cookie` from login / refresh). */
+  onResponseHeaders?: (headers: Headers) => void;
 }
 
 const ORG_HEADER_SKIP = [/\/api\/auth\//, /\/admin\/organizations\/\d+\//];
@@ -78,6 +82,7 @@ export class EpicStaffClient {
 
     logger.debug(`${method} ${url}`);
     const response = await fetch(url, init);
+    options.onResponseHeaders?.(response.headers);
 
     // Auth endpoints are exempt from the 401→re-auth retry (mirrors auth.interceptor.ts,
     // which never refresh-retries /auth/ URLs) — otherwise key validation would deadlock
@@ -128,10 +133,18 @@ export class EpicStaffClient {
       const { apiKey, bearerAccessToken } = this.store.get();
       if (apiKey) {
         headers.set('X-Api-Key', apiKey);
-      } else if (bearerAccessToken) {
+      } else if (bearerAccessToken && this.store.get().jwtOnly) {
         // Legacy backend with no API-key system (see auth.ts) — same JWT the frontend uses.
         headers.set('Authorization', `Bearer ${bearerAccessToken}`);
       }
+    }
+    if (options.cookies) {
+      headers.set(
+        'Cookie',
+        Object.entries(options.cookies)
+          .map(([name, value]) => `${name}=${value}`)
+          .join('; '),
+      );
     }
     if (!options.skipAuth && !ORG_HEADER_SKIP.some((pattern) => pattern.test(url))) {
       const { activeOrgId } = this.store.get();

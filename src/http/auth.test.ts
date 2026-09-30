@@ -16,8 +16,21 @@ const ENV = {
 
 type FetchCall = { url: string; method: string; headers: Headers; body?: unknown };
 
-function jsonResponse(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+function jsonResponse(status: number, body: unknown, setCookie?: string): Response {
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  if (setCookie !== undefined) headers.append('Set-Cookie', setCookie);
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
+/** Current backends: access in the body, refresh only in the HttpOnly `auth.refresh` cookie. */
+function loginResponse(access: string, refresh: string): Response {
+  return jsonResponse(200, { access }, `auth.refresh=${refresh}; HttpOnly; Path=/api/auth/; SameSite=Lax`);
+}
+
+/** A syntactically valid JWT whose `exp` is `secondsFromNow` away. */
+function jwt(subject: string, secondsFromNow = 3600): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'HS256' })}.${encode({ sub: subject, exp: Math.floor(Date.now() / 1000) + secondsFromNow })}.sig`;
 }
 
 describe('auth bootstrap + org resolution', () => {
@@ -61,12 +74,16 @@ describe('auth bootstrap + org resolution', () => {
     return { config, store, client, auth, org };
   }
 
-  it('first launch: logs in, mints a key with the bearer token, persists it', async () => {
-    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt-access', refresh: 'jwt-refresh' }));
-    routes.set('POST /api/auth/api-key/', (call) => {
+  it('first launch: logs in, mints a key via profile/api-keys/ with the bearer token, persists it', async () => {
+    routes.set('POST /api/auth/login/', (call) => {
+      expect(call.body).toMatchObject({ email: 'dev@example.com', remember_me: true });
+      return loginResponse('jwt-access', 'jwt-refresh');
+    });
+    routes.set('POST /api/profile/api-keys/', (call) => {
       expect(call.headers.get('Authorization')).toBe('Bearer jwt-access');
-      expect(call.body).toMatchObject({ scopes: [] });
-      return jsonResponse(201, { api_key: 'raw-key-abc', prefix: 'raw-key-', name: 'es-mcp' });
+      expect(call.headers.get('X-Api-Key')).toBeNull();
+      expect(Object.keys(call.body as object)).toEqual(['name']);
+      return jsonResponse(201, { id: 1, api_key: 'raw-key-abc', prefix: 'raw-key-', name: 'es-mcp', expires_at: null });
     });
 
     const { store, auth } = makeServices();
@@ -75,9 +92,67 @@ describe('auth bootstrap + org resolution', () => {
     expect(key).toBe('raw-key-abc');
     expect(store.get().apiKey).toBe('raw-key-abc');
     expect(store.get().keyPrefix).toBe('raw-key-');
+    expect(store.get().jwtOnly).toBe(false);
+    // The JWT session is kept (from the cookie) for JWT-only routes.
+    expect(store.get().bearerAccessToken).toBe('jwt-access');
+    expect(store.get().bearerRefreshToken).toBe('jwt-refresh');
     // login carried no api key header
     const login = calls.find((call) => call.url.includes('auth/login/'))!;
     expect(login.headers.get('X-Api-Key')).toBeNull();
+  });
+
+  it('API-key mode never sends the kept JWT on business calls', async () => {
+    routes.set('GET /api/graphs/', (call) => {
+      expect(call.headers.get('X-Api-Key')).toBe('k');
+      expect(call.headers.get('Authorization')).toBeNull();
+      return jsonResponse(200, { results: [] });
+    });
+    const { store, client } = makeServices();
+    store.update({ apiKey: 'k', keyPrefix: 'k', bearerAccessToken: 'jwt', bearerRefreshToken: 'r' });
+    await client.get('graphs/');
+  });
+
+  it('user session: reuses an unexpired access token without any request', async () => {
+    const { store, auth } = makeServices();
+    const live = jwt('user', 600);
+    store.update({ apiKey: 'k', keyPrefix: 'k', bearerAccessToken: live, bearerRefreshToken: 'r' });
+    expect(await auth.accessToken()).toBe(live);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('user session: refreshes an expired access token through the refresh cookie (no login)', async () => {
+    routes.set('POST /api/auth/refresh/', (call) => {
+      expect(call.headers.get('Cookie')).toBe('auth.refresh=refresh-1');
+      return jsonResponse(200, { access: 'access-2' }, 'auth.refresh=refresh-2; HttpOnly; Path=/api/auth/');
+    });
+    const { store, auth } = makeServices();
+    store.update({ apiKey: 'k', keyPrefix: 'k', bearerAccessToken: jwt('user', -60), bearerRefreshToken: 'refresh-1' });
+
+    expect(await auth.accessToken()).toBe('access-2');
+    expect(store.get().bearerRefreshToken).toBe('refresh-2'); // rotated cookie adopted
+    expect(calls.some((call) => call.url.includes('auth/login/'))).toBe(false);
+  });
+
+  it('user session: logs in once when there is no refresh token', async () => {
+    let logins = 0;
+    routes.set('POST /api/auth/login/', () => {
+      logins += 1;
+      return loginResponse('access-new', 'refresh-new');
+    });
+    const { store, auth } = makeServices();
+    store.update({ apiKey: 'k', keyPrefix: 'k' });
+
+    const [first, second] = await Promise.all([auth.renewAccessToken(), auth.renewAccessToken()]);
+    expect(first).toBe('access-new');
+    expect(second).toBe('access-new');
+    expect(logins).toBe(1); // single-flight
+    expect(store.get().bearerRefreshToken).toBe('refresh-new');
+    expect(store.get().apiKey).toBe('k'); // the API key is untouched
+  });
+
+  it('user session without credentials: explains that a user login is required', async () => {
+    const { auth } = makeServices({ EPICSTAFF_BASE_URL: 'http://es.test', EPICSTAFF_API_TOKEN: 'issued-key-123' });
+    await expect(auth.accessToken()).rejects.toThrow(/EPICSTAFF_USERNAME \+ EPICSTAFF_PASSWORD/);
   });
 
   it('subsequent launch: validates the stored key and skips login', async () => {
@@ -96,9 +171,9 @@ describe('auth bootstrap + org resolution', () => {
 
   it('invalid stored key: re-mints via login', async () => {
     routes.set('GET /api/auth/api-key/validate/', () => jsonResponse(401, { detail: 'invalid' }));
-    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt2', refresh: 'r2' }));
-    routes.set('POST /api/auth/api-key/', () =>
-      jsonResponse(201, { api_key: 'fresh-key', prefix: 'fresh-ke', name: 'es-mcp' }),
+    routes.set('POST /api/auth/login/', () => loginResponse('jwt2', 'r2'));
+    routes.set('POST /api/profile/api-keys/', () =>
+      jsonResponse(201, { id: 2, api_key: 'fresh-key', prefix: 'fresh-ke', name: 'es-mcp', expires_at: null }),
     );
 
     const { store, auth } = makeServices();
@@ -118,9 +193,9 @@ describe('auth bootstrap + org resolution', () => {
       }
       return jsonResponse(401, { detail: 'bad key' });
     });
-    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt3', refresh: 'r3' }));
-    routes.set('POST /api/auth/api-key/', () =>
-      jsonResponse(201, { api_key: 'good-key', prefix: 'good-key', name: 'es-mcp' }),
+    routes.set('POST /api/auth/login/', () => loginResponse('jwt3', 'r3'));
+    routes.set('POST /api/profile/api-keys/', () =>
+      jsonResponse(201, { id: 3, api_key: 'good-key', prefix: 'good-key', name: 'es-mcp', expires_at: null }),
     );
 
     const { store, client } = makeServices();
@@ -162,9 +237,9 @@ describe('auth bootstrap + org resolution', () => {
 
   it('rejected EPICSTAFF_API_TOKEN with credentials: falls back to login + mint', async () => {
     routes.set('GET /api/auth/api-key/validate/', () => jsonResponse(401, { detail: 'invalid' }));
-    routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt', refresh: 'r' }));
-    routes.set('POST /api/auth/api-key/', () =>
-      jsonResponse(201, { api_key: 'fresh-key', prefix: 'fresh-ke', name: 'es-mcp' }),
+    routes.set('POST /api/auth/login/', () => loginResponse('jwt', 'r'));
+    routes.set('POST /api/profile/api-keys/', () =>
+      jsonResponse(201, { id: 4, api_key: 'fresh-key', prefix: 'fresh-ke', name: 'es-mcp', expires_at: null }),
     );
 
     const { auth } = makeServices({
@@ -178,9 +253,9 @@ describe('auth bootstrap + org resolution', () => {
     expect(key).toBe('fresh-key');
   });
 
-  it('legacy backend (auth/api-key/ missing): falls back to JWT bearer auth', async () => {
+  it('legacy backend (profile/api-keys/ missing): falls back to JWT bearer auth', async () => {
+    // Legacy backends return the refresh token in the body, not a cookie.
     routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'jwt-access', refresh: 'jwt-refresh' }));
-    routes.set('POST /api/auth/api-key/', () => jsonResponse(404, { detail: 'no such route' }));
     routes.set('GET /api/graphs/', (call) => {
       expect(call.headers.get('Authorization')).toBe('Bearer jwt-access');
       expect(call.headers.get('X-Api-Key')).toBeNull();
@@ -194,15 +269,17 @@ describe('auth bootstrap + org resolution', () => {
     expect(store.get().apiKey).toBeNull();
     expect(store.get().bearerAccessToken).toBe('jwt-access');
     expect(store.get().bearerRefreshToken).toBe('jwt-refresh');
+    expect(store.get().jwtOnly).toBe(true);
 
     await client.get('graphs/');
   });
 
   it('bearer mode: the next bootstrap refreshes the access token via auth/refresh/', async () => {
     routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'access-1', refresh: 'refresh-1' }));
-    routes.set('POST /api/auth/api-key/', () => jsonResponse(404, { detail: 'no such route' }));
     routes.set('POST /api/auth/refresh/', (call) => {
+      // Sent both ways: body for legacy backends, cookie for current ones.
       expect(call.body).toEqual({ refresh: 'refresh-1' });
+      expect(call.headers.get('Cookie')).toBe('auth.refresh=refresh-1');
       return jsonResponse(200, { access: 'access-2' });
     });
 
@@ -219,7 +296,6 @@ describe('auth bootstrap + org resolution', () => {
 
   it('bearer mode: a rejected refresh token falls back to a fresh login', async () => {
     routes.set('POST /api/auth/login/', () => jsonResponse(200, { access: 'access-1', refresh: 'refresh-1' }));
-    routes.set('POST /api/auth/api-key/', () => jsonResponse(404, { detail: 'no such route' }));
     routes.set('POST /api/auth/refresh/', () => jsonResponse(401, { detail: 'refresh token expired' }));
 
     const { store, auth } = makeServices();
@@ -245,7 +321,7 @@ describe('auth bootstrap + org resolution', () => {
     });
 
     const { store, client } = makeServices();
-    store.update({ bearerAccessToken: 'stale-access', bearerRefreshToken: 'refresh-1' });
+    store.update({ bearerAccessToken: 'stale-access', bearerRefreshToken: 'refresh-1', jwtOnly: true });
 
     const result = await client.get<{ results: unknown[] }>('graphs/');
 
@@ -299,10 +375,10 @@ describe('auth bootstrap + org resolution', () => {
   it('org header is never attached to auth endpoints', async () => {
     routes.set('POST /api/auth/login/', (call) => {
       expect(call.headers.get('X-Organization-Id')).toBeNull();
-      return jsonResponse(200, { access: 'a', refresh: 'r' });
+      return loginResponse('a', 'r');
     });
-    routes.set('POST /api/auth/api-key/', () =>
-      jsonResponse(201, { api_key: 'nk', prefix: 'nk', name: 'es-mcp' }),
+    routes.set('POST /api/profile/api-keys/', () =>
+      jsonResponse(201, { id: 5, api_key: 'nk', prefix: 'nk', name: 'es-mcp', expires_at: null }),
     );
 
     const { store, auth } = makeServices();

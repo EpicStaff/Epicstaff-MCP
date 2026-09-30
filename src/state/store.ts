@@ -16,12 +16,15 @@ const stateSchema = z.object({
   apiKey: z.string().nullable(),
   keyPrefix: z.string().nullable(),
   /**
-   * JWT fallback for legacy backends with no auth/api-key/ minting route: the access
-   * token is sent as `Authorization: Bearer`, refreshed via auth/refresh/ using the
-   * refresh token. Mutually exclusive with apiKey — only one scheme is active at a time.
+   * The user's JWT session (login access token + refresh token). Used as the request
+   * scheme only when `jwtOnly` is set (a legacy backend without API-key minting); on
+   * current backends it is kept next to the API key solely for the JWT-only routes an
+   * API key may not call (`secrets/`). The client always prefers `apiKey`.
    */
   bearerAccessToken: z.string().nullable(),
   bearerRefreshToken: z.string().nullable(),
+  /** The backend has no API-key minting route — authenticate every request with the JWT. */
+  jwtOnly: z.boolean().default(false),
   activeOrgId: z.number().nullable(),
 });
 
@@ -59,6 +62,7 @@ export class StateStore {
       keyPrefix: null,
       bearerAccessToken: null,
       bearerRefreshToken: null,
+      jwtOnly: false,
       activeOrgId: null,
     };
     if (!existsSync(this.filePath)) {
