@@ -1,12 +1,6 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+node_modules/
+*.log
 .DS_Store
-.env
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-.uv/
+coverage/
+# dist/ is committed on release builds (the plugin launches dist/index.js),
+# but intermediate local builds shouldn't pollute diffs — commit dist/ deliberately.

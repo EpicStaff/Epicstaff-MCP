@@ -1,0 +1,28 @@
+{
+  "flowName": "stress-6-paths",
+  "graphId": 49,
+  "saveVersion": 9,
+  "entities": {
+    "nodes.Pick": {
+      "backendId": 622,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Second": {
+      "backendId": 623,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Summary": {
+      "backendId": 624,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__end_node__": {
+      "backendId": 626,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__start__": {
+      "backendId": 625,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  },
+  "documents": {}
+}

@@ -1,0 +1,47 @@
+meta:
+  name: stress-3-conditional-edge
+  description: Python assessment then a conditional edge (python decision code) that dynamically routes on a nested produced variable.
+variables:
+  amount: 0
+flow:
+  nodes:
+    __start__:
+      type: start
+    Assess:
+      type: python
+      code: |-
+        def main(a):
+            n = float(a)
+            return {"score": min(100, int(n / 10)), "amount": n}
+      input_map:
+        a: variables.amount
+      output_variable_path: variables.risk
+    Escalate:
+      type: python
+      code: |-
+        def main(r):
+            return {"path": "escalate", "score": r.get("score")}
+      input_map:
+        r: variables.risk
+      output_variable_path: variables.decision
+    AutoApprove:
+      type: python
+      code: |-
+        def main(r):
+            return {"path": "auto", "score": r.get("score")}
+      input_map:
+        r: variables.risk
+      output_variable_path: variables.decision
+    __end__:
+      type: end
+  edges:
+    - { from: __start__, to: Assess }
+    - from: Assess
+      condition:
+        code: |-
+          def main(score):
+              return "Escalate" if score >= 70 else "AutoApprove"
+        input_map:
+          score: variables.risk.score
+    - { from: Escalate, to: __end__ }
+    - { from: AutoApprove, to: __end__ }

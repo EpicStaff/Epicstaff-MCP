@@ -1,0 +1,18 @@
+# Valid but deprecated: 'crew' node produces a warning diagnostic.
+meta:
+  name: crew-node-example
+
+flow:
+  nodes:
+    start:
+      type: start
+    legacy:
+      type: crew
+      crew: { existing: "legacy-project" }
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: legacy
+    - from: legacy
+      to: finish

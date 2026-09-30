@@ -1,0 +1,36 @@
+{
+  "flowName": "stress-5-agent-pipeline",
+  "graphId": 46,
+  "saveVersion": 6,
+  "entities": {
+    "agents.stress_composer": {
+      "backendId": 22,
+      "contentHash": "f443b3ce3ab1e235acf6402cd2608e67a8c25c05c2e75854c1e2af3ed0a2226e"
+    },
+    "agents.stress_extractor": {
+      "backendId": 21,
+      "contentHash": "d96eb259e6428923c1743e0ba13c4b2e3630664c3a26a18882e9d1f98088c07b"
+    },
+    "nodes.Compose": {
+      "backendId": 610,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Compute": {
+      "backendId": 606,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Extract": {
+      "backendId": 609,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__end__": {
+      "backendId": 608,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__start__": {
+      "backendId": 607,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  },
+  "documents": {}
+}

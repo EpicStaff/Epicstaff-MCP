@@ -1,0 +1,22 @@
+meta:
+  name: persist-check
+  description: Declares persistent variables (per-user and per-org) to verify the compiler populates the persistent_variables buckets.
+variables:
+  user_pref: { default: { theme: "dark" }, persist: user }
+  org_quota: { default: { limit: 100 }, persist: organization }
+  session_tmp: { default: 0 }
+flow:
+  nodes:
+    __start__:
+      type: start
+    Echo:
+      type: python
+      code: "def main(p):\n    return {'seen': p}"
+      input_map:
+        p: variables.user_pref
+      output_variable_path: variables.result
+    __end_node__:
+      type: end
+  edges:
+    - { from: __start__, to: Echo }
+    - { from: Echo, to: __end_node__ }

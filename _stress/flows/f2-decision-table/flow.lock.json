@@ -1,0 +1,32 @@
+{
+  "flowName": "stress-2-decision-table",
+  "graphId": 43,
+  "saveVersion": 8,
+  "entities": {
+    "nodes.HighBranch": {
+      "backendId": 590,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.LowBranch": {
+      "backendId": 591,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Route": {
+      "backendId": 594,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Score": {
+      "backendId": 589,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__end__": {
+      "backendId": 593,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__start__": {
+      "backendId": 592,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  },
+  "documents": {}
+}

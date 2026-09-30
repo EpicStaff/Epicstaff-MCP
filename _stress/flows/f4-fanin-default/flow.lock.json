@@ -1,0 +1,28 @@
+{
+  "flowName": "stress-4-fanin-default",
+  "graphId": 45,
+  "saveVersion": 2,
+  "entities": {
+    "nodes.Left": {
+      "backendId": 601,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Merge": {
+      "backendId": 603,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.Right": {
+      "backendId": 602,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__end__": {
+      "backendId": 605,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "nodes.__start__": {
+      "backendId": 604,
+      "contentHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  },
+  "documents": {}
+}

@@ -1,0 +1,22 @@
+meta:
+  name: stress-smoke
+  description: Minimal python flow to validate the stress harness end-to-end.
+variables:
+  n: 0
+flow:
+  nodes:
+    __start__:
+      type: start
+    Double:
+      type: python
+      code: |-
+        def main(n):
+            return {"value": int(n) * 2}
+      input_map:
+        n: variables.n
+      output_variable_path: variables.result
+    __end__:
+      type: end
+  edges:
+    - { from: __start__, to: Double }
+    - { from: Double, to: __end__ }

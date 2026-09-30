@@ -1,0 +1,43 @@
+meta:
+  name: stress-4-fanin-default
+  description: Fan-out from start into two producers, fan-in to a merge that reads both plus an undeclared optional var via |default.
+variables:
+  seed: 0
+flow:
+  nodes:
+    __start__:
+      type: start
+    Left:
+      type: python
+      code: |-
+        def main(s):
+            return {"double": int(s) * 2}
+      input_map:
+        s: variables.seed
+      output_variable_path: variables.left
+    Right:
+      type: python
+      code: |-
+        def main(s):
+            return {"square": int(s) * int(s)}
+      input_map:
+        s: variables.seed
+      output_variable_path: variables.right
+    Merge:
+      type: python
+      code: |-
+        def main(l, r, hint):
+            return {"sum": l.get("double", 0) + r.get("square", 0), "hint": hint}
+      input_map:
+        l: variables.left
+        r: variables.right
+        hint: variables.note|default
+      output_variable_path: variables.merged
+    __end__:
+      type: end
+  edges:
+    - { from: __start__, to: Left }
+    - { from: __start__, to: Right }
+    - { from: Left, to: Merge }
+    - { from: Right, to: Merge }
+    - { from: Merge, to: __end__ }

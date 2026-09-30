@@ -1,0 +1,54 @@
+meta:
+  name: stress-6-paths
+  description: Stresses variable-path features — nested dict reads, list-index reads (items[1].name), an undeclared |default read, and a whole-state __all__ read.
+variables:
+  payload:
+    default:
+      products:
+        - { name: alpha, qty: 3 }
+        - { name: beta, qty: 7 }
+      meta: { source: seed }
+    description: "Structured input payload."
+flow:
+  nodes:
+    __start__:
+      type: start
+    Pick:
+      type: python
+      code: |-
+        def main(items, source):
+            first = items[0] if items else {}
+            return {"first_name": first.get("name"), "count": len(items), "source": source}
+      input_map:
+        items: variables.payload.products
+        source: variables.payload.meta.source
+      output_variable_path: variables.pick
+    Second:
+      type: python
+      code: |-
+        def main(items, note):
+            second = items[1] if isinstance(items, list) and len(items) > 1 else {}
+            return {"label": str(second.get("name")), "qty": int(second.get("qty", 0)), "note": note}
+      input_map:
+        items: variables.payload.products
+        note: variables.optional_note|default
+      output_variable_path: variables.second
+    Summary:
+      type: python
+      code: |-
+        def main(pick, second):
+            return {
+                "names": [pick.get("first_name"), second.get("label")],
+                "total_qty": (pick.get("count") or 0) + (second.get("qty") or 0),
+            }
+      input_map:
+        pick: variables.pick
+        second: variables.second
+      output_variable_path: variables.summary
+    __end_node__:
+      type: end
+  edges:
+    - { from: __start__, to: Pick }
+    - { from: Pick, to: Second }
+    - { from: Second, to: Summary }
+    - { from: Summary, to: __end_node__ }

@@ -8,7 +8,7 @@
     {
       "name": "epicstaff-mcp",
       "source": "./",
-      "description": "EpicStaff MCP — flow building/debugging tools + skills for interview, DDD design, build, QA, debug, and EpicChat output."
+      "description": "Develop EpicStaff flows like code: write, build, push, run, debug from Claude Code."
     }
   ]
 }

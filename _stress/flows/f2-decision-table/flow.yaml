@@ -1,0 +1,46 @@
+meta:
+  name: stress-2-decision-table
+  description: Python scoring then a decision-table routing on a produced variable into two branches that both write the same produced var.
+variables:
+  input_value: 0
+flow:
+  nodes:
+    __start__:
+      type: start
+    Score:
+      type: python
+      code: |-
+        def main(v):
+            n = int(v)
+            return {"value": n, "band": "high" if n >= 50 else "low"}
+      input_map:
+        v: variables.input_value
+      output_variable_path: variables.metrics
+    Route:
+      type: decision-table
+      rules:
+        - { name: high_rule, condition: "variables['metrics']['band'] == 'high'", next_node: HighBranch }
+      default_next_node: LowBranch
+    HighBranch:
+      type: python
+      code: |-
+        def main(m):
+            return {"tier": "priority", "value": m.get("value")}
+      input_map:
+        m: variables.metrics
+      output_variable_path: variables.outcome
+    LowBranch:
+      type: python
+      code: |-
+        def main(m):
+            return {"tier": "standard", "value": m.get("value")}
+      input_map:
+        m: variables.metrics
+      output_variable_path: variables.outcome
+    __end__:
+      type: end
+  edges:
+    - { from: __start__, to: Score }
+    - { from: Score, to: Route }
+    - { from: HighBranch, to: __end__ }
+    - { from: LowBranch, to: __end__ }
