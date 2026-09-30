@@ -11,7 +11,7 @@ import {
   removeEntity,
   setEntity,
 } from '../flow-source/lockfile.js';
-import type { GraphState } from '../graph/graph-state.js';
+import type { GraphNode, GraphState } from '../graph/graph-state.js';
 import { buildBulkSavePayload } from '../graph/bulk-save.js';
 import { buildRemoteState, collectOrphanEdgeIds } from '../graph/remote-state.js';
 import { applySaveResponse } from '../graph/temp-id.js';
@@ -135,6 +135,8 @@ export class GraphPusher {
         currentLock = removeEntity(currentLock, NODE_SECTION, node.node_name);
       }
     }
+
+    inheritUnrepresentableFields(desired, remote);
 
     // 5. Bulk-save.
     const payload = buildBulkSavePayload({
@@ -266,5 +268,34 @@ export class GraphPusher {
     }
 
     return currentLock;
+  }
+}
+
+/**
+ * Keep node settings flow source cannot express, so a repush does not wipe what a user
+ * attached in the EpicStaff editor: a trigger node's `webhook_trigger` (path / provider
+ * live in `webhook-triggers/`), a telegram node's bot-token secret when the source sets
+ * no `bot_token_env`, and the secrets a python node's code may read. Only nodes matched
+ * to a persisted node (same backend id and type) inherit; the source still wins wherever
+ * it states a value.
+ */
+export function inheritUnrepresentableFields(desired: GraphState, remote: GraphState): void {
+  const remoteById = new Map<number, GraphNode>();
+  for (const node of remote.nodes) {
+    if (node.backendId != null) remoteById.set(node.backendId, node);
+  }
+  for (const node of desired.nodes) {
+    const previous = node.backendId != null ? remoteById.get(node.backendId) : undefined;
+    if (previous === undefined || previous.type !== node.type) continue;
+
+    if (node.type === 'webhook-trigger' && previous.type === 'webhook-trigger') {
+      node.data.webhook_trigger ??= previous.data.webhook_trigger;
+      node.data.python_code.secret_ids ??= previous.data.python_code.secret_ids;
+    } else if (node.type === 'telegram-trigger' && previous.type === 'telegram-trigger') {
+      node.data.webhook_trigger ??= previous.data.webhook_trigger;
+      node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
+    } else if (node.type === 'python' && previous.type === 'python') {
+      node.data.secret_ids ??= previous.data.secret_ids;
+    }
   }
 }

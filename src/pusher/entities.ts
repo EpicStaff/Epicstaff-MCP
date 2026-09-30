@@ -1,12 +1,13 @@
 import type { AppContext } from '../context.js';
 import type { BuildArtifact, EntityPlan } from '../compiler/artifact.js';
-import { substituteRefs } from '../compiler/artifact.js';
+import { ragRefKey, substituteRefs } from '../compiler/artifact.js';
 import { isBuiltinToolRef, isEnvRef, isModelRef, isStorageFileRef } from '../compiler/template-refs.js';
 import { StorageApi } from '../api/storage.js';
 import { AgentDefinitionsApi } from '../api/agent-definitions.js';
+import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { KnowledgeApi } from '../api/knowledge.js';
-import { LegacyCrewApi } from '../api/legacy-crew.js';
-import { LlmApi } from '../api/llm.js';
+import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
+import { SecretsApi, secretTail } from '../api/secrets.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
 import {
@@ -23,11 +24,13 @@ import { readFileSync } from 'node:fs';
 
 /**
  * Entity pusher — materializes the dependency tree of a BuildArtifact in order
- * (llm-configs → tools → knowledge → surfaces → agent-definitions → crews),
- * following the reuse-first policy:
+ * (secrets + key-value tables → llm-configs → tools → knowledge → surfaces →
+ * agent-definitions), following the reuse-first policy:
  *   lockfile hit + clean hash → reuse id;
  *   lockfile hit + dirty hash → update in place;
  *   `existing:` reference     → resolve by remote name, never modify;
+ *   `ensure` plan             → find by name on every push, create when missing
+ *                               (never lock-cached);
  *   otherwise                 → create.
  */
 export interface EntityPushAction {
@@ -50,8 +53,9 @@ export class EntityPusher {
   private readonly knowledge;
   private readonly surfaces;
   private readonly agentDefinitions;
-  private readonly crews;
   private readonly storage;
+  private readonly secrets;
+  private readonly keyValueTables;
   private modelIdByName: Map<string, number> | null = null;
   private builtinToolIdByName: Map<string, number> | null = null;
 
@@ -61,8 +65,9 @@ export class EntityPusher {
     this.knowledge = new KnowledgeApi(context.client);
     this.surfaces = new SurfacesApi(context.client);
     this.agentDefinitions = new AgentDefinitionsApi(context.client);
-    this.crews = new LegacyCrewApi(context.client);
     this.storage = new StorageApi(context.client);
+    this.secrets = new SecretsApi(context.client, context.auth);
+    this.keyValueTables = new KeyValueTablesApi(context.client);
   }
 
   /**
@@ -93,6 +98,13 @@ export class EntityPusher {
         continue;
       }
 
+      if (plan.action === 'ensure') {
+        const { backendId, created } = await this.ensureEntity(plan);
+        idMap.set(plan.key, backendId);
+        actions.push({ key: plan.key, kind: plan.kind, action: created ? 'created' : 'reused', backendId });
+        continue;
+      }
+
       const resolvedPayload = await this.resolvePayload(plan.payload ?? {}, idMap, plan.key);
       const hash = plan.contentHash ?? contentHash(plan.payload ?? {});
       const lockEntry = getEntity(currentLock, plan.section, plan.name);
@@ -116,6 +128,11 @@ export class EntityPusher {
 
       if (plan.kind === 'knowledge_collection') {
         currentLock = await this.pushCollectionExtras(plan, backendId, idMap, currentLock);
+        // knowledge-retriever nodes address the collection's RAG impl id (see ragRefKey).
+        const ragEntry = plan.rag ? getEntity(currentLock, plan.section, `${plan.name}#rag`) : undefined;
+        if (plan.rag && ragEntry) {
+          idMap.set(ragRefKey(plan.key, plan.rag.strategy), ragEntry.backendId);
+        }
       }
     }
 
@@ -151,14 +168,7 @@ export class EntityPusher {
       return this.resolveModelId(value.$model, value.provider);
     }
     if (isEnvRef(value)) {
-      const resolved = process.env[value.$env];
-      if (resolved === undefined) {
-        throw new Error(
-          `Environment variable "${value.$env}" is not set for the MCP server. ` +
-            'Secrets referenced in flow source ({$env}) must be provided in the plugin environment.',
-        );
-      }
-      return resolved;
+      return this.readEnv(value.$env);
     }
     if (isBuiltinToolRef(value)) {
       return this.resolveBuiltinToolId(value.$tool);
@@ -179,13 +189,72 @@ export class EntityPusher {
     return value;
   }
 
+  /**
+   * `ensure` plans: org-level rows identified by name. Looked up on every push (a lock
+   * entry could point at a deleted row) and created only when missing.
+   */
+  private async ensureEntity(plan: EntityPlan): Promise<{ backendId: number; created: boolean }> {
+    const name = plan.remoteName ?? plan.name;
+    switch (plan.kind) {
+      case 'secret':
+        return this.ensureSecret(plan, name);
+      case 'key_value_table': {
+        const existing = await this.keyValueTables.findByName(name);
+        if (existing) return { backendId: existing.id, created: false };
+        logger.info(`Creating key-value table "${name}"`);
+        return { backendId: (await this.keyValueTables.create({ name })).id, created: true };
+      }
+      default:
+        throw new Error(`Entity kind ${plan.kind} has no ensure path — compiler bug.`);
+    }
+  }
+
+  /**
+   * Store the value of the plan's environment variable as the org Secret `name`.
+   * Secrets are immutable, so an existing secret is reused only when its visible tail
+   * matches the current value; a mismatch means the env value was rotated and the user
+   * must delete the old secret (it may still be referenced elsewhere). The value is
+   * never logged, echoed, or written to the lockfile.
+   */
+  private async ensureSecret(plan: EntityPlan, name: string): Promise<{ backendId: number; created: boolean }> {
+    const payload = plan.payload ?? {};
+    const envRef = payload['value'];
+    if (!isEnvRef(envRef)) {
+      throw new Error(`Secret plan "${plan.key}" carries no {$env} value — compiler bug.`);
+    }
+    const value = this.readEnv(envRef.$env);
+    const existing = await this.secrets.findByName(name);
+    if (existing) {
+      if (existing.tail !== secretTail(value)) {
+        throw new Error(
+          `Org secret "${name}" already exists but holds a different value than ${envRef.$env} ` +
+            `(tail ${existing.tail ? `…${existing.tail}` : 'hidden'}). EpicStaff secrets are immutable — delete ` +
+            `"${name}" in EpicStaff (Settings → Secrets) and push again, or restore the previous value of ${envRef.$env}.`,
+        );
+      }
+      return { backendId: existing.id, created: false };
+    }
+    logger.info(`Creating org secret "${name}" from ${envRef.$env}`);
+    return { backendId: (await this.secrets.create(name, value)).id, created: true };
+  }
+
+  private readEnv(envName: string): string {
+    const resolved = process.env[envName];
+    if (resolved === undefined || resolved === '') {
+      throw new Error(
+        `Environment variable "${envName}" is not set for the MCP server. ` +
+          'Secrets referenced in flow source must be provided in the plugin environment.',
+      );
+    }
+    return resolved;
+  }
+
   private async resolveBuiltinToolId(toolName: string): Promise<number> {
     if (!this.builtinToolIdByName) {
       const builtinTools = await this.tools.listBuiltinTools();
       this.builtinToolIdByName = new Map();
       for (const tool of builtinTools) {
         this.builtinToolIdByName.set(tool.name.toLowerCase(), tool.id);
-        if (tool.name_alias) this.builtinToolIdByName.set(tool.name_alias.toLowerCase(), tool.id);
       }
     }
     const id = this.builtinToolIdByName.get(toolName.toLowerCase());
@@ -260,8 +329,6 @@ export class EntityPusher {
         return (await this.surfaces.list()).find(nameMatches)?.id;
       case 'agent_definition':
         return (await this.agentDefinitions.list()).find(nameMatches)?.id;
-      case 'crew':
-        return (await this.crews.listCrews()).find(nameMatches)?.id;
       default:
         return undefined;
     }
@@ -300,8 +367,6 @@ export class EntityPusher {
         return (await this.surfaces.create(payload as never)).id;
       case 'agent_definition':
         return (await this.agentDefinitions.create(payload as never)).id;
-      case 'crew':
-        return (await this.crews.createCrew(payload as never)).id;
       default:
         throw new Error(`Unknown entity kind: ${plan.kind as string}`);
     }
@@ -333,9 +398,7 @@ export class EntityPusher {
         // Collection rename is the only mutable field; documents/RAG are handled in extras.
         return backendId;
       case 'tool_config':
-      case 'crew':
-        // No update path ported — recreate semantics would break references; keep the old id.
-        logger.warn(`Update for ${plan.kind} is not supported — keeping existing #${backendId} unchanged.`);
+        await this.tools.updateToolConfig(backendId, payload as never);
         return backendId;
       default:
         throw new Error(`Unknown entity kind: ${plan.kind as string}`);
@@ -426,10 +489,10 @@ export class EntityPusher {
       // Tolerate a stray `existing:` prefix from older emitted artifacts — embedders
       // have no local/remote distinction, so the prefix is never part of the real name.
       const embedderName = ref.$ref.slice('embedders.'.length).replace(/^existing:/, '');
-      const configs = await this.llm.listEmbeddingConfigs();
       if (embedderName === 'default') {
-        return this.resolveDefaultEmbedderId(configs);
+        return resolveDefaultEmbeddingConfigId(this.llm);
       }
+      const configs = await this.llm.listEmbeddingConfigs();
       const named = configs.find(
         (config) => String(config.custom_name ?? config.name ?? '').toLowerCase() === embedderName.toLowerCase(),
       );
@@ -446,44 +509,6 @@ export class EntityPusher {
     }
 
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
-  }
-
-  /**
-   * Resolve "the org default embedder" to a concrete EmbeddingConfig id.
-   *
-   * `default-embedding-config/` is NOT a pointer to a selectable EmbeddingConfig
-   * row — it returns only `{model, task_type, api_key}` (no id). So we resolve by
-   * matching that default's embedding *model* to a config that uses it; if that is
-   * ambiguous or absent we fall back to the sole config, and only error when the
-   * choice is genuinely undecidable.
-   */
-  private async resolveDefaultEmbedderId(configs: Array<Record<string, unknown>>): Promise<number> {
-    if (configs.length === 0) {
-      throw new Error(
-        'No embedding config exists in this organization — create one in EpicStaff settings ' +
-          '(knowledge indexing needs an embedder).',
-      );
-    }
-
-    const defaultConfig = await this.context.client
-      .get<{ model?: number } | undefined>('default-embedding-config/')
-      .catch(() => undefined);
-    const defaultModelId = defaultConfig?.model;
-    if (defaultModelId !== undefined) {
-      const byModel = configs.find((config) => config.model === defaultModelId);
-      if (byModel) return byModel.id as number;
-    }
-
-    if (configs.length === 1) return configs[0]!.id as number;
-
-    const available = configs
-      .map((config) => String(config.custom_name ?? config.name ?? ''))
-      .filter(Boolean)
-      .join(', ');
-    throw new Error(
-      'Cannot pick a default embedding config: the organization has several and none matches the ' +
-        `configured default embedding model. Set knowledge.<name>.rag.embedder to one of: ${available}.`,
-    );
   }
 }
 

@@ -1,6 +1,6 @@
 /**
- * Ported from frontend `models/decision-table-node.model.ts` + `buildDecisionTableNodePayload`
- * in `utils/save/payload.ts` (which adds the `*_temp_id` cross-node reference variants).
+ * Ported from frontend `visual-programming/core/models/decision-table-node.model.ts` + `buildDecisionTableNodePayload`
+ * in `visual-programming/utils/save/payload.ts` (which adds the `*_temp_id` cross-node reference variants).
  */
 
 import type { NodeDtoMetadata } from '../graph.js';

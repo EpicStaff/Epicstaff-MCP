@@ -21,6 +21,12 @@ One responsibility: materialize the local flow on the server, safely.
    documents or RAG config actually changed. If the flow has knowledge, prefer calling
    `provision_knowledge` early (before the flow is fully authored) to start the slow indexing
    sooner — this push then reuses those collections instead of indexing from scratch.
+   Credentials named by `api_key_env` / `bot_token_env` are read from the MCP server environment
+   and stored as org secrets `es-mcp:<ENV_NAME>` (reused by name on repush). EpicStaff only lets a
+   signed-in user manage secrets, so this needs `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD`. If push
+   reports that a secret "holds a different value", the env value was rotated: secrets are
+   immutable — ask the user to delete that secret in EpicStaff, then repush.
+   Key-value tables named by `key-value` nodes are found by name and created if missing.
 5. Report: graph id, what was created vs updated, and the editor link from the response.
    Suggest opening the flow in the EpicStaff editor to see it.
 6. Commit `flow.lock.json` together with the flow source — it is the identity map.

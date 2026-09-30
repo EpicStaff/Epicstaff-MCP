@@ -8,6 +8,7 @@ import { createContext } from '../src/context.js';
 import { createLock, readLock, writeLock } from '../src/flow-source/lockfile.js';
 import { EntityPusher } from '../src/pusher/entities.js';
 import { GraphPusher } from '../src/pusher/graph.js';
+import { resolveRagRefs } from '../src/pusher/rag-refs.js';
 
 /**
  * Full write→build→push integration against an in-process mock EpicStaff backend.
@@ -21,10 +22,15 @@ const ENV = {
 };
 const FIXTURE = join(import.meta.dirname, 'fixtures/flow-source/valid-basic');
 
+/** A JWT-shaped access token valid for an hour (AuthService reads its `exp`). */
+const encodeSegment = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+const MOCK_JWT = `${encodeSegment({ alg: 'HS256' })}.${encodeSegment({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
+
 interface Received {
   method: string;
   path: string;
   body?: unknown;
+  headers?: Headers;
 }
 
 class MockBackend {
@@ -36,21 +42,56 @@ class MockBackend {
   collections: Array<{ collection_id: number; collection_name: string }> = [];
   /** When > 0, the next N calls to process-rag-indexing/ fail with 400 (simulates a mid-push failure). */
   failIndexingTimes = 0;
+  secrets: Array<{ id: number; name: string; tail: string }> = [];
+  keyValueTables: Array<{ id: number; name: string }> = [];
+  availableRags = new Map<number, Array<{ rag_id: number; rag_type: string; rag_status: string; created_at: string }>>();
 
   private id(): number {
     this.nextId += 1;
     return this.nextId;
   }
 
-  async handle(method: string, url: URL, body: unknown): Promise<{ status: number; body: unknown }> {
+  async handle(
+    method: string,
+    url: URL,
+    body: unknown,
+    headers: Headers = new Headers(),
+  ): Promise<{ status: number; body: unknown; setCookie?: string }> {
     const path = url.pathname;
-    this.received.push({ method, path, body });
+    this.received.push({ method, path, body, headers });
     const key = `${method} ${path}`;
 
-    // auth
-    if (key === 'POST /api/auth/login/') return { status: 200, body: { access: 'jwt', refresh: 'r' } };
-    if (key === 'POST /api/auth/api-key/')
-      return { status: 201, body: { api_key: 'mock-key', prefix: 'mock-key', name: 'es-mcp' } };
+    // auth (rbac views): refresh token only in the HttpOnly cookie
+    if (key === 'POST /api/auth/login/')
+      return { status: 200, body: { access: MOCK_JWT }, setCookie: 'auth.refresh=r; HttpOnly; Path=/api/auth/' };
+    if (key === 'POST /api/auth/refresh/') {
+      if (headers.get('Cookie') !== 'auth.refresh=r') return { status: 401, body: { detail: 'No refresh token.' } };
+      return { status: 200, body: { access: MOCK_JWT } };
+    }
+    if (key === 'POST /api/profile/api-keys/')
+      return { status: 201, body: { id: 1, api_key: 'mock-key', prefix: 'mock-key', name: 'es-mcp', expires_at: null } };
+
+    // secrets/ is JWT-only (DenyApiKeyAuth)
+    if (path === '/api/secrets/') {
+      if (headers.get('X-Api-Key') !== null || headers.get('Authorization') !== `Bearer ${MOCK_JWT}`) {
+        return { status: 403, body: { detail: 'API keys cannot be used here.' } };
+      }
+      if (method === 'GET') return { status: 200, body: { count: this.secrets.length, results: this.secrets } };
+      const { name, value } = body as { name: string; value: string };
+      const secret = { id: this.id(), name, tail: value.length >= 9 ? value.slice(-4) : '' };
+      this.secrets.push(secret);
+      return { status: 201, body: secret };
+    }
+    if (key === 'GET /api/key-value-tables/')
+      return { status: 200, body: { count: this.keyValueTables.length, results: this.keyValueTables } };
+    if (key === 'POST /api/key-value-tables/') {
+      const table = { id: this.id(), name: (body as { name: string }).name };
+      this.keyValueTables.push(table);
+      return { status: 201, body: table };
+    }
+    if (/^GET \/api\/source-collections\/\d+\/available-rags\/$/.test(key)) {
+      return { status: 200, body: this.availableRags.get(Number(path.split('/')[3])) ?? [] };
+    }
     if (key === 'GET /api/auth/api-key/validate/') return { status: 200, body: { active: true } };
     if (key === 'GET /api/profile/')
       return {
@@ -66,9 +107,9 @@ class MockBackend {
       return { status: 200, body: [{ id: 55, custom_name: 'org-default-fcm', model: 10 }] };
     if (key === 'GET /api/embedding-configs/')
       return { status: 200, body: [{ id: 71, custom_name: 'default-embedder', model: 20 }] };
-    // Mirrors DefaultEmbeddingConfigSerializer: no id — only the embedding model + task/key.
-    if (key === 'GET /api/default-embedding-config/')
-      return { status: 200, body: { model: 20, task_type: 'RETRIEVAL_DOCUMENT', api_key: null } };
+    // Mirrors DefaultModelsSerializer: the org default embedder is memory_embedding_config.
+    if (key === 'GET /api/default-models/')
+      return { status: 200, body: { agent_llm_config: null, memory_embedding_config: 71 } };
 
     // collection listing — used by the reuse-before-create idempotency guard.
     if (key === 'GET /api/source-collections/') return { status: 200, body: { results: this.collections } };
@@ -160,7 +201,7 @@ class MockBackend {
     return { status: 404, body: { detail: `no mock for ${key}` } };
   }
 
-  private lastSavedDto: Record<string, unknown> | null = null;
+  lastSavedDto: Record<string, unknown> | null = null;
 
   /** Echo a GraphDto: every create item in each node list gets a backend id. */
   private graphDto(graphId: number, payload: Record<string, unknown>): Record<string, unknown> {
@@ -176,7 +217,6 @@ class MockBackend {
     };
     const listKeys = [
       'start_node_list',
-      'crew_node_list',
       'python_node_list',
       'task_node_list',
       'agent_node_list',
@@ -190,6 +230,8 @@ class MockBackend {
       'audio_transcription_node_list',
       'graph_note_list',
       'schedule_trigger_node_list',
+      'knowledge_node_list',
+      'key_value_node_list',
     ];
     for (const listKey of listKeys) {
       const sent = payload[listKey];
@@ -222,11 +264,10 @@ describe('push pipeline (mock backend)', () => {
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input));
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      const result = await backend.handle(init?.method ?? 'GET', url, body);
-      return new Response(JSON.stringify(result.body), {
-        status: result.status,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const result = await backend.handle(init?.method ?? 'GET', url, body, new Headers(init?.headers));
+      const headers = new Headers({ 'Content-Type': 'application/json' });
+      if (result.setCookie) headers.append('Set-Cookie', result.setCookie);
+      return new Response(JSON.stringify(result.body), { status: result.status, headers });
     });
   });
 
@@ -248,6 +289,9 @@ describe('push pipeline (mock backend)', () => {
     const entityResult = await new EntityPusher(context).push(artifact, lock);
     lock = entityResult.lock;
     await writeLock(flowDir, lock);
+    for (const [refKey, ragId] of await resolveRagRefs(artifact, entityResult.idMap, context)) {
+      entityResult.idMap.set(refKey, ragId);
+    }
     const graphResult = await new GraphPusher(context).push(artifact, lock, entityResult.idMap);
     await writeLock(flowDir, graphResult.lock);
     return { entityResult, graphResult };
@@ -461,6 +505,178 @@ describe('push pipeline (mock backend)', () => {
 
     // No graph was touched.
     expect(backend.savedGraphPayloads.length).toBe(0);
+  });
+
+  describe('secrets, key-value tables and knowledge-retriever RAGs', () => {
+    const OPENAI_ENV = 'ES_MCP_TEST_OPENAI_KEY';
+    const BOT_ENV = 'ES_MCP_TEST_BOT_TOKEN';
+    const OPENAI_VALUE = 'sk-test-0123456789abcd';
+    const BOT_VALUE = '123456:telegram-token-wxyz';
+
+    beforeEach(() => {
+      process.env[OPENAI_ENV] = OPENAI_VALUE;
+      process.env[BOT_ENV] = BOT_VALUE;
+      const flowFile = join(flowDir, 'flow.yaml');
+      writeFileSync(
+        flowFile,
+        readFileSync(flowFile, 'utf8')
+          .replace('    temperature: 0.2\n', `    temperature: 0.2\n    api_key_env: ${OPENAI_ENV}\n`)
+          .replace(
+            '    finish:\n      type: end\n',
+            [
+              '    finish:',
+              '      type: end',
+              '    bot:',
+              '      type: telegram-trigger',
+              `      bot_token_env: ${BOT_ENV}`,
+              '    lookup:',
+              '      type: knowledge-retriever',
+              '      collection: docs',
+              '      query: "{topic}"',
+              '      input_map: { topic: variables.topic }',
+              '      output_variable_path: variables.handbook',
+              '    handbook:',
+              '      type: knowledge-retriever',
+              '      collection: { existing: "Legacy Handbook" }',
+              '      rag: graph',
+              '      query: "{topic}"',
+              '      input_map: { topic: variables.topic }',
+              '      output_variable_path: variables.legacy',
+              '    remember:',
+              '      type: key-value',
+              '      table: Research Memory',
+              '      mode: write',
+              '      entries:',
+              '        - { key: last_summary, value: variables.summary }',
+              '',
+            ].join('\n'),
+          ),
+      );
+      backend.collections.push({ collection_id: 300, collection_name: 'Legacy Handbook' });
+      backend.availableRags.set(300, [
+        { rag_id: 7, rag_type: 'graph', rag_status: 'completed', created_at: '2026-01-01T00:00:00Z' },
+        { rag_id: 9, rag_type: 'graph', rag_status: 'completed', created_at: '2026-06-01T00:00:00Z' },
+        { rag_id: 4, rag_type: 'naive', rag_status: 'completed', created_at: '2026-07-01T00:00:00Z' },
+      ]);
+    });
+
+    afterEach(() => {
+      delete process.env[OPENAI_ENV];
+      delete process.env[BOT_ENV];
+    });
+
+    it('stores env credentials as org secrets over JWT and sends only their ids', async () => {
+      await pushOnce();
+
+      expect(backend.secrets.map((secret) => secret.name).sort()).toStrictEqual([
+        `es-mcp:${BOT_ENV}`,
+        `es-mcp:${OPENAI_ENV}`,
+      ]);
+      const secretCalls = backend.received.filter((r) => r.path === '/api/secrets/');
+      // JWT-only route: never the API key.
+      for (const call of secretCalls) {
+        expect(call.headers?.get('X-Api-Key')).toBeNull();
+        expect(call.headers?.get('Authorization')).toBe(`Bearer ${MOCK_JWT}`);
+      }
+
+      const openaiSecret = backend.secrets.find((secret) => secret.name === `es-mcp:${OPENAI_ENV}`)!;
+      const botSecret = backend.secrets.find((secret) => secret.name === `es-mcp:${BOT_ENV}`)!;
+      const llmCreate = backend.received.find((r) => r.path === '/api/llm-configs/' && r.method === 'POST')!;
+      expect(llmCreate.body).toMatchObject({ api_key_secret_id: openaiSecret.id });
+      expect(llmCreate.body).not.toHaveProperty('api_key');
+
+      const saved = backend.savedGraphPayloads[0] as Record<string, Array<Record<string, unknown>>>;
+      expect(saved.telegram_trigger_node_list![0]).toMatchObject({
+        telegram_bot_api_key_secret_id: botSecret.id,
+        webhook_trigger: null,
+      });
+
+      // The raw values only ever travel in the secret-create body.
+      for (const call of backend.received.filter((r) => r.path !== '/api/secrets/')) {
+        const serialized = JSON.stringify(call.body ?? null);
+        expect(serialized).not.toContain(OPENAI_VALUE);
+        expect(serialized).not.toContain(BOT_VALUE);
+      }
+      const lockText = readFileSync(join(flowDir, 'flow.lock.json'), 'utf8');
+      expect(lockText).not.toContain(OPENAI_VALUE);
+      expect(lockText).not.toContain(BOT_VALUE);
+    });
+
+    it('creates the key-value table once and addresses both knowledge RAGs by id', async () => {
+      await pushOnce();
+
+      expect(backend.keyValueTables.map((table) => table.name)).toStrictEqual(['Research Memory']);
+      const table = backend.keyValueTables[0]!;
+      const saved = backend.savedGraphPayloads[0] as Record<string, Array<Record<string, unknown>>>;
+      expect(saved.key_value_node_list![0]).toMatchObject({
+        key_value_table: table.id,
+        mode: 'write',
+        output_variable_path: null,
+        entries: [{ key: 'last_summary', value: 'variables.summary' }],
+      });
+
+      const lock = (await readLock(flowDir))!;
+      const localRagId = lock.entities['knowledge.docs#rag']!.backendId;
+      const localCollectionId = lock.entities['knowledge.docs']!.backendId;
+      const knowledgeNodes = saved.knowledge_node_list!;
+      expect(knowledgeNodes.find((node) => node.node_name === 'lookup')).toMatchObject({
+        source_collection: localCollectionId,
+        rag_type: 'naive',
+        rag_id: localRagId,
+        query: '{topic}',
+      });
+      // Existing collection: the newest graph RAG from available-rags/.
+      expect(knowledgeNodes.find((node) => node.node_name === 'handbook')).toMatchObject({
+        source_collection: 300,
+        rag_type: 'graph',
+        rag_id: 9,
+      });
+    });
+
+    it('repush reuses the secrets and table by name — no duplicates, no node changes', async () => {
+      await pushOnce();
+      const { entityResult } = await pushOnce();
+
+      expect(backend.secrets).toHaveLength(2);
+      expect(backend.keyValueTables).toHaveLength(1);
+      expect(backend.received.filter((r) => r.path === '/api/secrets/' && r.method === 'POST')).toHaveLength(2);
+      const ensured = entityResult.actions.filter((action) => action.kind === 'secret' || action.kind === 'key_value_table');
+      expect(ensured.every((action) => action.action === 'reused')).toBe(true);
+
+      // The nodes that reference secrets / tables / RAGs diff clean against the remote.
+      const saved = backend.savedGraphPayloads[1] as Record<string, unknown>;
+      expect(saved['telegram_trigger_node_list']).toEqual([]);
+      expect(saved['knowledge_node_list']).toEqual([]);
+      expect(saved['key_value_node_list']).toEqual([]);
+      for (const ids of Object.values(saved['deleted'] as Record<string, number[]>)) expect(ids).toEqual([]);
+    });
+
+    it('refuses to reuse a same-named secret whose value changed, without echoing either value', async () => {
+      await pushOnce();
+      process.env[OPENAI_ENV] = 'sk-test-rotated-99999999';
+
+      const failure = await pushOnce().then(
+        () => null,
+        (error: unknown) => error as Error,
+      );
+      expect(failure?.message).toContain(`es-mcp:${OPENAI_ENV}`);
+      expect(failure?.message).toContain('immutable');
+      expect(failure?.message).not.toContain('sk-test-rotated-99999999');
+      expect(failure?.message).not.toContain(OPENAI_VALUE);
+    });
+
+    it('keeps a webhook trigger attached in the editor across a repush', async () => {
+      await pushOnce();
+      // Simulate the user attaching webhook trigger #77 to the telegram node in the UI.
+      const dto = backend.lastSavedDto as Record<string, Array<Record<string, unknown>>>;
+      dto.telegram_trigger_node_list![0]!.webhook_trigger = 77;
+
+      const { graphResult } = await pushOnce();
+      expect(graphResult.nodeActions.created).toBe(0);
+      const saved = backend.savedGraphPayloads[1] as Record<string, Array<Record<string, unknown>>>;
+      // Nothing to update: the desired node inherits the attached trigger instead of nulling it.
+      expect(saved.telegram_trigger_node_list).toEqual([]);
+    });
   });
 
   it('remote save_version drift is detected as a conflict', async () => {

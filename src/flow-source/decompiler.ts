@@ -6,8 +6,9 @@
  * edited locally and repushed in place.
  *
  * Strategy — SHALLOW PULL: every referenced entity (agent definition, surface,
- * llm config, python/MCP tool, knowledge collection, subgraph flow, crew) is
- * written as an `{existing: "<remote name>"}` reference. Those entities exist
+ * llm config, python/MCP tool, knowledge collection, subgraph flow) is
+ * written as an `{existing: "<remote name>"}` reference; a key-value node names its
+ * table directly. Those entities exist
  * remotely by definition, so referencing them is both simpler and safer than
  * re-authoring: the next push resolves them by name, never re-creates them,
  * and no entity content hashes have to be reconstructed — which guarantees an
@@ -17,9 +18,10 @@
  *
  * Known lossy pulls (each emits a warning; none affect graph topology):
  *  - agent-node sub-tasks; task-node output_schema / remember_output;
- *  - python-node test_input / stream_config / use_storage;
- *  - webhook-trigger python code + input map; telegram-trigger bot token
- *    (a secret — set `bot_token_env` locally) and field mappings;
+ *  - python-node test_input / use_storage; declared python secrets (kept on repush);
+ *  - webhook-trigger python code + input map; telegram-trigger field mappings; the
+ *    attached webhook trigger and telegram bot-token secret are not representable
+ *    but are kept on repush (see `inheritUnrepresentableFields` in pusher/graph.ts);
  *  - schedule-trigger schedule blocks (flow source only holds a cron string;
  *    a repush recreates the node as an inactive draft);
  *  - inline-surface storage items (numeric storage-file ids cannot be mapped
@@ -44,10 +46,11 @@ import type { GetGraphLightRequest, GraphDto } from '../models/graph.js';
 import type { AgentNodeDto } from '../models/nodes/agent-node.js';
 import type { AudioToTextNodeDto } from '../models/nodes/audio-to-text-node.js';
 import type { ClassificationDecisionTableNodeDto } from '../models/nodes/classification-decision-table-node.js';
-import type { CrewNodeDto } from '../models/nodes/crew-node.js';
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
 import type { EndNodeDto } from '../models/nodes/end-node.js';
 import type { FileExtractorNodeDto } from '../models/nodes/file-extractor-node.js';
+import type { KeyValueNodeDto } from '../models/nodes/key-value-node.js';
+import type { KnowledgeRetrieverNodeDto } from '../models/nodes/knowledge-retriever-node.js';
 import type { GraphNoteDto } from '../models/nodes/note-node.js';
 import type { PythonNodeDto } from '../models/nodes/python-node.js';
 import type { ScheduleTriggerNodeDto } from '../models/nodes/schedule-trigger-node.js';
@@ -57,6 +60,7 @@ import type { InlineSurface, TaskNodeDto } from '../models/nodes/task-node.js';
 import type { TelegramTriggerNodeDto } from '../models/nodes/telegram-trigger-node.js';
 import type { WebhookTriggerNodeDto } from '../models/nodes/webhook-trigger-node.js';
 import type { AgentDefinition } from '../api/agent-definitions.js';
+import type { KeyValueTable } from '../api/key-value-tables.js';
 import type { LlmConfig } from '../api/llm.js';
 import type { SourceCollection } from '../api/knowledge.js';
 import type { Surface } from '../api/surfaces.js';
@@ -95,6 +99,10 @@ export interface DecompilerKnowledgeApi {
   listCollections(): Promise<SourceCollection[]>;
 }
 
+export interface DecompilerKeyValueTablesApi {
+  list(): Promise<KeyValueTable[]>;
+}
+
 export interface DecompilerDeps {
   graphs: DecompilerGraphsApi;
   agentDefinitions: DecompilerAgentDefinitionsApi;
@@ -102,6 +110,7 @@ export interface DecompilerDeps {
   llm: DecompilerLlmApi;
   tools: DecompilerToolsApi;
   knowledge: DecompilerKnowledgeApi;
+  keyValueTables: DecompilerKeyValueTablesApi;
 }
 
 export interface DecompileResult {
@@ -241,6 +250,7 @@ interface ReferencedEntityNames {
   mcpTools: Map<number, string>;
   collections: Map<number, string>;
   subgraphs: Map<number, string>;
+  keyValueTables: Map<number, string>;
 }
 
 async function fetchReferencedEntityNames(
@@ -267,11 +277,14 @@ async function fetchReferencedEntityNames(
   );
   const needsPythonTools = inlineSurfaces.some((surface) => (surface.python_tools ?? []).length > 0);
   const needsMcpTools = inlineSurfaces.some((surface) => (surface.mcp_tools ?? []).length > 0);
-  const needsCollections = inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0);
-  const needsGraphList = dto.subgraph_node_list.some((node) => !node.subgraph_detail?.name);
+  const needsCollections =
+    inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0) ||
+    (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
+  const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
+  const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
 
   const emptyMap = (): Map<number, string> => new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames] =
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] =
     await Promise.all([
       mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
       mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
@@ -303,17 +316,20 @@ async function fetchReferencedEntityNames(
       needsGraphList
         ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name])))
         : Promise.resolve(emptyMap()),
+      needsKeyValueTables
+        ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name])))
+        : Promise.resolve(emptyMap()),
     ]);
 
   // Nested subgraph_detail objects resolve names without the extra list call.
   const subgraphs = new Map(graphNames);
   for (const node of dto.subgraph_node_list) {
-    if (node.subgraph_detail?.name) {
+    if (node.subgraph != null && node.subgraph_detail?.name) {
       subgraphs.set(node.subgraph, node.subgraph_detail.name);
     }
   }
 
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
 }
 
 async function mapFromFetches<T>(
@@ -339,12 +355,13 @@ type NodeDtoEntry =
   | { type: 'file-extractor'; dto: FileExtractorNodeDto }
   | { type: 'audio-to-text'; dto: AudioToTextNodeDto }
   | { type: 'subgraph'; dto: SubGraphNodeDto }
-  | { type: 'crew'; dto: CrewNodeDto }
   | { type: 'webhook-trigger'; dto: WebhookTriggerNodeDto }
   | { type: 'telegram-trigger'; dto: TelegramTriggerNodeDto }
   | { type: 'schedule-trigger'; dto: ScheduleTriggerNodeDto }
   | { type: 'decision-table'; dto: DecisionTableNodeDto }
-  | { type: 'classification-decision-table'; dto: ClassificationDecisionTableNodeDto };
+  | { type: 'classification-decision-table'; dto: ClassificationDecisionTableNodeDto }
+  | { type: 'knowledge-retriever'; dto: KnowledgeRetrieverNodeDto }
+  | { type: 'key-value'; dto: KeyValueNodeDto };
 
 interface CollectedNode {
   entry: NodeDtoEntry;
@@ -408,7 +425,6 @@ function collectNodes(dto: GraphDto, warnings: string[]): NodeRegistry {
       (node): NodeDtoEntry => ({ type: 'audio-to-text', dto: node }),
     ),
     ...dto.subgraph_node_list.map((node): NodeDtoEntry => ({ type: 'subgraph', dto: node })),
-    ...dto.crew_node_list.map((node): NodeDtoEntry => ({ type: 'crew', dto: node })),
     ...dto.webhook_trigger_node_list.map(
       (node): NodeDtoEntry => ({ type: 'webhook-trigger', dto: node }),
     ),
@@ -424,6 +440,10 @@ function collectNodes(dto: GraphDto, warnings: string[]): NodeRegistry {
     ...dto.classification_decision_table_node_list.map(
       (node): NodeDtoEntry => ({ type: 'classification-decision-table', dto: node }),
     ),
+    ...(dto.knowledge_node_list ?? []).map(
+      (node): NodeDtoEntry => ({ type: 'knowledge-retriever', dto: node }),
+    ),
+    ...(dto.key_value_node_list ?? []).map((node): NodeDtoEntry => ({ type: 'key-value', dto: node })),
   ];
 
   const sorted = [...entries].sort(
@@ -675,8 +695,10 @@ function buildNodeBody(
       if (entry.dto.use_storage) {
         warnings.push(`${atPath}: use_storage is not representable in flow source and resets on the next push`);
       }
-      if (Object.keys(entry.dto.stream_config ?? {}).length > 0) {
-        warnings.push(`${atPath}: stream_config is not representable in flow source and resets on the next push`);
+      if ((entry.dto.python_code.secrets ?? []).length > 0) {
+        warnings.push(
+          `${atPath}: declared secrets are not representable in flow source — they are kept on the next push`,
+        );
       }
       if (Object.keys(entry.dto.test_input ?? {}).length > 0) {
         warnings.push(`${atPath}: test_input is not representable in flow source and resets on the next push`);
@@ -728,28 +750,15 @@ function buildNodeBody(
       };
 
     case 'subgraph': {
+      const subgraphId = entry.dto.subgraph;
       const subgraphName =
-        names.subgraphs.get(entry.dto.subgraph) ??
-        missingName(`subgraph flow #${entry.dto.subgraph}`, atPath, warnings);
+        subgraphId == null
+          ? missingName('subgraph flow (it was deleted — the node points at nothing)', atPath, warnings)
+          : (names.subgraphs.get(subgraphId) ?? missingName(`subgraph flow #${subgraphId}`, atPath, warnings));
       return {
         type: 'subgraph',
         position,
         graph: existingRef(subgraphName),
-        ...inputMapField(entry.dto.input_map, atPath, warnings),
-        ...outputVariablePathField(entry.dto.output_variable_path),
-      };
-    }
-
-    case 'crew': {
-      const crew = entry.dto.crew;
-      const crewName =
-        typeof crew === 'object' && crew !== null && typeof (crew as { name?: unknown }).name === 'string'
-          ? ((crew as { name: string }).name)
-          : missingName('crew name (the serializer did not nest it)', atPath, warnings);
-      return {
-        type: 'crew',
-        position,
-        crew: existingRef(crewName),
         ...inputMapField(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField(entry.dto.output_variable_path),
       };
@@ -764,6 +773,11 @@ function buildNodeBody(
       if (Object.keys(entry.dto.input_map ?? {}).length > 0) {
         warnings.push(`${atPath}: input_map is not representable on webhook-trigger nodes and resets on the next push`);
       }
+      if (entry.dto.webhook_trigger != null) {
+        warnings.push(
+          `${atPath}: the attached webhook trigger (#${entry.dto.webhook_trigger}) is not representable in flow source — it is kept on the next push`,
+        );
+      }
       return {
         type: 'webhook-trigger',
         position,
@@ -772,9 +786,10 @@ function buildNodeBody(
     }
 
     case 'telegram-trigger': {
-      if (entry.dto.telegram_bot_api_key !== '') {
+      if (entry.dto.telegram_bot_api_key_secret_id != null) {
         warnings.push(
-          `${atPath}: the Telegram bot token is a secret and is not pulled — set bot_token_env locally or the token resets on the next push`,
+          `${atPath}: the Telegram bot token lives in org secret #${entry.dto.telegram_bot_api_key_secret_id} and is not pulled — ` +
+            'it is kept on the next push unless you set bot_token_env',
         );
       }
       if ((entry.dto.fields ?? []).length > 0) {
@@ -796,7 +811,81 @@ function buildNodeBody(
 
     case 'classification-decision-table':
       return buildClassificationBody(entry.dto, name, position, registry, names, warnings);
+
+    case 'knowledge-retriever':
+      return buildKnowledgeRetrieverBody(entry.dto, name, position, names, warnings);
+
+    case 'key-value':
+      return buildKeyValueBody(entry.dto, name, position, names, warnings);
   }
+}
+
+function buildKnowledgeRetrieverBody(
+  dto: KnowledgeRetrieverNodeDto,
+  name: string,
+  position: { x: number; y: number },
+  names: ReferencedEntityNames,
+  warnings: string[],
+): YamlObject {
+  const atPath = `flow.nodes.${name}`;
+  const collectionName =
+    dto.source_collection == null
+      ? missingName('knowledge collection (none selected on the remote node)', atPath, warnings)
+      : (names.collections.get(dto.source_collection) ??
+        missingName(`knowledge collection #${dto.source_collection}`, atPath, warnings));
+  let query = dto.query ?? '';
+  if (query.trim() === '') {
+    warnings.push(`${atPath}.query: the remote node has no query — placeholder written, fill it in`);
+    query = 'TODO: search query';
+  }
+  if (dto.rag_type == null) {
+    warnings.push(`${atPath}.rag: the remote node has no RAG selected — set rag: naive | graph before pushing`);
+  }
+  // search_method is write-only on the backend; the read-back graph config carries it.
+  const searchMethod = dto.search_method ?? dto.search_configs?.graph?.search_method ?? undefined;
+  const graphConfigs = dto.search_configs?.graph
+    ? Object.fromEntries(Object.entries(dto.search_configs.graph).filter(([key]) => key !== 'search_method'))
+    : undefined;
+  const searchConfigs: YamlObject = {
+    ...(dto.search_configs?.naive ? { naive: dto.search_configs.naive } : {}),
+    ...(graphConfigs !== undefined ? { graph: graphConfigs } : {}),
+  };
+  return {
+    type: 'knowledge-retriever',
+    position,
+    collection: existingRef(collectionName),
+    ...(dto.rag_type != null ? { rag: dto.rag_type } : {}),
+    query,
+    ...(dto.rag_type === 'graph' && searchMethod != null ? { search_method: searchMethod } : {}),
+    ...(Object.keys(searchConfigs).length > 0 ? { search_configs: searchConfigs } : {}),
+    ...inputMapField(dto.input_map, atPath, warnings),
+    ...outputVariablePathField(dto.output_variable_path),
+  };
+}
+
+function buildKeyValueBody(
+  dto: KeyValueNodeDto,
+  name: string,
+  position: { x: number; y: number },
+  names: ReferencedEntityNames,
+  warnings: string[],
+): YamlObject {
+  const atPath = `flow.nodes.${name}`;
+  const tableName =
+    dto.key_value_table == null
+      ? missingName('key-value table (none selected on the remote node)', atPath, warnings)
+      : (names.keyValueTables.get(dto.key_value_table) ??
+        missingName(`key-value table #${dto.key_value_table}`, atPath, warnings));
+  const mode = dto.mode ?? 'read';
+  return {
+    type: 'key-value',
+    position,
+    table: tableName,
+    mode,
+    entries: (dto.entries ?? []).map((entry) =>
+      mode === 'delete' || !('value' in entry) ? { key: entry.key } : { key: entry.key, value: entry.value },
+    ),
+  };
 }
 
 function buildDecisionTableBody(

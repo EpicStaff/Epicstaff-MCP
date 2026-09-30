@@ -1,4 +1,4 @@
-# Valid but deprecated: 'crew' node produces a warning diagnostic.
+# Invalid: EpicStaff removed crew nodes (EST-3849) — 'crew' is rejected with an error diagnostic.
 meta:
   name: crew-node-example
 

@@ -90,7 +90,7 @@ export function registerRunTools(server: McpServer, context: AppContext): void {
       title: 'Poll session status',
       description:
         'Lightweight status poll for a running session (the headless substitute for the UI SSE stream). ' +
-        'Statuses: pending, run, wait_for_user (needs answer_to_llm), end, error, stop, expired.',
+        'Statuses: pending, run, wait_for_user (waiting for human input — the MCP has no reply tool; answer-to-llm was removed upstream), end, error, stop, expired.',
       inputSchema: {
         session_id: z.number().int(),
       },
@@ -170,29 +170,6 @@ export function registerRunTools(server: McpServer, context: AppContext): void {
         await context.auth.ensureAuthenticated();
         await sessions.stopSession(session_id);
         return { stopped: session_id };
-      }),
-  );
-
-  server.registerTool(
-    'answer_to_llm',
-    {
-      title: 'Answer a human-input request',
-      description:
-        'Respond to a session in wait_for_user status. The waiting prompt and its crew_id/execution_order/name ' +
-        'are in the session status_data / messages.',
-      inputSchema: {
-        session_id: z.number().int(),
-        crew_id: z.number().int(),
-        execution_order: z.number().int(),
-        name: z.string(),
-        answer: z.string(),
-      },
-    },
-    async (request) =>
-      runTool(async () => {
-        await context.auth.ensureAuthenticated();
-        await sessions.answerToLlm(request);
-        return { answered: request.session_id };
       }),
   );
 

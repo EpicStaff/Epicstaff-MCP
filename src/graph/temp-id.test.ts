@@ -48,7 +48,6 @@ function makeGraphDto(partial: Partial<GraphDto>): GraphDto {
     description: '',
     save_version: 8,
     start_node_list: [],
-    crew_node_list: [],
     python_node_list: [],
     task_node_list: [],
     edge_list: [],
@@ -64,6 +63,8 @@ function makeGraphDto(partial: Partial<GraphDto>): GraphDto {
     audio_transcription_node_list: [],
     graph_note_list: [],
     schedule_trigger_node_list: [],
+    knowledge_node_list: [],
+    key_value_node_list: [],
     ...partial,
   };
 }
@@ -118,6 +119,57 @@ describe('applySaveResponse', () => {
     );
   });
 
+  it('maps created knowledge-retriever and key-value nodes from their own response lists', () => {
+    const retriever: GraphState['nodes'][number] = {
+      ...baseNode('kr-a', null, 'Retrieve'),
+      type: 'knowledge-retriever',
+      data: { source_collection: 1, rag_type: 'naive', rag_id: 2, query: 'q', search_method: null, search_configs: null },
+    };
+    const keyValue: GraphState['nodes'][number] = {
+      ...baseNode('kv-a', null, 'Remember'),
+      type: 'key-value',
+      data: { key_value_table: 3, mode: 'delete', entries: [{ key: 'k' }] },
+    };
+    const response = makeGraphDto({
+      knowledge_node_list: [
+        {
+          id: 60,
+          graph: 42,
+          node_name: 'Retrieve',
+          source_collection: 1,
+          search_configs: null,
+          metadata: {},
+          input_map: {},
+          output_variable_path: null,
+          query: 'q',
+          rag_type: 'naive',
+          rag_id: 2,
+        },
+      ],
+      key_value_node_list: [
+        {
+          id: 61,
+          graph: 42,
+          node_name: 'Remember',
+          input_map: {},
+          output_variable_path: null,
+          metadata: {},
+          key_value_table: 3,
+          mode: 'delete',
+          entries: [{ key: 'k' }],
+        },
+      ],
+    });
+
+    const mapping = applySaveResponse({ nodes: [retriever, keyValue], edges: [] }, { nodes: [], edges: [] }, response);
+    expect(mapping).toStrictEqual(
+      new Map([
+        ['kr-a', 60],
+        ['kv-a', 61],
+      ])
+    );
+  });
+
   it('round-trips: applying the mapping makes a re-save produce an empty payload', async () => {
     const { buildBulkSavePayload } = await import('./bulk-save.js');
 
@@ -135,7 +187,6 @@ describe('applySaveResponse', () => {
         python_code: { name: 'code', libraries: [], code: 'def main(): pass', entrypoint: 'main' },
         input_map: {},
         output_variable_path: null,
-        stream_config: {},
         use_storage: false,
         test_input: {},
         metadata: { position: { x: 0, y: 0 }, color: '#123456', icon: 'ti-node', size: { width: 200, height: 100 } },

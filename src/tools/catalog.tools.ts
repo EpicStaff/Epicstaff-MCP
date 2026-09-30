@@ -6,7 +6,7 @@ import type { EpicStaffClient } from '../http/client.js';
 import { ApiError } from '../http/errors.js';
 import { AgentDefinitionsApi, type CreateAgentDefinitionRequest } from '../api/agent-definitions.js';
 import { KnowledgeApi } from '../api/knowledge.js';
-import { LlmApi } from '../api/llm.js';
+import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SurfacesApi, type CreateSurfaceRequest, type Surface } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
 import { runTool } from './auth-org.tools.js';
@@ -172,13 +172,9 @@ async function resolveNamedRef<T>(
  * Resolve the embedder for a RAG strategy. Number → used as-is; name → matched
  * against embedding-configs; omitted → the org default (ported from EntityPusher).
  */
-async function resolveEmbedderRef(
-  ref: number | string | undefined,
-  llm: LlmApi,
-  client: EpicStaffClient,
-): Promise<number> {
-  const configs = await llm.listEmbeddingConfigs();
+async function resolveEmbedderRef(ref: number | string | undefined, llm: LlmApi): Promise<number> {
   if (typeof ref === 'number') return ref;
+  const configs = await llm.listEmbeddingConfigs();
   if (typeof ref === 'string') {
     const wanted = ref.trim().toLowerCase();
     const named = configs.find(
@@ -193,36 +189,7 @@ async function resolveEmbedderRef(
       `Embedding config "${ref}" not found in the organization. Available: ${available || '(none)'}.`,
     );
   }
-  return resolveDefaultEmbedderId(configs, client);
-}
-
-async function resolveDefaultEmbedderId(
-  configs: Array<Record<string, unknown>>,
-  client: EpicStaffClient,
-): Promise<number> {
-  if (configs.length === 0) {
-    throw new Error(
-      'No embedding config exists in this organization — create one in EpicStaff settings ' +
-        '(knowledge indexing needs an embedder), or pass rag.embedder explicitly.',
-    );
-  }
-  const defaultConfig = await client
-    .get<{ model?: number } | undefined>('default-embedding-config/')
-    .catch(() => undefined);
-  const defaultModelId = defaultConfig?.model;
-  if (defaultModelId !== undefined) {
-    const byModel = configs.find((config) => config.model === defaultModelId);
-    if (byModel) return byModel.id as number;
-  }
-  if (configs.length === 1) return configs[0]!.id as number;
-  const available = configs
-    .map((config) => String(config.custom_name ?? config.name ?? ''))
-    .filter(Boolean)
-    .join(', ');
-  throw new Error(
-    'Cannot pick a default embedding config: the organization has several and none matches the ' +
-      `configured default embedding model. Pass rag.embedder as one of: ${available}.`,
-  );
+  return resolveDefaultEmbeddingConfigId(llm);
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +825,7 @@ async function attachAndIndexRag(
   },
   ctx: RagContext,
 ): Promise<{ ragId: number; ragType: 'naive' | 'graph' }> {
-  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm, ctx.client);
+  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm);
   if (rag.strategy === 'naive') {
     if (rag.entity_types !== undefined || rag.max_gleanings !== undefined) {
       throw new Error('entity_types and max_gleanings apply to graph RAG only — remove them or use strategy "graph".');

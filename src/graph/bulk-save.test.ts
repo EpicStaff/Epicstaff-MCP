@@ -4,10 +4,10 @@ import { buildBulkSavePayload } from './bulk-save.js';
 import type {
   AgentGraphNode,
   ClassificationDecisionTableGraphNode,
-  CrewGraphNode,
   DecisionTableGraphNode,
   GraphNodeBase,
   GraphState,
+  KeyValueGraphNode,
   NoteGraphNode,
   PythonGraphNode,
   StartGraphNode,
@@ -40,7 +40,6 @@ function metadataOf(node: GraphNodeBase): Record<string, unknown> {
 
 const emptyDeleted = {
   start_node_ids: [],
-  crew_node_ids: [],
   python_node_ids: [],
   task_node_ids: [],
   agent_node_ids: [],
@@ -54,8 +53,9 @@ const emptyDeleted = {
   schedule_trigger_node_ids: [],
   decision_table_node_ids: [],
   graph_note_ids: [],
-  code_agent_node_ids: [],
   classification_decision_table_node_ids: [],
+  knowledge_node_ids: [],
+  key_value_node_ids: [],
   edge_ids: [],
 };
 
@@ -94,10 +94,10 @@ describe('buildBulkSavePayload', () => {
       ...remoteNote,
       data: { content: 'hello', backgroundColor: '#222222' },
     };
-    const crewNode: CrewGraphNode = {
-      ...baseNode('crew-1', 4, 'Old Crew', 800, 0),
-      type: 'crew',
-      data: { id: 9 },
+    const keyValueNode: KeyValueGraphNode = {
+      ...baseNode('kv-1', 4, 'Remember', 800, 0),
+      type: 'key-value',
+      data: { key_value_table: 9, mode: 'read', entries: [{ key: 'k', value: 'variables.v' }] },
     };
     const agentNode: AgentGraphNode = {
       ...baseNode('agent-temp-1', null, 'Agent', 250, 120),
@@ -163,10 +163,10 @@ describe('buildBulkSavePayload', () => {
     };
 
     const remote: GraphState = {
-      nodes: [startNode, pythonNode, taskNode, remoteNote, crewNode],
+      nodes: [startNode, pythonNode, taskNode, remoteNote, keyValueNode],
       edges: [
         { sourceNodeId: 'start-1', targetNodeId: 'py-1', backendId: 100, metadata: {} },
-        { sourceNodeId: 'py-1', targetNodeId: 'crew-1', backendId: 101, metadata: {} },
+        { sourceNodeId: 'py-1', targetNodeId: 'kv-1', backendId: 101, metadata: {} },
       ],
     };
     const desired: GraphState = {
@@ -188,7 +188,6 @@ describe('buildBulkSavePayload', () => {
     expect(payload).toStrictEqual({
       save_version: 7,
       start_node_list: [],
-      crew_node_list: [],
       python_node_list: [],
       task_node_list: [],
       agent_node_list: [
@@ -274,11 +273,13 @@ describe('buildBulkSavePayload', () => {
         },
       ],
       classification_decision_table_node_list: [],
+      knowledge_node_list: [],
+      key_value_node_list: [],
       edge_list: [
         { graph: 42, start_node_id: 2, end_temp_id: 'agent-temp-1' },
         { graph: 42, start_temp_id: 'agent-temp-1', end_node_id: 5, metadata: { waypoints: [{ x: 10, y: 20 }] } },
       ],
-      deleted: { ...emptyDeleted, crew_node_ids: [4], edge_ids: [101] },
+      deleted: { ...emptyDeleted, key_value_node_ids: [4], edge_ids: [101] },
     });
   });
 
@@ -313,7 +314,7 @@ describe('buildBulkSavePayload', () => {
             },
           ],
           prompts: {
-            p1: { prompt_text: 'Classify the input', llm_config: 11, result_variable: 'cls' },
+            p1: { backendId: 91, prompt_text: 'Classify the input', llm_config: 11, result_variable: 'cls' },
           },
           default_llm_config: 11,
           pre_computation: {
@@ -322,7 +323,8 @@ describe('buildBulkSavePayload', () => {
             input_map: { a: 'variables.a' },
             output_variable_path: 'variables.pre',
           },
-          post_computation: { code: '', libraries: [] },
+          // No code but a declared secret: the block is still emitted (secrets-only computation).
+          post_computation: { code: '', libraries: [], secret_ids: [31] },
         },
       },
     };
@@ -351,10 +353,17 @@ describe('buildBulkSavePayload', () => {
           libraries: ['requests'],
           entrypoint: 'main',
           global_kwargs: {},
+          secret_ids: [],
         },
         pre_input_map: { a: 'variables.a' },
         pre_output_variable_path: 'variables.pre',
-        post_python_code: null,
+        post_python_code: {
+          code: '',
+          libraries: [],
+          entrypoint: 'main',
+          global_kwargs: {},
+          secret_ids: [31],
+        },
         post_input_map: {},
         post_output_variable_path: null,
         prompt_configs: [
@@ -374,7 +383,8 @@ describe('buildBulkSavePayload', () => {
             group_name: 'yes',
             order: 1,
             expression: null,
-            prompt_id: 'p1',
+            prompt_key: 'p1',
+            prompt: 91,
             manipulation: null,
             continue_flag: true,
             route_code: 'Yes',
@@ -396,17 +406,25 @@ describe('buildBulkSavePayload', () => {
       python: {
         ...baseNode('py-new', null, 'Py', 0, 0),
         type: 'python',
-        data: { id: 77, name: 'code', libraries: ['numpy'], code: 'def main(): pass', entrypoint: 'main', use_storage: true },
-        stream_config: { stdout: true },
+        data: {
+          id: 77,
+          name: 'code',
+          libraries: ['numpy'],
+          code: 'def main(): pass',
+          entrypoint: 'main',
+          use_storage: true,
+          secret_ids: [3],
+        },
         test_input: { n: 1 },
       },
       end: { ...baseNode('end-new', null, '__end__', 0, 1), type: 'end', data: {} },
       subgraph: { ...baseNode('sub-new', null, 'Sub', 0, 2), type: 'subgraph', data: { id: 55 } },
+      orphanSubgraph: { ...baseNode('sub-orphan', null, 'Orphan', 0, 2), type: 'subgraph', data: { id: null } },
       webhook: {
         ...baseNode('wh-new', null, 'Hook', 0, 3),
         type: 'webhook-trigger',
         data: {
-          webhook_trigger: { path: 'hook', ngrok_webhook_config: null },
+          webhook_trigger: 12,
           python_code: { name: 'hook', libraries: [], code: 'c', entrypoint: 'main' },
         },
       },
@@ -414,14 +432,32 @@ describe('buildBulkSavePayload', () => {
         ...baseNode('tg-new', null, 'Bot', 0, 4),
         type: 'telegram-trigger',
         data: {
-          telegram_bot_api_key: 'key',
+          telegram_bot_api_key_secret_id: 21,
           webhook_trigger: null,
           fields: [{ parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
         },
       },
       fileExtractor: { ...baseNode('fx-new', null, 'Extract', 0, 5), type: 'file-extractor' },
       audio: { ...baseNode('au-new', null, 'Transcribe', 0, 6), type: 'audio-to-text' },
-      crew: { ...baseNode('crew-new', null, 'Crew', 0, 7), type: 'crew', data: { id: 9 } },
+      knowledge: {
+        ...baseNode('kr-new', null, 'Retrieve', 0, 7),
+        input_map: { question: 'variables.question' },
+        output_variable_path: 'variables.docs',
+        type: 'knowledge-retriever',
+        data: {
+          source_collection: 8,
+          rag_type: 'graph',
+          rag_id: 81,
+          query: '{question}',
+          search_method: 'local',
+          search_configs: { graph: { search_method: 'local', local: { top_k_entities: 5 } } },
+        },
+      },
+      keyValue: {
+        ...baseNode('kv-new', null, 'Store', 0, 7),
+        type: 'key-value',
+        data: { key_value_table: 4, mode: 'write', entries: [{ key: 'profile_{variables.id}', value: 'variables.p' }] },
+      },
       scheduleDraft: {
         ...baseNode('sched-draft', null, 'Draft schedule', 0, 8),
         type: 'schedule-trigger',
@@ -470,10 +506,16 @@ describe('buildBulkSavePayload', () => {
         temp_id: 'py-new',
         node_name: 'Py',
         graph: 42,
-        python_code: { id: 77, name: 'code', libraries: ['numpy'], code: 'def main(): pass', entrypoint: 'main' },
+        python_code: {
+          id: 77,
+          name: 'code',
+          libraries: ['numpy'],
+          code: 'def main(): pass',
+          entrypoint: 'main',
+          secret_ids: [3],
+        },
         input_map: {},
         output_variable_path: null,
-        stream_config: { stdout: true },
         use_storage: true,
         test_input: { n: 1 },
         metadata: metadataOf(nodes.python),
@@ -499,6 +541,16 @@ describe('buildBulkSavePayload', () => {
         output_variable_path: null,
         metadata: metadataOf(nodes.subgraph),
       },
+      {
+        id: null,
+        temp_id: 'sub-orphan',
+        node_name: 'Orphan',
+        graph: 42,
+        subgraph: null,
+        input_map: {},
+        output_variable_path: null,
+        metadata: metadataOf(nodes.orphanSubgraph),
+      },
     ]);
     expect(payload.webhook_trigger_node_list).toStrictEqual([
       {
@@ -510,7 +562,7 @@ describe('buildBulkSavePayload', () => {
         input_map: {},
         output_variable_path: null,
         webhook_trigger_path: '',
-        webhook_trigger: { path: 'hook', ngrok_webhook_config: null },
+        webhook_trigger: 12,
         metadata: metadataOf(nodes.webhook),
       },
     ]);
@@ -520,7 +572,7 @@ describe('buildBulkSavePayload', () => {
         temp_id: 'tg-new',
         node_name: 'Bot',
         graph: 42,
-        telegram_bot_api_key: 'key',
+        telegram_bot_api_key_secret_id: 21,
         webhook_trigger: null,
         fields: [{ parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
         metadata: metadataOf(nodes.telegram),
@@ -548,19 +600,41 @@ describe('buildBulkSavePayload', () => {
         metadata: metadataOf(nodes.audio),
       },
     ]);
-    expect(payload.crew_node_list).toStrictEqual([
+    expect(payload.knowledge_node_list).toStrictEqual([
       {
         id: null,
-        temp_id: 'crew-new',
-        node_name: 'Crew',
+        temp_id: 'kr-new',
+        node_name: 'Retrieve',
         graph: 42,
-        crew_id: 9,
-        input_map: {},
-        output_variable_path: null,
-        stream_config: {},
-        metadata: metadataOf(nodes.crew),
+        input_map: { question: 'variables.question' },
+        output_variable_path: 'variables.docs',
+        source_collection: 8,
+        rag_type: 'graph',
+        rag_id: 81,
+        query: '{question}',
+        search_method: 'local',
+        search_configs: { graph: { search_method: 'local', local: { top_k_entities: 5 } } },
+        metadata: metadataOf(nodes.knowledge),
       },
     ]);
+    expect(payload.key_value_node_list).toStrictEqual([
+      {
+        id: null,
+        temp_id: 'kv-new',
+        node_name: 'Store',
+        graph: 42,
+        input_map: {},
+        output_variable_path: null,
+        key_value_table: 4,
+        mode: 'write',
+        entries: [{ key: 'profile_{variables.id}', value: 'variables.p' }],
+        metadata: metadataOf(nodes.keyValue),
+      },
+    ]);
+    // Removed upstream: never on the wire any more.
+    expect(payload).not.toHaveProperty('crew_node_list');
+    expect(payload.deleted).not.toHaveProperty('crew_node_ids');
+    expect(payload.deleted).not.toHaveProperty('code_agent_node_ids');
     expect(payload.schedule_trigger_node_list).toStrictEqual([
       {
         id: null,

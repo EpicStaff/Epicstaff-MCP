@@ -1,6 +1,6 @@
 ---
 name: es-test-flow
-description: Run a pushed EpicStaff flow and debug the result — poll status, read the execution trace, answer human-input requests, iterate. Use after es-push-flow, or to debug any session.
+description: Run a pushed EpicStaff flow and debug the result — poll status, read the execution trace, iterate. Use after es-push-flow, or to debug any session.
 ---
 
 # Test a flow (run + debug)
@@ -21,7 +21,9 @@ One responsibility: execute a flow and understand what happened.
    downstream fields to avoid stale carryover from an earlier run.
 4. Poll `get_session_updates` (a few seconds apart) until `isTerminal` or `wait_for_user`:
    - `wait_for_user` → read the prompt from `get_session` `status_data` /
-     `get_session_messages`, ask the user, reply via `answer_to_llm`.
+     `get_session_messages` and report it to the user. The MCP cannot reply: EpicStaff removed
+     the crew-era `answer-to-llm/` endpoint, so there is no answer tool — `stop_session` if the
+     run cannot proceed.
    - `error` → `get_session_messages` for the trace; map the failing node back to the
      flow-source node by `node_name`; fix the source; es-push-flow; rerun.
    - `end` → read `get_session_messages` (defaults to the concise view: a compact timeline plus

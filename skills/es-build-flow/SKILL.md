@@ -12,10 +12,14 @@ One responsibility: a clean local build and an understood build report. No netwo
    reported `path`/`file`, and rebuild. Typical errors:
    - unresolved reference → typo in a symbolic name, or the entity should be `{ existing: ... }`
    - RAG-type mismatch → the surface's search config doesn't match the collection's `rag.strategy`
-   - forbidden node type → `llm`/`code-agent` are not allowed; model the intent differently
+   - forbidden node type → `llm`/`code-agent`/`crew` are not allowed (EpicStaff removed them);
+     rewrite a `crew` node as an `agent` node (ordered `tasks:`) or `task` nodes
+   - knowledge-retriever without `rag:` on an `{ existing: ... }` collection → set `rag: naive|graph`
+   - key-value entry errors → the same rules the backend enforces (state paths like
+     `variables.x`, no `|default` on read targets, keys of letters/digits/_ plus `{variables.…}`)
 3. On success, read the report to the user: entities by action (create/update/reuse/existing),
    node count with computed positions, edge count, warnings.
-4. Treat warnings seriously: `defined but unused` usually means a wiring mistake;
-   `crew deprecated` means consider agent/task nodes instead.
+4. Treat warnings seriously: `defined but unused` usually means a wiring mistake; an unmapped
+   `{placeholder}` in a knowledge-retriever query is sent to the search literally.
 
 Done when: `build_flow` succeeds and the push plan matches the user's intent.

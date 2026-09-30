@@ -17,7 +17,9 @@ import { buildBulkSavePayload } from '../graph/bulk-save.js';
 import type { GraphState } from '../graph/graph-state.js';
 import { buildRemoteState } from '../graph/remote-state.js';
 import type { GraphDto } from '../models/graph.js';
+import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { EntityPusher } from '../pusher/entities.js';
+import { resolveRagRefs } from '../pusher/rag-refs.js';
 import { resolveFlowRefs } from '../pusher/flow-refs.js';
 import { GraphPusher } from '../pusher/graph.js';
 import { prepareRestoreState } from '../pusher/restore.js';
@@ -161,7 +163,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         "Write a graph's ENTIRE backend representation to a local .json file, verbatim. Unlike pull_flow — " +
         'which projects the graph through the flow-source compiler and silently discards every field flow ' +
         'source cannot express (end-node output_map, classification-decision-table prompt_configs and route ' +
-        'codes, python stream_config/test_input, task output_schema, error routes) — this filters nothing. ' +
+        'codes, python test_input and secrets, task output_schema, error routes) — this filters nothing. ' +
         'That makes it the only faithful snapshot of a graph, and the right thing to take before editing a ' +
         'production flow. Read-only against the backend: it never writes to EpicStaff. The output is an ' +
         'archival record for diffing and manual restore, not a pushable flow source.',
@@ -205,7 +207,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           if (value === null || typeof value !== 'object') return;
           for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
             if (
-              ['output_map', 'prompt_configs', 'stream_config', 'output_schema', 'test_input'].includes(key) &&
+              ['output_map', 'prompt_configs', 'secrets', 'output_schema', 'test_input'].includes(key) &&
               child != null &&
               !(Array.isArray(child) && child.length === 0) &&
               !(typeof child === 'object' && !Array.isArray(child) && Object.keys(child).length === 0)
@@ -244,7 +246,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       description:
         'Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source ' +
         'cannot express — end-node output_map, classification prompt_configs and route codes, python ' +
-        'stream_config/test_input, task output_schema, and error routes. Use it to make a restorable ' +
+        'test_input and secrets, task output_schema, and error routes. Use it to make a restorable ' +
         'backup, or to clone a flow when the backend copy/export endpoints mishandle classification and ' +
         'agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot ' +
         'damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, ' +
@@ -404,6 +406,10 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           if (plan.action === 'resolve-existing') {
             return { key: plan.key, kind: plan.kind, wouldDo: 'resolve-existing', remoteName: plan.remoteName };
           }
+          if (plan.action === 'ensure') {
+            // Secrets / key-value tables: found by name at push time, created only when missing.
+            return { key: plan.key, kind: plan.kind, wouldDo: 'reuse-or-create-by-name', remoteName: plan.remoteName };
+          }
           const entry = getEntity(lock, plan.section, plan.name);
           if (!entry) return { key: plan.key, kind: plan.kind, wouldDo: 'create' };
           if (plan.contentHash && entry.contentHash !== plan.contentHash) {
@@ -439,7 +445,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       title: 'Push flow to EpicStaff',
       description:
         'Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order ' +
-        '(llm-configs → tools → knowledge+documents+RAG → surfaces → agent-definitions), then create/update the ' +
+        '(secrets + key-value tables → llm-configs → tools → knowledge+documents+RAG → surfaces → agent-definitions), then create/update the ' +
         'graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) — ' +
         'never duplicates. Fails on remote save_version conflict unless force is set.',
       inputSchema: {
@@ -476,6 +482,11 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         const flowRefs = await resolveFlowRefs(artifact, flow_dir, context);
         for (const [refKey, graphId] of flowRefs) {
           entityResult.idMap.set(refKey, graphId);
+        }
+        // Knowledge-retriever RAGs of `existing:` collections — looked up, never created.
+        const ragRefs = await resolveRagRefs(artifact, entityResult.idMap, context);
+        for (const [refKey, ragId] of ragRefs) {
+          entityResult.idMap.set(refKey, ragId);
         }
 
         const graphPusher = new GraphPusher(context);
@@ -584,6 +595,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
             llm: new LlmApi(context.client),
             tools: new ToolsApi(context.client),
             knowledge: new KnowledgeApi(context.client),
+            keyValueTables: new KeyValueTablesApi(context.client),
           },
           graph_id,
           target_dir,

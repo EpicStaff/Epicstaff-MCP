@@ -65,7 +65,6 @@ export function applySaveResponse(
     }
   }
 
-  mapByNewIds(nodeDiff.crewNodes.toCreate, response.crew_node_list ?? [], existingIdsByType('crew'));
   mapByNewIds(nodeDiff.pythonNodes.toCreate, response.python_node_list ?? [], existingIdsByType('python'));
   mapByNewIds(nodeDiff.taskNodes.toCreate, response.task_node_list ?? [], existingIdsByType('task'));
   mapByNewIds(nodeDiff.agentNodes.toCreate, response.agent_node_list ?? [], existingIdsByType('agent'));
@@ -107,6 +106,14 @@ export function applySaveResponse(
     response.classification_decision_table_node_list ?? [],
     existingIdsByType('classification-decision-table')
   );
+  // Divergence: the frontend's buildCreatedNodeIdMap has no knowledge-retriever entry (it
+  // reloads the graph after save); the pusher needs every created id for the lockfile.
+  mapByNewIds(
+    nodeDiff.knowledgeRetrieverNodes.toCreate,
+    response.knowledge_node_list ?? [],
+    existingIdsByType('knowledge-retriever')
+  );
+  mapByNewIds(nodeDiff.keyValueNodes.toCreate, response.key_value_node_list ?? [], existingIdsByType('key-value'));
 
   return mapping;
 }

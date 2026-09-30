@@ -10,7 +10,7 @@ import type { GraphDto } from '../models/graph.js';
  * Why this direction: fidelity is lost in `compiler/emit.ts` (flow source → state), NOT in
  * `buildRemoteState` (DTO → state). Going straight from a raw DTO therefore preserves the
  * settings flow source cannot express — end-node `output_map`, CDT `prompt_configs` and route
- * codes, python `stream_config`/`test_input`, task `output_schema`, and error routes.
+ * codes, python `test_input` and declared secrets, task `output_schema`, and error routes.
  *
  * Two transforms are required before the state can be written anywhere else:
  *
@@ -54,12 +54,13 @@ export function prepareRestoreState(dto: GraphDto): RestorePreparation {
     const data = (node as { data?: Record<string, unknown> }).data;
     if (data == null) continue;
 
-    if (node.type === 'python') {
-      const code = data as { id?: number };
-      if (code.id !== undefined) {
-        delete code.id;
-        pythonCodeRows += 1;
-      }
+    // A webhook trigger's python_code is a node-owned row exactly like a python node's.
+    const code = (
+      node.type === 'python' ? data : node.type === 'webhook-trigger' ? data['python_code'] : undefined
+    ) as { id?: number } | undefined;
+    if (code?.id !== undefined) {
+      delete code.id;
+      pythonCodeRows += 1;
     }
     if (node.type === 'agent') {
       const tasks = data.tasks as Array<{ id?: number | null }> | undefined;
@@ -74,6 +75,22 @@ export function prepareRestoreState(dto: GraphDto): RestorePreparation {
     }
   }
   for (const edge of state.edges) edge.backendId = null;
+
+  // A webhook trigger (its public path) belongs to the node that serves it — sharing it
+  // would make the copy fire on the original's webhook. Detach it; re-attach in the UI.
+  const detachedTriggers = state.nodes.filter(
+    (node) =>
+      (node.type === 'webhook-trigger' || node.type === 'telegram-trigger') && node.data.webhook_trigger != null,
+  );
+  for (const node of detachedTriggers) {
+    if (node.type === 'webhook-trigger' || node.type === 'telegram-trigger') node.data.webhook_trigger = null;
+  }
+  if (detachedTriggers.length > 0) {
+    warnings.push(
+      `${detachedTriggers.length} trigger node(s) had a webhook trigger attached; it was NOT copied (sharing it would make ` +
+        'the copy fire on the original webhook). Attach a webhook trigger to the restored node(s) in the EpicStaff editor.',
+    );
+  }
 
   const ids = new Set<string>();
   for (const node of state.nodes) {

@@ -23,9 +23,11 @@ const EPICSTAFF_INSTRUCTIONS = [
   'scoped to exactly "user" or "organization".',
   '',
   'Invariants: agent nodes need at least one task (tasks:); no parallel fan-out — one active path,',
-  'branch with a decision-table or conditional edge; never use node types "llm" or "code-agent"',
-  '("crew" is deprecated, prefer agent/task nodes). Call describe_node_types for the full node',
-  'catalog (fields + runtime caveats).',
+  'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
+  '"crew" (removed from EpicStaff — use agent/task nodes). A key-value node writes its read entries',
+  'to their own state paths, not output_variable_path. Credentials come from env vars',
+  '(api_key_env, bot_token_env) and are stored as org secrets on push — never in flow source.',
+  'Call describe_node_types for the full node catalog (fields + runtime caveats).',
   '',
   'Build flows with the es-* skills (front door: es-deliver → es-write-flow → build → push → test).',
 ].join('\n');
@@ -35,7 +37,7 @@ async function main(): Promise<void> {
   const server = new McpServer(
     {
       name: 'epicstaff',
-      version: '3.0.1_legacy',
+      version: '3.1.0',
     },
     { instructions: EPICSTAFF_INSTRUCTIONS },
   );

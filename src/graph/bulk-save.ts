@@ -3,8 +3,8 @@
  * `visual-programming/utils/save/payload.ts#buildBulkSavePayload`, with the diffing
  * (`utils/save/diff.ts`) folded in so callers pass whole graph states.
  *
- * Excluded from emission (per protocol decision): `llm_node_list` (legacy) and
- * `code_agent_node_list` (deprecated). Their `deleted` id-list keys remain, always empty.
+ * Excluded from emission (per protocol decision): `llm_node_list` (legacy — still emitted
+ * by the frontend, ignored by the backend). Its `deleted.llm_node_ids` key remains, always empty.
  */
 
 import type {
@@ -174,7 +174,12 @@ function buildCdtNodePayload(
         group_name: group.group_name,
         order: typeof group.order === 'number' ? group.order : index + 1,
         expression: group.expression || null,
-        prompt_id: group.prompt_id || null,
+        // Link the group to its prompt by prompt_key (group.prompt_id holds the
+        // key). The backend resolves it node-locally, so a prompt created in
+        // this same save connects in one payload. `prompt` (numeric id) is
+        // still sent for back-compat; the backend prefers prompt_key.
+        prompt_key: group.prompt_id ?? null,
+        prompt: tableData?.prompts?.[group.prompt_id ?? '']?.backendId ?? null,
         manipulation: group.manipulation || null,
         continue_flag: !!(group.continue_flag ?? group.continue),
         route_code: group.route_code || null,
@@ -206,6 +211,9 @@ function buildCdtNodePayload(
   const defaultRef = resolveNodeRef(defaultTargetUuid, allNodes, idMap);
   const errorRef = resolveNodeRef(errorTargetUuid, allNodes, idMap);
 
+  const preSecretIds = preComputation.secret_ids || [];
+  const postSecretIds = postComputation.secret_ids || [];
+
   const promptConfigs: PromptConfigWrite[] = Object.entries(tableData?.prompts || {}).map(([key, config]) => ({
     prompt_key: key,
     prompt_text: config.prompt_text ?? '',
@@ -219,26 +227,28 @@ function buildCdtNodePayload(
     graph: graphId,
     node_name: node.node_name,
     pre_python_code:
-      preCodeValue.trim() === ''
+      preCodeValue.trim() === '' && !preSecretIds.length
         ? null
         : {
             code: preCodeValue,
-            libraries: preComputation.libraries || [],
+            libraries: preComputation.libraries ?? [],
             entrypoint: 'main',
             global_kwargs: {},
+            secret_ids: preSecretIds,
           },
-    pre_input_map: preComputation.input_map || tableData?.pre_input_map || {},
+    pre_input_map: preComputation.input_map ?? tableData?.pre_input_map ?? {},
     pre_output_variable_path: preComputation.output_variable_path || tableData?.pre_output_variable_path || null,
     post_python_code:
-      postCodeValue.trim() === ''
+      postCodeValue.trim() === '' && !postSecretIds.length
         ? null
         : {
             code: postCodeValue,
-            libraries: postComputation.libraries || [],
+            libraries: postComputation.libraries ?? [],
             entrypoint: 'main',
             global_kwargs: {},
+            secret_ids: postSecretIds,
           },
-    post_input_map: postComputation.input_map || tableData?.post_input_map || {},
+    post_input_map: postComputation.input_map ?? tableData?.post_input_map ?? {},
     post_output_variable_path: postComputation.output_variable_path || tableData?.post_output_variable_path || null,
     prompt_configs: promptConfigs,
     default_llm_config: tableData?.default_llm_config ?? null,
@@ -344,7 +354,6 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
 
   const deleted: BulkSavePayload['deleted'] = {
     start_node_ids: nodeDiff.startNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
-    crew_node_ids: nodeDiff.crewNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     python_node_ids: nodeDiff.pythonNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     task_node_ids: nodeDiff.taskNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     agent_node_ids: nodeDiff.agentNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
@@ -368,10 +377,13 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       .map((node) => node.backendId!)
       .filter((id) => id != null),
     graph_note_ids: nodeDiff.noteNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
-    code_agent_node_ids: [],
     classification_decision_table_node_ids: nodeDiff.classificationDecisionTableNodes.toDelete
       .map((node) => node.backendId!)
       .filter((id) => id != null),
+    knowledge_node_ids: nodeDiff.knowledgeRetrieverNodes.toDelete
+      .map((node) => node.backendId!)
+      .filter((id) => id != null),
+    key_value_node_ids: nodeDiff.keyValueNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     edge_ids: connectionDiff.toDelete.map((edge) => edge.backendId).filter((id): id is number => id != null),
   };
 
@@ -382,15 +394,6 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       variables: node.data.initialState ?? {},
       metadata: toNodeMetadata(node),
     })),
-    crew_node_list: nodeItems(nodeDiff.crewNodes, (node) => ({
-      node_name: node.node_name,
-      graph: graphId,
-      crew_id: node.data.id,
-      input_map: node.input_map || {},
-      output_variable_path: node.output_variable_path || null,
-      stream_config: node.stream_config ?? {},
-      metadata: toNodeMetadata(node),
-    })),
     python_node_list: nodeItems(nodeDiff.pythonNodes, (node) => {
       const { use_storage, ...pythonCode } = node.data;
       return {
@@ -399,7 +402,6 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
         python_code: pythonCode,
         input_map: node.input_map || {},
         output_variable_path: node.output_variable_path || null,
-        stream_config: node.stream_config ?? {},
         use_storage: use_storage ?? false,
         test_input: node.test_input ?? {},
         metadata: toNodeMetadata(node),
@@ -469,7 +471,7 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
     telegram_trigger_node_list: nodeItems(nodeDiff.telegramNodes, (node) => ({
       node_name: node.node_name,
       graph: graphId,
-      telegram_bot_api_key: node.data.telegram_bot_api_key,
+      telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
       webhook_trigger: node.data.webhook_trigger,
       fields: node.data.fields,
       metadata: toNodeMetadata(node),
@@ -493,6 +495,29 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
     classification_decision_table_node_list: nodeItems(nodeDiff.classificationDecisionTableNodes, (node) =>
       buildCdtNodePayload(node, graphId, desired.nodes, idMap, desired.edges)
     ),
+    knowledge_node_list: nodeItems(nodeDiff.knowledgeRetrieverNodes, (node) => ({
+      node_name: node.node_name,
+      graph: graphId,
+      input_map: node.input_map || {},
+      output_variable_path: node.output_variable_path || null,
+      source_collection: node.data?.source_collection ?? null,
+      rag_type: node.data?.rag_type ?? null,
+      rag_id: node.data?.rag_id ?? null,
+      query: node.data?.query ?? '',
+      search_method: node.data?.search_method ?? null,
+      search_configs: node.data?.search_configs ?? null,
+      metadata: toNodeMetadata(node),
+    })),
+    key_value_node_list: nodeItems(nodeDiff.keyValueNodes, (node) => ({
+      node_name: node.node_name,
+      graph: graphId,
+      input_map: node.input_map || {},
+      output_variable_path: null,
+      key_value_table: node.data?.key_value_table ?? null,
+      mode: node.data?.mode ?? 'read',
+      entries: node.data?.entries ?? [],
+      metadata: toNodeMetadata(node),
+    })),
     edge_list: [...edgeList, ...edgeUpdateList],
     deleted,
   };

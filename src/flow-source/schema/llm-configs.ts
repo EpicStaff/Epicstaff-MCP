@@ -38,7 +38,8 @@ export const llmConfigSchema = z
       .string()
       .optional()
       .describe(
-        'Name of the environment variable that holds the provider API key. The key value itself never lives in flow source.',
+        'Name of the environment variable that holds the provider API key. The key value itself never lives in flow source: ' +
+          'on push it is stored as an org Secret (named "es-mcp:<ENV>") and the LLM config references that secret.',
       ),
     params: z
       .record(z.string(), z.unknown())

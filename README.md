@@ -21,8 +21,15 @@ The plugin bundles the MCP server as built JS — no npm install needed at use t
    - `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD` — your EpicStaff login (a dedicated API key
      is minted on first use)
 3. With login credentials, the first tool call logs in, mints a dedicated API key
-   (`POST /api/auth/api-key/`), and persists it in `~/.es_mcp/` — credentials are only
-   used for that bootstrap. With `EPICSTAFF_API_TOKEN`, the token is used directly.
+   (`POST /api/profile/api-keys/`), and persists it in `~/.es_mcp/` together with the login's
+   refresh token. With `EPICSTAFF_API_TOKEN`, the token is used directly.
+4. Credentials a flow needs (LLM API keys, a Telegram bot token) come from environment variables
+   named in the flow (`api_key_env`, `bot_token_env`). On push each is stored as an org **Secret**
+   named `es-mcp:<ENV_NAME>` and referenced by id — values never enter flow source, the graph or the
+   lockfile. EpicStaff only lets a signed-in user manage secrets (not an API key), so pushing a
+   flow with such credentials needs `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD`; the session is
+   refreshed through the refresh token rather than by logging in again. Secrets are immutable: if
+   an env value changes, delete the old `es-mcp:<ENV_NAME>` secret in EpicStaff and push again.
 
 Organizations are resolved automatically (`GET /api/profile/`). One org → auto-selected;
 several → pick with `set_active_organization`.
@@ -36,7 +43,7 @@ several → pick with `set_active_organization`.
 | `es-write-flow` | Author/edit flow source (reuse-first: discover existing entities before defining) |
 | `es-build-flow` | Local compile + interpret diagnostics |
 | `es-push-flow` | Diff, then materialize on EpicStaff |
-| `es-test-flow` | Run, poll, read messages, answer human input, iterate |
+| `es-test-flow` | Run, poll, read messages, iterate |
 | `es-pull-flow` | Import an existing remote flow into local source |
 
 Start with **es-deliver** for any build request: it decides whether the deliverable is the flow
@@ -117,8 +124,27 @@ flow:
 
 Node types: `start`, `agent`, `task`, `python`, `end`, `note`, `file-extractor`, `subgraph`,
 `webhook-trigger`, `telegram-trigger`, `schedule-trigger`, `decision-table`,
-`classification-decision-table`, `audio-to-text` (+ `crew`, deprecated).
-`llm` and `code-agent` node types are rejected (legacy/deprecated in EpicStaff).
+`classification-decision-table`, `audio-to-text`, `knowledge-retriever`, `key-value`.
+`llm`, `code-agent` and `crew` node types are rejected with an error (removed from EpicStaff —
+rewrite a `crew` node as an `agent` node or `task` nodes).
+
+```yaml
+    lookup:                               # search one RAG of a collection; results → output path
+      type: knowledge-retriever
+      collection: docs                    # or { existing: "Handbook" } (then set rag: naive|graph)
+      query: "{question}"                 # {name} filled from input_map
+      input_map: { question: variables.question }
+      output_variable_path: variables.handbook
+    remember:                             # org Key-Value table (created on push if missing)
+      type: key-value
+      table: User Profiles
+      mode: read                          # read | write | delete
+      entries:
+        - { key: "profile_{variables.user_id}", value: variables.profile }   # read → writes variables.profile
+```
+
+Webhook and Telegram trigger nodes are pushed without a webhook trigger (path / provider); attach
+one in the EpicStaff editor — a repush keeps it.
 
 ## The data layer — `variables:` and dataflow checks
 
@@ -128,7 +154,9 @@ Data moves between nodes through a shared **`variables`** state, not along edges
 
 The `variables:` section declares state variables — names + initial values (the runtime state is
 untyped, so declarations carry no types). Declaring is **optional**: any node's
-`output_variable_path` also counts as producing a variable.
+`output_variable_path` also counts as producing a variable, and so does the `value` of a
+`key-value` read entry (a `key-value` write entry's `value` and every `{variables.…}` key
+placeholder are reads).
 
 `build_flow` validates the wiring (**may-reach** policy):
 
@@ -163,4 +191,5 @@ npm run gen:types  # regenerate src/models/generated/openapi.d.ts from openapi/s
 The server is a headless port of the EpicStaff Angular frontend's API layer: same
 endpoints, same request models, same auth/org headers, and a verbatim port of the
 editor's auto-arrange layout. When frontend DTOs change, re-sync `src/models/` and
-`openapi/schema.json`.
+`openapi/schema.json`. `epicstaff-sync.json` records the EpicStaff commit this tree is verified
+against.

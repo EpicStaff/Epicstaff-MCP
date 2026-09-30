@@ -1,9 +1,10 @@
 /**
- * Ported from frontend `models/classification-decision-table-node.model.ts` +
- * `buildCdtNodePayload` in `utils/save/payload.ts`.
+ * Ported from frontend `visual-programming/core/models/classification-decision-table-node.model.ts` +
+ * `buildCdtNodePayload` in `visual-programming/utils/save/payload.ts`.
  */
 
 import type { NodeDtoMetadata } from '../graph.js';
+import type { DeclaredSecretRef } from './python-node.js';
 
 export interface CdtPythonCodeBlock {
   libraries: string[];
@@ -11,6 +12,10 @@ export interface CdtPythonCodeBlock {
   entrypoint: string;
   global_kwargs: Record<string, unknown>;
   content_hash?: string;
+  /** Write side: secrets the computation may read. */
+  secret_ids?: number[];
+  /** Read side of `secret_ids`. */
+  secrets?: DeclaredSecretRef[];
 }
 
 export interface PromptConfigDto {
@@ -38,7 +43,10 @@ export interface CdtConditionGroupDto {
   group_name: string;
   order: number;
   expression: string | null;
-  prompt_id: string | null;
+  /** Backend id of the linked prompt config. */
+  prompt: number | null;
+  /** Per-node key of the linked prompt config (added by the serializer's to_representation). */
+  prompt_key?: string | null;
   manipulation: string | null;
   continue_flag: boolean;
   route_code: string | null;
@@ -53,7 +61,12 @@ export interface CdtConditionGroupWrite {
   group_name: string;
   order: number;
   expression: string | null;
-  prompt_id: string | null;
+  /**
+   * Preferred link: the prompt's per-node key (works for a prompt created in the same
+   * save). `prompt` (numeric id) is kept for back-compat; the backend prefers the key.
+   */
+  prompt_key: string | null;
+  prompt: number | null;
   manipulation: string | null;
   continue_flag: boolean;
   route_code: string | null;

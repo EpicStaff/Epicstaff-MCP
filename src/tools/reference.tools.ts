@@ -22,7 +22,6 @@ const NODE_LIST_KEYS = [
   'agent_node_list',
   'task_node_list',
   'python_node_list',
-  'crew_node_list',
   'end_node_list',
   'graph_note_list',
   'file_extractor_node_list',
@@ -33,6 +32,8 @@ const NODE_LIST_KEYS = [
   'decision_table_node_list',
   'classification_decision_table_node_list',
   'audio_transcription_node_list',
+  'knowledge_node_list',
+  'key_value_node_list',
 ] as const;
 
 function summarizeGraph(graph: GraphDto): Record<string, unknown> {
@@ -46,7 +47,8 @@ function summarizeGraph(graph: GraphDto): Record<string, unknown> {
         node_name: node.node_name,
         ...(node.agent_definition !== undefined && { agent_definition: node.agent_definition }),
         ...(node.surface_list !== undefined && { surface_list: node.surface_list }),
-        ...(node.crew_id !== undefined && { crew_id: node.crew_id }),
+        ...(node.source_collection !== undefined && { source_collection: node.source_collection }),
+        ...(node.key_value_table !== undefined && { key_value_table: node.key_value_table }),
       }));
     }
   }
@@ -167,14 +169,16 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
     {
       title: 'List LLM configs',
       description:
-        'List LLM configs (what agents reference as llm_config). Includes the org default when available.',
+        'List LLM configs (what agents reference as llm_config). Includes the org default agent LLM when one is set.',
       inputSchema: {},
     },
     async () =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        const [configs, defaultConfig] = await Promise.all([llm.listConfigs(), llm.getDefaultConfig()]);
+        const [configs, defaults] = await Promise.all([llm.listConfigs(), llm.getDefaultModels()]);
+        const defaultConfig = configs.find((config) => config.id === defaults.agent_llm_config);
         return {
+          // The org's default agent LLM (default-models/ → agent_llm_config).
           default: defaultConfig ? { id: defaultConfig.id, custom_name: defaultConfig.custom_name } : null,
           configs: configs.map((config) => ({
             id: config.id,
@@ -237,8 +241,8 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
     {
       title: 'List tools',
       description:
-        'List all three tool kinds agents can use: configured built-in tools, python-code tools, MCP tools. ' +
-        'Surfaces reference python/MCP tools by id.',
+        'List all tool kinds agents can use: python-code tools (built_in = EpicStaff catalog tool), tool configs ' +
+        '(named configurations of a python-code tool), MCP tools. Surfaces reference python/MCP tools by id.',
       inputSchema: {},
     },
     async () =>
@@ -251,7 +255,12 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
         ]);
         return {
           tool_configs: toolConfigs.map((tool) => ({ id: tool.id, name: tool.name, tool: tool.tool })),
-          python_code_tools: pythonCodeTools.map((tool) => ({ id: tool.id, name: tool.name, description: tool.description })),
+          python_code_tools: pythonCodeTools.map((tool) => ({
+            id: tool.id,
+            name: tool.name,
+            description: tool.description,
+            built_in: tool.built_in ?? false,
+          })),
           mcp_tools: mcpTools.map((tool) => ({ id: tool.id, name: tool.name, tool_name: tool.tool_name })),
         };
       }),

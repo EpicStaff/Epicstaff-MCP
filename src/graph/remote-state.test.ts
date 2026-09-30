@@ -63,16 +63,33 @@ const mSubgraph = meta(0, 600);
 const mFileExtractor = meta(0, 700);
 const mAudio = meta(0, 800);
 const mEnd = meta(900, 0);
-const mCrew = meta(0, 900);
+const mKnowledge = meta(0, 900);
+const mKeyValue = meta(0, 1000);
 
 const uuidTask = remoteNodeUuid('task', 5);
 const uuidAgent = remoteNodeUuid('agent', 6);
 
 // Wire python_code objects carry `name` (echoed by the backend); canonical key order.
-const transformCode = { id: 70, name: 'transform', libraries: [], code: 'def main(x): return x', entrypoint: 'main' };
+// The read shape declares secrets by {id, name}; the write/state shape carries their ids.
+const transformCodeWire = {
+  id: 70,
+  name: 'transform',
+  libraries: [],
+  code: 'def main(x): return x',
+  entrypoint: 'main',
+  secrets: [{ id: 3, name: 'API_TOKEN' }],
+};
+const transformCodeState = {
+  id: 70,
+  name: 'transform',
+  libraries: [],
+  code: 'def main(x): return x',
+  entrypoint: 'main',
+  secret_ids: [3],
+};
 const hookCode = { id: 80, name: 'hook', libraries: [], code: 'c', entrypoint: 'main' };
-const hookTrigger = { path: 'hook', ngrok_webhook_config: null };
-const crewStreamConfig = { stdout: true };
+/** GET graphs/{id}/ returns the webhook trigger as a primary key. */
+const hookTrigger = 33;
 const endOutputMap = { context: 'variables.context' };
 const waypoints = [{ x: 10, y: 20 }];
 
@@ -86,16 +103,32 @@ function makeDto(): GraphDto {
     metadata: {},
     conditional_edge_list: [],
     start_node_list: [{ id: 1, graph: 42, node_name: '__start__', variables: { topic: 'ai' }, metadata: mStart }],
-    crew_node_list: [
+    knowledge_node_list: [
       {
         id: 16,
-        node_name: 'Crew',
+        node_name: 'Retrieve',
         graph: 42,
-        crew: { id: 9, name: 'My crew' },
+        source_collection: 8,
+        search_configs: null,
+        metadata: mKnowledge,
+        input_map: { q: 'variables.topic' },
+        output_variable_path: 'variables.docs',
+        query: '{q}',
+        rag_type: 'naive',
+        rag_id: 81,
+      },
+    ],
+    key_value_node_list: [
+      {
+        id: 17,
+        node_name: 'Remember',
+        graph: 42,
         input_map: {},
         output_variable_path: null,
-        stream_config: crewStreamConfig,
-        metadata: mCrew,
+        key_value_table: 4,
+        mode: 'read',
+        entries: [{ key: 'last_topic', value: 'variables.previous' }],
+        metadata: mKeyValue,
       },
     ],
     python_node_list: [
@@ -103,7 +136,7 @@ function makeDto(): GraphDto {
         id: 2,
         node_name: 'Transform',
         graph: 42,
-        python_code: transformCode,
+        python_code: transformCodeWire,
         input_map: {},
         test_input: {},
         output_variable_path: null,
@@ -199,6 +232,7 @@ function makeDto(): GraphDto {
           libraries: ['requests'],
           entrypoint: 'main',
           global_kwargs: {},
+          secrets: [{ id: 5, name: 'CLASSIFIER_KEY' }],
         },
         pre_input_map: { a: 'variables.a' },
         pre_output_variable_path: 'variables.pre',
@@ -226,7 +260,8 @@ function makeDto(): GraphDto {
             group_name: 'yes',
             order: 1,
             expression: null,
-            prompt_id: 'p1',
+            prompt: 400,
+            prompt_key: 'p1',
             manipulation: null,
             continue_flag: true,
             route_code: 'Yes',
@@ -279,7 +314,7 @@ function makeDto(): GraphDto {
         id: 11,
         node_name: 'Bot',
         graph: 42,
-        telegram_bot_api_key: 'key',
+        telegram_bot_api_key_secret_id: 21,
         fields: [{ id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
         metadata: mTelegram,
         webhook_trigger: null,
@@ -316,15 +351,9 @@ function makeDesired(): GraphState {
     nodes: [
       { ...desiredBase('start', 1, '__start__', mStart), type: 'start', data: { initialState: { topic: 'ai' } } },
       {
-        ...desiredBase('crew', 16, 'Crew', mCrew),
-        type: 'crew',
-        data: { id: 9 },
-        stream_config: crewStreamConfig,
-      },
-      {
         ...desiredBase('python', 2, 'Transform', mPython),
         type: 'python',
-        data: { ...transformCode },
+        data: { ...transformCodeState },
         test_input: {},
       },
       {
@@ -426,6 +455,7 @@ function makeDesired(): GraphState {
             ],
             prompts: {
               p1: {
+                backendId: 400,
                 prompt_text: 'Classify the input',
                 llm_config: 11,
                 output_schema: {},
@@ -441,8 +471,9 @@ function makeDesired(): GraphState {
               libraries: ['requests'],
               input_map: { a: 'variables.a' },
               output_variable_path: 'variables.pre',
+              secret_ids: [5],
             },
-            post_computation: { code: '', libraries: [], input_map: {}, output_variable_path: null },
+            post_computation: { code: '', libraries: [], input_map: {}, output_variable_path: null, secret_ids: [] },
           },
         },
       },
@@ -471,7 +502,7 @@ function makeDesired(): GraphState {
         ...desiredBase('telegram-trigger', 11, 'Bot', mTelegram),
         type: 'telegram-trigger',
         data: {
-          telegram_bot_api_key: 'key',
+          telegram_bot_api_key_secret_id: 21,
           webhook_trigger: null,
           fields: [{ id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
         },
@@ -480,6 +511,25 @@ function makeDesired(): GraphState {
       { ...desiredBase('file-extractor', 13, 'Extract', mFileExtractor), type: 'file-extractor' },
       { ...desiredBase('audio-to-text', 14, 'Transcribe', mAudio), type: 'audio-to-text' },
       { ...desiredBase('end', 15, '__end__', mEnd), type: 'end', data: { output_map: endOutputMap } },
+      {
+        ...desiredBase('knowledge-retriever', 16, 'Retrieve', mKnowledge),
+        input_map: { q: 'variables.topic' },
+        output_variable_path: 'variables.docs',
+        type: 'knowledge-retriever',
+        data: {
+          source_collection: 8,
+          rag_type: 'naive',
+          rag_id: 81,
+          query: '{q}',
+          search_method: null,
+          search_configs: null,
+        },
+      },
+      {
+        ...desiredBase('key-value', 17, 'Remember', mKeyValue),
+        type: 'key-value',
+        data: { key_value_table: 4, mode: 'read', entries: [{ key: 'last_topic', value: 'variables.previous' }] },
+      },
     ],
     edges: [
       {
