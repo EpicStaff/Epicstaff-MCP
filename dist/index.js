@@ -11,14 +11,6 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __esm = (fn, res, err2) => function __init() {
-  if (err2) throw err2[0];
-  try {
-    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-  } catch (e) {
-    throw err2 = [e], e;
-  }
-};
 var __commonJS = (cb, mod) => function __require2() {
   try {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -2998,7 +2990,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve.call(this, root, ref);
+      let _sch = resolve2.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3025,7 +3017,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve(root, ref) {
+    function resolve2(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3656,7 +3648,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve(baseURI, relativeURI, options) {
+    function resolve2(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3914,7 +3906,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve,
+      resolve: resolve2,
       resolveComponent,
       equal,
       serialize,
@@ -6900,57 +6892,6 @@ var require_dist = __commonJS({
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.default = formatsPlugin;
-  }
-});
-
-// src/api/graphs.ts
-var graphs_exports = {};
-__export(graphs_exports, {
-  GraphsApi: () => GraphsApi
-});
-function unwrap2(response) {
-  return Array.isArray(response) ? response : response.results;
-}
-var GraphsApi;
-var init_graphs = __esm({
-  "src/api/graphs.ts"() {
-    "use strict";
-    GraphsApi = class {
-      constructor(client) {
-        this.client = client;
-      }
-      client;
-      async listLight() {
-        return unwrap2(
-          await this.client.get("graph-light/", {
-            query: { limit: 1e3 }
-          })
-        );
-      }
-      async get(graphId) {
-        return this.client.get(`graphs/${graphId}/`, { query: { _ts: Date.now() } });
-      }
-      async create(request) {
-        return this.client.post("graphs/", { body: request });
-      }
-      /** The main persistence path — returns the full GraphDto incl. new backend ids + save_version. */
-      async bulkSave(graphId, payload) {
-        return this.client.post(`graphs/${graphId}/save/`, { body: payload });
-      }
-      async delete(graphId) {
-        await this.client.delete(`graphs/${graphId}/`);
-      }
-      // Conditional edges — dedicated endpoints (not in bulk-save, mirroring the frontend).
-      async createConditionalEdge(body) {
-        return this.client.post("conditionaledges/", { body });
-      }
-      async updateConditionalEdge(id, body) {
-        return this.client.put(`conditionaledges/${id}/`, { body });
-      }
-      async deleteConditionalEdge(id) {
-        await this.client.delete(`conditionaledges/${id}/`);
-      }
-    };
   }
 });
 
@@ -26372,7 +26313,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -26389,7 +26330,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -26467,7 +26408,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve(parseResult.data);
+            resolve2(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -26728,12 +26669,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve, interval);
+      const timeoutId = setTimeout(resolve2, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -27833,7 +27774,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -28482,12 +28423,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve) => {
+    return new Promise((resolve2) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve();
+        resolve2();
       } else {
-        this._stdout.once("drain", resolve);
+        this._stdout.once("drain", resolve2);
       }
     });
   }
@@ -28503,9 +28444,23 @@ function normalizeApiUrl(raw) {
   }
   return `${url}/`;
 }
+var ConfigurationError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ConfigurationError";
+  }
+};
+var UNEXPANDED_PLACEHOLDER = /^\$\{[A-Za-z_][A-Za-z0-9_]*(:?[-=+?][^}]*)?\}$/;
 function readEnv(env, name) {
   const value = env[name];
-  return value ? value : void 0;
+  if (value === void 0) return void 0;
+  const trimmed = value.trim();
+  if (trimmed === "" || UNEXPANDED_PLACEHOLDER.test(trimmed)) return void 0;
+  return value;
+}
+var RESERVED_ENV_NAME = /^(EPICSTAFF_|ES_MCP_)/i;
+function isReservedEnvName(name) {
+  return RESERVED_ENV_NAME.test(name);
 }
 function loadConfig(env = process.env) {
   const baseUrl = readEnv(env, "EPICSTAFF_BASE_URL");
@@ -28542,7 +28497,7 @@ function loadConfig(env = process.env) {
     }
   }
   if (problems.length > 0 || apiUrl === void 0) {
-    throw new Error(
+    throw new ConfigurationError(
       `Invalid EpicStaff MCP configuration \u2014 ${problems.join("; ")}. Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment.`
     );
   }
@@ -28625,7 +28580,24 @@ function excerpt(raw) {
 }
 
 // src/http/client.ts
+function unconfiguredClient(error2) {
+  const reject = async () => {
+    throw error2;
+  };
+  return {
+    get apiUrl() {
+      throw error2;
+    },
+    get: reject,
+    post: reject,
+    put: reject,
+    patch: reject,
+    delete: reject,
+    request: reject
+  };
+}
 var ORG_HEADER_SKIP = [/\/api\/auth\//, /\/admin\/organizations\/\d+\//];
+var ORG_RESOLUTION_SKIP = /\/api\/profile\//;
 var EpicStaffClient = class {
   constructor(config2, store) {
     this.config = config2;
@@ -28635,8 +28607,13 @@ var EpicStaffClient = class {
   store;
   /** Installed by auth.ts — runs the single-flight re-mint. Returns the fresh API key. */
   reauthenticate = null;
+  /** Installed by org.ts — makes sure the active org is resolved before org-scoped calls. */
+  ensureOrgContext = null;
   onUnauthorized(handler) {
     this.reauthenticate = handler;
+  }
+  onOrgContextNeeded(handler) {
+    this.ensureOrgContext = handler;
   }
   get apiUrl() {
     return this.config.apiUrl;
@@ -28658,6 +28635,9 @@ var EpicStaffClient = class {
   }
   async request(method, path6, options = {}, isRetry = false) {
     const url = this.buildUrl(path6, options.query);
+    if (this.ensureOrgContext && this.isOrgScoped(url, options)) {
+      await this.ensureOrgContext();
+    }
     const headers = this.buildHeaders(url, options);
     const init = { method, headers };
     if (options.formData) {
@@ -28683,6 +28663,14 @@ var EpicStaffClient = class {
     }
     const text = await response.text();
     return text ? JSON.parse(text) : void 0;
+  }
+  /**
+   * A regular API-key request that carries the org header. Auth bootstrap traffic (skipAuth,
+   * one-off bearer tokens) and the profile lookup the resolver performs are excluded, so
+   * resolution can never wait on itself.
+   */
+  isOrgScoped(url, options) {
+    return !options.skipAuth && !options.bearerToken && !ORG_RESOLUTION_SKIP.test(url) && !ORG_HEADER_SKIP.some((pattern) => pattern.test(url));
   }
   buildUrl(path6, query) {
     const url = new URL(path6.replace(/^\//, ""), this.config.apiUrl);
@@ -28726,6 +28714,7 @@ var EpicStaffClient = class {
 // src/http/auth.ts
 import { hostname as hostname2 } from "node:os";
 var REFRESH_COOKIE_NAME = "auth.refresh";
+var MIN_REMINT_INTERVAL_MS = 6e4;
 var ACCESS_TOKEN_EXPIRY_MARGIN_SECONDS = 30;
 function refreshTokenFromCookies(headers) {
   for (const cookie of headers.getSetCookie()) {
@@ -28760,6 +28749,8 @@ var AuthService = class {
   client;
   bootstrapPromise = null;
   sessionPromise = null;
+  /** When this process last minted an API key (loop guard, see MIN_REMINT_INTERVAL_MS). */
+  lastMintAt = null;
   /** Ensure a working credential exists; validate/refresh the stored one or establish fresh. */
   async ensureAuthenticated() {
     if (this.bootstrapPromise) {
@@ -28810,7 +28801,11 @@ var AuthService = class {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
     }
-    this.store.update({ apiKey: null, keyPrefix: null, bearerAccessToken: null });
+    if (this.store.get().jwtOnly) {
+      this.store.update({ bearerAccessToken: null });
+    } else {
+      this.store.update({ apiKey: null, keyPrefix: null });
+    }
     return this.ensureAuthenticated();
   }
   async bootstrap() {
@@ -28928,21 +28923,48 @@ var AuthService = class {
     }
     return { access: tokens.access, refresh: refreshCookie ?? tokens.refresh ?? null };
   }
+  /**
+   * Mint a dedicated API key with the user's JWT session. The session comes from the store
+   * when possible (unexpired access token, else a cookie refresh) — a login happens only when
+   * neither works, because LoginThrottle allows just a handful per minute.
+   */
   async establishCredential() {
-    if (this.config.email === void 0 || this.config.password === void 0) {
-      throw new Error("establishCredential() called without credentials \u2014 this is a bug in AuthService.");
+    this.assertNotRemintLoop();
+    const storedAccess = this.store.get().bearerAccessToken;
+    const access = await this.accessToken();
+    try {
+      return await this.mintWith(access);
+    } catch (error2) {
+      if (error2 instanceof ApiError && error2.status === 401 && access === storedAccess) {
+        logger.info("Stored access token was rejected while minting \u2014 renewing the session");
+        this.store.update({ bearerAccessToken: null });
+        return this.mintWith(await this.renewAccessToken());
+      }
+      throw error2;
     }
-    const session = await this.login();
+  }
+  assertNotRemintLoop() {
+    if (this.lastMintAt === null) return;
+    const ageMs = Date.now() - this.lastMintAt;
+    if (ageMs < MIN_REMINT_INTERVAL_MS) {
+      throw new Error(
+        `The API key this server minted ${Math.round(ageMs / 1e3)}s ago was rejected right away \u2014 not minting another one (that would loop and exhaust the active-key limit). Check the EpicStaff API-key settings, the server clock, and any proxy that might strip the X-Api-Key header, then call check_connection again.`
+      );
+    }
+  }
+  async mintWith(access) {
+    const { bearerRefreshToken } = this.store.get();
     try {
       const minted = await this.client.post("profile/api-keys/", {
-        bearerToken: session.access,
+        bearerToken: access,
         body: { name: `es-mcp (${hostname2()})` }
       });
+      this.lastMintAt = Date.now();
       this.store.update({
         apiKey: minted.api_key,
         keyPrefix: minted.prefix,
-        bearerAccessToken: session.access,
-        bearerRefreshToken: session.refresh,
+        bearerAccessToken: access,
+        bearerRefreshToken,
         jwtOnly: false
       });
       logger.info(`Minted API key ${minted.prefix}\u2026 and persisted it`);
@@ -28955,11 +28977,11 @@ var AuthService = class {
       this.store.update({
         apiKey: null,
         keyPrefix: null,
-        bearerAccessToken: session.access,
-        bearerRefreshToken: session.refresh,
+        bearerAccessToken: access,
+        bearerRefreshToken,
         jwtOnly: true
       });
-      return session.access;
+      return access;
     }
   }
 };
@@ -28969,9 +28991,33 @@ var OrgService = class {
   constructor(store, client) {
     this.store = store;
     this.client = client;
+    client.onOrgContextNeeded(() => this.ensureResolved());
   }
   store;
   client;
+  /** Set once the persisted selection was validated against the profile in this process. */
+  resolved = false;
+  resolvePromise = null;
+  /**
+   * Resolve the active org once per process, before the first org-scoped request: validates the
+   * persisted selection against the profile memberships and auto-selects a single org — the
+   * same as check_connection — so a fresh server process never sends org-scoped calls without
+   * X-Organization-Id. Single-flight; a failed lookup is retried on the next request.
+   */
+  async ensureResolved() {
+    if (this.resolved) return;
+    this.resolvePromise ??= this.resolve().then(() => void 0).catch((error2) => {
+      if (error2 instanceof ApiError && error2.status === 404) {
+        logger.info("profile/ not found \u2014 this backend has no organizations; sending no org header");
+        this.resolved = true;
+        return;
+      }
+      throw error2;
+    }).finally(() => {
+      this.resolvePromise = null;
+    });
+    return this.resolvePromise;
+  }
   async resolve() {
     const profile = await this.client.get("profile/");
     const organizations = (profile.memberships ?? []).map((membership) => membership.organization).filter((org) => org?.id !== void 0).map((org) => ({
@@ -28990,6 +29036,7 @@ var OrgService = class {
       this.store.update({ activeOrgId });
       logger.info(`Auto-selected the only organization: ${organizations[0].name} (${activeOrgId})`);
     }
+    this.resolved = true;
     return {
       organizations,
       activeOrgId,
@@ -29006,7 +29053,12 @@ var OrgService = class {
     this.store.update({ activeOrgId: orgId });
     return { ...status, activeOrgId: orgId, selectionRequired: false };
   }
-  requireActiveOrg() {
+  /**
+   * The active org id for entity-creating calls. Resolves lazily first (see ensureResolved), so a
+   * fresh process with a saved selection — or a single membership — never needs check_connection.
+   */
+  async requireActiveOrg() {
+    await this.ensureResolved();
     const { activeOrgId } = this.store.get();
     if (activeOrgId === null) {
       throw new Error(
@@ -29104,6 +29156,28 @@ function createContext(config2) {
   const org = new OrgService(store, client);
   return { config: config2, store, client, auth, org };
 }
+function createUnconfiguredContext(error2) {
+  const fail = () => {
+    throw error2;
+  };
+  return {
+    get config() {
+      return fail();
+    },
+    get store() {
+      return fail();
+    },
+    // Not a throwing getter: API wrappers capture the client at registration time; the
+    // stand-in rejects on the first request instead.
+    client: unconfiguredClient(error2),
+    get auth() {
+      return fail();
+    },
+    get org() {
+      return fail();
+    }
+  };
+}
 
 // src/util/result.ts
 function ok(data) {
@@ -29136,6 +29210,13 @@ async function runTool(work) {
         })
       );
     }
+    if (error2 instanceof ConfigurationError) {
+      return toContent(
+        err(error2.message, {
+          hint: "The EpicStaff MCP server is not configured. Export EPICSTAFF_BASE_URL plus EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN) in the shell that launches Claude Code, then restart it. Local tools (init_flow, validate_flow, build_flow) work without it."
+        })
+      );
+    }
     return toContent(err(error2 instanceof Error ? error2.message : String(error2)));
   }
 }
@@ -29145,6 +29226,9 @@ function hintFor(error2) {
   }
   if (error2.status === 403) {
     return "Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.";
+  }
+  if (error2.status === 400 && error2.bodyExcerpt?.includes("org_context_required")) {
+    return "No active organization was sent \u2014 call list_organizations, then set_active_organization.";
   }
   if (error2.validationErrors?.length) {
     return "Fix the listed fields in the flow source and retry.";
@@ -29206,8 +29290,8 @@ function registerAuthOrgTools(server, context) {
 }
 
 // src/tools/flow.tools.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname, isAbsolute, join as join2 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync4, realpathSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname, isAbsolute, join as join2, resolve } from "node:path";
 
 // src/api/agent-definitions.ts
 function unwrap(response) {
@@ -29240,8 +29324,50 @@ var AgentDefinitionsApi = class {
   }
 };
 
-// src/tools/flow.tools.ts
-init_graphs();
+// src/api/graphs.ts
+function unwrap2(response) {
+  return Array.isArray(response) ? response : response.results;
+}
+var GraphsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async listLight() {
+    return unwrap2(
+      await this.client.get("graph-light/", {
+        query: { limit: 1e3 }
+      })
+    );
+  }
+  async get(graphId) {
+    return this.client.get(`graphs/${graphId}/`, { query: { _ts: Date.now() } });
+  }
+  async create(request) {
+    return this.client.post("graphs/", { body: request });
+  }
+  /** The main persistence path — returns the full GraphDto incl. new backend ids + save_version. */
+  async bulkSave(graphId, payload) {
+    return this.client.post(`graphs/${graphId}/save/`, { body: payload });
+  }
+  /** Rename a graph. PATCH is optimistically locked like bulk-save — save_version is mandatory. */
+  async rename(graphId, name, saveVersion) {
+    return this.client.patch(`graphs/${graphId}/`, { body: { name, save_version: saveVersion } });
+  }
+  async delete(graphId) {
+    await this.client.delete(`graphs/${graphId}/`);
+  }
+  // Conditional edges — dedicated endpoints (not in bulk-save, mirroring the frontend).
+  async createConditionalEdge(body) {
+    return this.client.post("conditionaledges/", { body });
+  }
+  async updateConditionalEdge(id, body) {
+    return this.client.put(`conditionaledges/${id}/`, { body });
+  }
+  async deleteConditionalEdge(id) {
+    await this.client.delete(`conditionaledges/${id}/`);
+  }
+};
 
 // src/api/knowledge.ts
 import { readFileSync as readFileSync2 } from "node:fs";
@@ -29598,6 +29724,11 @@ var positionSchema = external_exports.strictObject({
 var inputMapSchema = external_exports.record(external_exports.string(), external_exports.string()).describe(
   `Maps this node's named inputs to flow-state variable paths, e.g. { "query": "variables.user_query" }.`
 );
+function credentialEnvName(description) {
+  return external_exports.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name (letters, digits, underscores)").refine((name) => !isReservedEnvName(name), {
+    message: "EPICSTAFF_* and ES_MCP_* variables are the MCP server's own credentials and settings and cannot be used as a flow credential \u2014 export the provider key under its own name (e.g. OPENAI_API_KEY)"
+  }).describe(description);
+}
 
 // src/flow-source/schema/agents.ts
 var surfacePlaceSchema = external_exports.enum(["all", "flow", "chat"]).describe("Where this default surface applies: everywhere, only in flows, or only in chat.");
@@ -29787,9 +29918,9 @@ var webhookTriggerNodeSchema = external_exports.strictObject({
 var telegramTriggerNodeSchema = external_exports.strictObject({
   type: external_exports.literal("telegram-trigger"),
   position: positionField,
-  bot_token_env: external_exports.string().optional().describe(
-    'Environment variable holding the Telegram bot token. The token never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the node references that secret.'
-  ),
+  bot_token_env: credentialEnvName(
+    'Environment variable holding the Telegram bot token. The token never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the node references that secret. EPICSTAFF_* / ES_MCP_* names are rejected.'
+  ).optional(),
   output_variable_path: outputVariablePathField
 });
 var scheduleTriggerNodeSchema = external_exports.strictObject({
@@ -29973,18 +30104,42 @@ var knowledgeCollectionSchema = external_exports.strictObject({
 var knowledgeSectionSchema = external_exports.record(symbolicNameSchema, knowledgeCollectionSchema).default({}).describe("Knowledge collections, keyed by symbolic name.");
 
 // src/flow-source/schema/llm-configs.ts
+var llmParamsSchema = external_exports.record(external_exports.string(), external_exports.unknown()).superRefine((params, context) => {
+  const integerAtLeast = (key, minimum) => {
+    const value = params[key];
+    if (value === void 0 || value === null) return;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
+      context.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} must be an integer of at least ${minimum} (EpicStaff LLMConfig minimum)`
+      });
+    }
+  };
+  integerAtLeast("max_tokens", 500);
+  integerAtLeast("context_window", 1e3);
+  const temperature = params["temperature"];
+  if (temperature !== void 0 && temperature !== null && (typeof temperature !== "number" || temperature < 0 || temperature > 2)) {
+    context.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["temperature"], message: "temperature must be between 0 and 2" });
+  }
+}).default({}).describe(
+  "Extra provider-specific LLMConfig fields (top_p, timeout, context_window \u2265 1000, \u2026), passed through to the backend as-is."
+);
 var llmConfigSchema = external_exports.strictObject({
   model: external_exports.string().min(1).describe('Model name, e.g. "gpt-4o" or "claude-sonnet-4".'),
   provider: external_exports.string().optional().describe(
     'LLM provider, e.g. "openai", "anthropic", "groq". When omitted the backend infers it from the model name.'
   ),
+  // Bounds mirror the backend LLMConfig model validators (tables/models/llm_models.py):
+  // temperature MinValueValidator(0.0)/MaxValueValidator(2.0), max_tokens MinValueValidator(500),
+  // context_window MinValueValidator(1000) — so build_flow reports what push would be refused for.
   temperature: external_exports.number().min(0).max(2).optional().describe("Sampling temperature (0\u20132). Backend default when omitted."),
-  max_tokens: external_exports.number().int().positive().optional().describe("Maximum tokens per completion. Backend default when omitted."),
+  max_tokens: external_exports.number().int().min(500, "max_tokens must be at least 500 (EpicStaff LLMConfig minimum)").optional().describe("Maximum tokens per completion (at least 500). Backend default (4096) when omitted."),
   base_url: external_exports.string().optional().describe("Custom API base URL for self-hosted or proxied providers."),
-  api_key_env: external_exports.string().optional().describe(
-    'Name of the environment variable that holds the provider API key. The key value itself never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the LLM config references that secret.'
-  ),
-  params: external_exports.record(external_exports.string(), external_exports.unknown()).default({}).describe("Extra provider-specific parameters, passed through to the backend as-is.")
+  api_key_env: credentialEnvName(
+    'Name of the environment variable that holds the provider API key. The key value itself never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the LLM config references that secret. EPICSTAFF_* / ES_MCP_* names are rejected.'
+  ).optional(),
+  params: llmParamsSchema
 }).describe("One named LLM configuration.");
 var llmConfigsSectionSchema = external_exports.record(symbolicNameSchema, llmConfigSchema).default({}).describe("Named LLM configurations, keyed by symbolic name.");
 
@@ -30802,12 +30957,14 @@ function validateDataflow(source) {
       const basePath = `flow.edges[${index}].condition.input_map`;
       checkReads(
         Object.entries(edge.condition.input_map).map(([key, path6]) => ({ at: `${basePath}.${key}`, path: path6 })),
-        edge.from
+        edge.from,
+        { readerHasWritten: true }
       );
     }
   });
   return diagnostics;
-  function checkReads(reads, readerNode) {
+  function checkReads(reads, readerNode, options = {}) {
+    const ownWrites = options.readerHasWritten ? producedByNode.get(readerNode) ?? [] : [];
     for (const { at: readPath, path: rawValue } of reads) {
       if (rawValue === "__all__") continue;
       const parsed = parseVarPath(rawValue);
@@ -30817,7 +30974,7 @@ function validateDataflow(source) {
       }
       if (parsed.isShared || parsed.hasDefault) continue;
       const read = parsed.segments;
-      const reaching = [...declared, ...ancestorProduced(readerNode)];
+      const reaching = [...declared, ...ownWrites, ...ancestorProduced(readerNode)];
       if (reaching.some((produced) => sharesPrefix(read, produced))) {
         continue;
       }
@@ -31090,7 +31247,7 @@ function toNodeMetadata(node) {
 
 // src/graph/diff.ts
 function areEqual(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return canonicalJson(left) === canonicalJson(right);
 }
 function buildUuidToBackendIdMap(nodes) {
   const map = /* @__PURE__ */ new Map();
@@ -31367,6 +31524,7 @@ function toCdtComparable(node, allNodes) {
   };
 }
 function getNodeDiff(previous, current) {
+  const refNodes = [...current.nodes, ...previous.nodes];
   return {
     startNodes: diffNodesByBackendId(
       nodesByType(previous.nodes, "start"),
@@ -31426,7 +31584,7 @@ function getNodeDiff(previous, current) {
     decisionTableNodes: diffNodesByBackendId(
       nodesByType(previous.nodes, "decision-table"),
       nodesByType(current.nodes, "decision-table"),
-      (node) => toDecisionTableComparable(node, current.nodes)
+      (node) => toDecisionTableComparable(node, refNodes)
     ),
     noteNodes: diffNodesByBackendId(
       nodesByType(previous.nodes, "note"),
@@ -31436,7 +31594,7 @@ function getNodeDiff(previous, current) {
     classificationDecisionTableNodes: diffNodesByBackendId(
       nodesByType(previous.nodes, "classification-decision-table"),
       nodesByType(current.nodes, "classification-decision-table"),
-      (node) => toCdtComparable(node, current.nodes)
+      (node) => toCdtComparable(node, refNodes)
     ),
     knowledgeRetrieverNodes: diffNodesByBackendId(
       nodesByType(previous.nodes, "knowledge-retriever"),
@@ -31510,18 +31668,28 @@ function applySaveResponse(desired, remote, response) {
     remote.nodes.filter((node) => node.type === type && node.backendId != null).map((node) => node.backendId)
   );
   const mapByNewIds = (createdNodes, backendNodes, existingIds) => {
-    const newlyCreatedBackendNodes = backendNodes.filter((backendNode) => !existingIds.has(backendNode.id));
-    createdNodes.forEach((node, index) => {
-      const backendNode = newlyCreatedBackendNodes[index];
-      if (backendNode) {
-        mapping.set(node.id, backendNode.id);
+    const unclaimed = backendNodes.filter((backendNode) => !existingIds.has(backendNode.id)).sort((left, right) => left.id - right.id);
+    const unmatched = [];
+    for (const node of createdNodes) {
+      const name = node.node_name ?? "";
+      const sameName = name === "" ? [] : unclaimed.filter((backendNode) => backendNode.node_name === name);
+      const match = sameName.length === 1 ? sameName[0] : void 0;
+      if (match) {
+        mapping.set(node.id, match.id);
+        unclaimed.splice(unclaimed.indexOf(match), 1);
+      } else {
+        unmatched.push(node);
       }
+    }
+    unmatched.forEach((node, index) => {
+      const backendNode = unclaimed[index];
+      if (backendNode) mapping.set(node.id, backendNode.id);
     });
   };
   const startCreated = nodeDiff.startNodes.toCreate;
   if (startCreated.length > 0) {
     const startExistingIds = existingIdsByType("start");
-    const startCandidates = (response.start_node_list ?? []).filter((node) => !startExistingIds.has(node.id));
+    const startCandidates = (response.start_node_list ?? []).filter((node) => !startExistingIds.has(node.id)).sort((left, right) => left.id - right.id);
     if (startCandidates[0] && startCreated[0]) {
       mapping.set(startCreated[0].id, startCandidates[0].id);
     }
@@ -31580,17 +31748,17 @@ function applySaveResponse(desired, remote, response) {
 function isSymbolicRef(value) {
   return typeof value === "object" && value !== null && typeof value.$ref === "string" && Object.keys(value).length === 1;
 }
-function substituteRefs(value, resolve) {
+function substituteRefs(value, resolve2) {
   if (isSymbolicRef(value)) {
-    return resolve(value.$ref);
+    return resolve2(value.$ref);
   }
   if (Array.isArray(value)) {
-    return value.map((item) => substituteRefs(item, resolve));
+    return value.map((item) => substituteRefs(item, resolve2));
   }
   if (typeof value === "object" && value !== null) {
     const result = {};
     for (const [key, entry] of Object.entries(value)) {
-      result[key] = substituteRefs(entry, resolve);
+      result[key] = substituteRefs(entry, resolve2);
     }
     return result;
   }
@@ -34833,10 +35001,15 @@ var EntityPusher = class {
    * provision_knowledge to materialize just `llm_configs` + `knowledge` ahead of
    * the full flow. Omitting `options` pushes everything (the default push_flow
    * behavior, unchanged).
+   * @param options.verifyLockedIds Re-check every locked id against the backend before trusting
+   * it (the id must exist AND carry the entity's name); a stale id is dropped and the entity
+   * created anew. Set by push_flow when the lockfile's graph turned out to be gone — a sign the
+   * lockfile is stale or from another instance, where a reused id could point at an unrelated entity.
    */
   async push(artifact, lock, options) {
     const idMap = /* @__PURE__ */ new Map();
     const actions = [];
+    const warnings = [];
     let currentLock = lock;
     for (const plan of artifact.entities) {
       if (options?.sections && !options.sections.includes(plan.section)) {
@@ -34856,10 +35029,29 @@ var EntityPusher = class {
       }
       const resolvedPayload = await this.resolvePayload(plan.payload ?? {}, idMap, plan.key);
       const hash = plan.contentHash ?? contentHash(plan.payload ?? {});
-      const lockEntry = getEntity(currentLock, plan.section, plan.name);
+      let lockEntry = getEntity(currentLock, plan.section, plan.name);
+      let adoptedId;
+      if (lockEntry && options?.verifyLockedIds === true && !await this.isLockedIdValid(plan, lockEntry.backendId)) {
+        warnings.push(
+          `${plan.key}: locked id #${lockEntry.backendId} no longer exists under "${expectedRemoteName(plan)}" in this organization \u2014 dropped from flow.lock.json and created anew.`
+        );
+        logger.warn(`Locked id #${lockEntry.backendId} of ${plan.key} is stale \u2014 dropping it`);
+        currentLock = removeEntity(currentLock, plan.section, plan.name);
+        currentLock = removeEntity(currentLock, plan.section, `${plan.name}#rag`);
+        lockEntry = void 0;
+      }
+      if (lockEntry === void 0 && options?.adoptByName === true) {
+        adoptedId = await this.lookupByName(plan, expectedRemoteName(plan));
+        if (adoptedId !== void 0) {
+          warnings.push(`${plan.key}: adopted the existing same-named entity #${adoptedId} and updated it.`);
+        }
+      }
       let backendId;
       let action;
-      if (lockEntry && !isEntityDirty(currentLock, plan.section, plan.name, hash)) {
+      if (adoptedId !== void 0) {
+        backendId = await this.updateEntity(plan, adoptedId, resolvedPayload);
+        action = "updated";
+      } else if (lockEntry && !isEntityDirty(currentLock, plan.section, plan.name, hash)) {
         backendId = lockEntry.backendId;
         action = "reused";
       } else if (lockEntry) {
@@ -34872,6 +35064,7 @@ var EntityPusher = class {
       currentLock = setEntity(currentLock, plan.section, plan.name, { backendId, contentHash: hash });
       idMap.set(plan.key, backendId);
       actions.push({ key: plan.key, kind: plan.kind, action, backendId });
+      if (action !== "reused") await options?.persistLock?.(currentLock);
       if (plan.kind === "knowledge_collection") {
         currentLock = await this.pushCollectionExtras(plan, backendId, idMap, currentLock);
         const ragEntry = plan.rag ? getEntity(currentLock, plan.section, `${plan.name}#rag`) : void 0;
@@ -34880,13 +35073,16 @@ var EntityPusher = class {
         }
       }
     }
-    return { idMap, lock: currentLock, actions };
+    return { idMap, lock: currentLock, actions, warnings };
   }
   /**
-   * Substitute every placeholder kind the compiler emits:
+   * Substitute the placeholder kinds an upsert payload may carry:
    * `{$ref}` (entity pushed earlier in this walk), `{$model}` (LLM model by name),
-   * `{$env}` (environment variable — secrets never live in flow source),
    * `{$tool}` (built-in catalog tool by name), `{$storageFile}` (org storage path).
+   *
+   * `{$env}` is deliberately NOT substituted here: environment values reach the backend only
+   * through `ensure` secret plans (see ensureSecret), so a pass-through field such as
+   * `llm_configs.*.params` can never smuggle an arbitrary environment variable into a payload.
    */
   async resolvePayload(payload, idMap, forKey) {
     const withTemplates = await this.substituteTemplateRefs(payload);
@@ -34903,9 +35099,6 @@ var EntityPusher = class {
   async substituteTemplateRefs(value) {
     if (isModelRef(value)) {
       return this.resolveModelId(value.$model, value.provider);
-    }
-    if (isEnvRef(value)) {
-      return this.readEnv(value.$env);
     }
     if (isBuiltinToolRef(value)) {
       return this.resolveBuiltinToolId(value.$tool);
@@ -34971,8 +35164,13 @@ var EntityPusher = class {
     return { backendId: (await this.secrets.create(name, value)).id, created: true };
   }
   readEnv(envName) {
-    const resolved = process.env[envName];
-    if (resolved === void 0 || resolved === "") {
+    if (isReservedEnvName(envName)) {
+      throw new Error(
+        `Environment variable "${envName}" belongs to the MCP server's own configuration and cannot be stored as a flow credential. Export the provider key under its own name and reference that instead.`
+      );
+    }
+    const resolved = readEnv(process.env, envName);
+    if (resolved === void 0) {
       throw new Error(
         `Environment variable "${envName}" is not set for the MCP server. Secrets referenced in flow source must be provided in the plugin environment.`
       );
@@ -35025,6 +35223,10 @@ var EntityPusher = class {
     }
     return found;
   }
+  /** The locked id still exists and still names this entity (not a recycled / foreign id). */
+  async isLockedIdValid(plan, backendId) {
+    return await this.lookupByName(plan, expectedRemoteName(plan)) === backendId;
+  }
   async lookupByName(plan, remoteName) {
     const nameMatches = (candidate) => (candidate.name ?? "").toLowerCase() === remoteName.toLowerCase();
     switch (plan.kind) {
@@ -35054,6 +35256,16 @@ var EntityPusher = class {
     }
   }
   async createEntity(plan, payload) {
+    try {
+      return await this.createEntityRequest(plan, payload);
+    } catch (error2) {
+      if (error2 instanceof ApiError && (error2.status === 400 || error2.status === 409) && /already exists/i.test(`${error2.message} ${error2.bodyExcerpt ?? ""}`)) {
+        throw nameConflictError(plan);
+      }
+      throw error2;
+    }
+  }
+  async createEntityRequest(plan, payload) {
     logger.info(`Creating ${plan.kind} "${plan.name}"`);
     switch (plan.kind) {
       case "llm_config":
@@ -35066,10 +35278,8 @@ var EntityPusher = class {
         return (await this.tools.createMcpTool(payload)).id;
       case "knowledge_collection": {
         const collectionName = payload.collection_name ?? plan.name;
-        const existingId = await this.lookupByName(plan, collectionName);
-        if (existingId !== void 0) {
-          logger.info(`Reusing existing collection "${collectionName}" (#${existingId})`);
-          return existingId;
+        if (await this.lookupByName(plan, collectionName) !== void 0) {
+          throw nameConflictError(plan);
         }
         const collection = await this.knowledge.createCollection(collectionName);
         const id = collection.collection_id ?? collection.id;
@@ -35191,6 +35401,20 @@ var EntityPusher = class {
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
   }
 };
+function nameConflictError(plan) {
+  const name = expectedRemoteName(plan);
+  return new Error(
+    `A ${plan.kind.replaceAll("_", " ")} named "${name}" already exists in this organization, and flow.lock.json does not point at it (${plan.key}). Reference it with { existing: "${name}" } to reuse it as-is, pull_flow the flow that owns it, or rename the entity in the flow source.`
+  );
+}
+function expectedRemoteName(plan) {
+  const payload = plan.payload ?? {};
+  for (const field of ["custom_name", "collection_name", "name"]) {
+    const value = payload[field];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return plan.name;
+}
 function isSymbolicRefLike(value) {
   return typeof value.$ref === "string" && Object.keys(value).length === 1;
 }
@@ -35228,7 +35452,6 @@ async function resolveRagRefs(artifact, idMap, context) {
 }
 
 // src/pusher/flow-refs.ts
-init_graphs();
 import { resolve as resolvePath } from "node:path";
 var FLOWS_PREFIX = "flows.";
 var EXISTING_PREFIX = "existing:";
@@ -35278,9 +35501,67 @@ async function resolveFlowRefs(artifact, flowDir, context) {
 }
 
 // src/pusher/graph.ts
-init_graphs();
 var NODE_SECTION = "nodes";
 var CONDITIONAL_EDGE_SECTION = "conditional_edges";
+function forgetMissingGraph(lock) {
+  const entities = Object.fromEntries(
+    Object.entries(lock.entities).filter(
+      ([key]) => !key.startsWith(`${NODE_SECTION}.`) && !key.startsWith(`${CONDITIONAL_EDGE_SECTION}.`)
+    )
+  );
+  return { ...lock, graphId: null, saveVersion: 0, entities };
+}
+function missingGraphWarning(graphId, flowName) {
+  return `Graph #${graphId} recorded in flow.lock.json no longer exists (deleted, or the lockfile comes from another EpicStaff instance) \u2014 created a new graph for "${flowName}" and re-verified the locked entity ids.`;
+}
+function lockedGraphMismatch(remote, flowName) {
+  if (remote.name === flowName) return null;
+  return `flow.lock.json points at graph #${remote.id} "${remote.name}", but this flow source is named "${flowName}". Refusing to overwrite that graph \u2014 the directory may be a copy of another flow (its lockfile included), or the lockfile may come from another instance. If this IS that flow and you renamed it, push again with rename: true to rename the remote graph to "${flowName}" (or set meta.name back to "${remote.name}"); if it is a different flow, delete flow.lock.json to push it as a new one.`;
+}
+async function reconcileLockedGraph(graphs, lock, flowName, options = {}) {
+  if (lock.graphId === null) return { lock: { ...lock, flowName }, warning: null, graphMissing: false };
+  let remote;
+  try {
+    remote = await graphs.get(lock.graphId);
+  } catch (error2) {
+    if (error2 instanceof ApiError && error2.status === 404) {
+      logger.warn(`Locked graph #${lock.graphId} is gone \u2014 it will be recreated`);
+      return { lock: { ...forgetMissingGraph(lock), flowName }, warning: missingGraphWarning(lock.graphId, flowName), graphMissing: true };
+    }
+    throw error2;
+  }
+  const mismatch = lockedGraphMismatch(remote, flowName);
+  if (mismatch === null) return { lock: { ...lock, flowName }, warning: null, graphMissing: false };
+  if (!options.rename) throw new Error(mismatch);
+  if (!options.force && lock.saveVersion === 0) {
+    throw new Error(
+      `Not renaming graph #${remote.id} "${remote.name}": flow.lock.json records no completed push (save_version 0), so it cannot prove this flow owns that graph. Delete flow.lock.json to push this source as a new flow, or pass force: true together with rename: true if you are certain it is this flow.`
+    );
+  }
+  if (!options.force && remote.save_version !== lock.saveVersion) {
+    throw new Error(
+      `Not renaming graph #${remote.id}: it changed since the last push (remote save_version ${remote.save_version}, lockfile ${lock.saveVersion}). Pull the remote changes first, or push with force: true.`
+    );
+  }
+  const renamed = await graphs.rename(remote.id, flowName, remote.save_version);
+  logger.info(`Renamed graph #${remote.id} "${remote.name}" \u2192 "${flowName}"`);
+  return {
+    // The rename itself bumps save_version; carry it so the graph push does not see a conflict.
+    lock: { ...lock, flowName, saveVersion: lock.saveVersion > 0 ? renamed.save_version : lock.saveVersion },
+    warning: `Renamed graph #${remote.id} from "${remote.name}" to "${flowName}" (rename: true).`,
+    graphMissing: false
+  };
+}
+function isEmptyBulkSave(payload) {
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "deleted") {
+      if (Object.values(value).some((ids) => ids.length > 0)) return false;
+    } else if (Array.isArray(value) && value.length > 0) {
+      return false;
+    }
+  }
+  return true;
+}
 var GraphPusher = class {
   constructor(context) {
     this.context = context;
@@ -35290,6 +35571,7 @@ var GraphPusher = class {
   graphs;
   async push(artifact, lock, idMap, options = {}) {
     let currentLock = lock;
+    const warnings = [];
     const desired = substituteRefs(artifact.graph, (refKey) => {
       const id = idMap.get(refKey);
       if (id === void 0) {
@@ -35302,39 +35584,105 @@ var GraphPusher = class {
       }
       return id;
     });
-    let remoteDto;
+    let remoteDto = null;
     let createdGraph = false;
-    if (currentLock.graphId === null) {
-      remoteDto = await this.graphs.create({
-        name: artifact.flowName,
-        description: artifact.description ?? "",
-        metadata: { nodes: [], connections: [] }
-      });
+    if (currentLock.graphId !== null) {
+      try {
+        remoteDto = await this.graphs.get(currentLock.graphId);
+      } catch (error2) {
+        if (!(error2 instanceof ApiError && error2.status === 404)) throw error2;
+        warnings.push(missingGraphWarning(currentLock.graphId, artifact.flowName));
+        logger.warn(`Locked graph #${currentLock.graphId} is gone \u2014 recreating it`);
+        currentLock = forgetMissingGraph(currentLock);
+      }
+      const mismatch = remoteDto ? lockedGraphMismatch(remoteDto, artifact.flowName) : null;
+      if (mismatch !== null) throw new Error(mismatch);
+    }
+    if (remoteDto === null) {
+      remoteDto = await this.createGraphShell(artifact);
       currentLock = { ...currentLock, graphId: remoteDto.id };
       createdGraph = true;
       logger.info(`Created graph "${artifact.flowName}" (#${remoteDto.id})`);
       await options.persistLock?.(currentLock);
-    } else {
-      remoteDto = await this.graphs.get(currentLock.graphId);
-      if (!options.force && currentLock.saveVersion > 0 && remoteDto.save_version !== currentLock.saveVersion) {
-        throw new Error(
-          `Remote graph #${remoteDto.id} changed since the last push (remote save_version ${remoteDto.save_version}, lockfile ${currentLock.saveVersion}). Someone edited it in the EpicStaff editor. Use pull_flow to import the remote changes, or push again with force: true to overwrite them.`
-        );
-      }
+    } else if (
+      // 3. Optimistic-lock conflict check against the lockfile's last-known version.
+      !options.force && currentLock.saveVersion > 0 && remoteDto.save_version !== currentLock.saveVersion
+    ) {
+      throw new Error(
+        `Remote graph #${remoteDto.id} changed since the last push (remote save_version ${remoteDto.save_version}, lockfile ${currentLock.saveVersion}). Someone edited it in the EpicStaff editor. Use pull_flow to import the remote changes, or push again with force: true to overwrite them.`
+      );
     }
     const remote = buildRemoteState(remoteDto);
     const remoteTypeByBackendId = /* @__PURE__ */ new Map();
     for (const node of remote.nodes) {
       if (node.backendId != null) remoteTypeByBackendId.set(node.backendId, node.type);
     }
+    const remoteIdsByTypeAndName = /* @__PURE__ */ new Map();
+    for (const node of remote.nodes) {
+      if (node.backendId == null || node.node_name === "") continue;
+      const key = `${node.type}\0${node.node_name}`;
+      remoteIdsByTypeAndName.set(key, [...remoteIdsByTypeAndName.get(key) ?? [], node.backendId]);
+    }
+    const duplicateNames = [...remoteIdsByTypeAndName.entries()].filter(([, ids]) => ids.length > 1).map(([key, ids]) => `${key.split("\0")[1]} (${ids.length}\xD7)`);
+    if (duplicateNames.length > 0) {
+      warnings.push(
+        `Remote graph #${remoteDto.id} holds several nodes with the same name: ${duplicateNames.join(", ")}. The copy flow.lock.json points at is kept and updated; the other copies are deleted by this push.`
+      );
+    }
+    const remoteNameById = /* @__PURE__ */ new Map();
+    for (const node of remote.nodes) if (node.backendId != null) remoteNameById.set(node.backendId, node.node_name);
+    const sourceNodeNames = new Set(desired.nodes.map((node) => node.node_name));
+    const bindings = /* @__PURE__ */ new Map();
     for (const node of desired.nodes) {
       const entry = getEntity(currentLock, NODE_SECTION, node.node_name);
-      if (entry && remoteTypeByBackendId.get(entry.backendId) === node.type) {
-        node.backendId = entry.backendId;
-      } else if (entry) {
-        if (remoteTypeByBackendId.has(entry.backendId)) {
+      if (!entry) continue;
+      const lockedName = remoteNameById.get(entry.backendId);
+      const sameName = remoteIdsByTypeAndName.get(`${node.type}\0${node.node_name}`) ?? [];
+      if (lockedName !== void 0 && lockedName !== "" && lockedName !== node.node_name && sameName.length === 1) {
+        logger.warn(`flow.lock.json mapped node "${node.node_name}" to #${entry.backendId} ("${lockedName}") \u2014 remapped to #${sameName[0]}`);
+        bindings.set(node, { backendId: sameName[0], byName: true });
+      } else {
+        bindings.set(node, { backendId: entry.backendId, byName: false });
+      }
+    }
+    const claimed = /* @__PURE__ */ new Map();
+    for (const [node, binding] of bindings) {
+      if (binding.byName) claimed.set(binding.backendId, node.node_name);
+    }
+    const dropped = [];
+    for (const [node, binding] of bindings) {
+      if (binding.byName) continue;
+      const remoteName = remoteNameById.get(binding.backendId);
+      const claimedBy = claimed.get(binding.backendId);
+      const belongsToAnother = remoteName !== void 0 && remoteName !== "" && remoteName !== node.node_name && sourceNodeNames.has(remoteName);
+      if (claimedBy !== void 0 || belongsToAnother) {
+        dropped.push(`${node.node_name} (locked #${binding.backendId} is ${claimedBy ? `"${claimedBy}"` : `"${remoteName}"`})`);
+        bindings.delete(node);
+        continue;
+      }
+      claimed.set(binding.backendId, node.node_name);
+    }
+    if (dropped.length > 0) {
+      warnings.push(
+        `flow.lock.json bound several nodes to the same backend node; recreated instead of overwriting: ${dropped.join(", ")}.`
+      );
+    }
+    for (const node of desired.nodes) {
+      const binding = bindings.get(node);
+      if (!binding) {
+        currentLock = removeEntity(currentLock, NODE_SECTION, node.node_name);
+        continue;
+      }
+      const entry = getEntity(currentLock, NODE_SECTION, node.node_name);
+      if (remoteTypeByBackendId.get(binding.backendId) === node.type) {
+        node.backendId = binding.backendId;
+        if (binding.backendId !== entry.backendId) {
+          currentLock = setEntity(currentLock, NODE_SECTION, node.node_name, { ...entry, backendId: binding.backendId });
+        }
+      } else {
+        if (remoteTypeByBackendId.has(binding.backendId)) {
           logger.info(
-            `Node "${node.node_name}" changed type (${remoteTypeByBackendId.get(entry.backendId)} -> ${node.type}) \u2014 it will be recreated and the lockfile remapped to the new backend id.`
+            `Node "${node.node_name}" changed type (${remoteTypeByBackendId.get(binding.backendId)} -> ${node.type}) \u2014 it will be recreated and the lockfile remapped to the new backend id.`
           );
         }
         currentLock = removeEntity(currentLock, NODE_SECTION, node.node_name);
@@ -35356,8 +35704,10 @@ var GraphPusher = class {
         logger.info(`Reaping ${extra.length} orphaned edge(s) pointing at deleted nodes: ${extra.join(", ")}`);
       }
     }
-    const response = await this.graphs.bulkSave(remoteDto.id, payload);
-    const mapping = applySaveResponse(desired, remote, response);
+    const changed = !isEmptyBulkSave(payload);
+    const response = changed ? await this.graphs.bulkSave(remoteDto.id, payload) : remoteDto;
+    if (!changed) logger.info(`Graph #${remoteDto.id} is up to date \u2014 bulk save skipped`);
+    const mapping = changed ? applySaveResponse(desired, remote, response) : /* @__PURE__ */ new Map();
     let created = 0;
     for (const node of desired.nodes) {
       const backendId = node.backendId ?? mapping.get(node.id);
@@ -35377,22 +35727,48 @@ var GraphPusher = class {
         currentLock = removeEntity(currentLock, NODE_SECTION, nameParts.join("."));
       }
     }
-    const deleted = payload.deleted && typeof payload.deleted === "object" ? Object.values(payload.deleted).reduce(
-      (total, ids) => total + (Array.isArray(ids) ? ids.length : 0),
-      0
-    ) : 0;
-    currentLock = await this.pushConditionalEdges(artifact, remoteDto.id, desired, currentLock);
+    const deleted = Object.entries(payload.deleted).filter(([key]) => key !== "edge_ids").reduce((total, [, ids]) => total + (Array.isArray(ids) ? ids.length : 0), 0);
+    const conditional = await this.pushConditionalEdges(artifact, remoteDto.id, desired, currentLock);
+    currentLock = conditional.lock;
     currentLock = { ...currentLock, saveVersion: response.save_version };
+    const updatedNodes = [];
+    for (const [key, value] of Object.entries(payload)) {
+      if (key === "edge_list" || key === "deleted" || !Array.isArray(value)) continue;
+      for (const item of value) {
+        if (item.id != null) updatedNodes.push(item.node_name ?? key.replace(/_node_list$|_list$/, ""));
+      }
+    }
+    const updated = updatedNodes.length;
+    if (updated > 0 && !createdGraph) logger.info(`Updating ${updated} node(s) in place: ${updatedNodes.join(", ")}`);
     return {
       graphId: remoteDto.id,
       saveVersion: response.save_version,
       lock: currentLock,
       createdGraph,
-      nodeActions: { created, updated: desired.nodes.length - created, deleted }
+      changed: changed || conditional.changes > 0,
+      nodeActions: { created, updated, deleted, updatedNodes },
+      warnings
     };
+  }
+  async createGraphShell(artifact) {
+    try {
+      return await this.graphs.create({
+        name: artifact.flowName,
+        description: artifact.description ?? "",
+        metadata: { nodes: [], connections: [] }
+      });
+    } catch (error2) {
+      if (error2 instanceof ApiError && error2.status === 400 && /already exists/i.test(error2.bodyExcerpt ?? error2.message)) {
+        throw new Error(
+          `A flow named "${artifact.flowName}" already exists in this organization, and flow.lock.json does not point at it. To edit that flow, pull_flow it into a new directory; to push this source as a separate flow, change meta.name.`
+        );
+      }
+      throw error2;
+    }
   }
   async pushConditionalEdges(artifact, graphId, desired, lock) {
     let currentLock = lock;
+    let changes = 0;
     const plans = artifact.summary.conditionalEdges ?? [];
     const nodeIdByUuid = new Map(
       desired.nodes.filter((node) => node.backendId != null).map((node) => [node.id, node.backendId])
@@ -35419,6 +35795,7 @@ var GraphPusher = class {
           backendId: createdEdge.id,
           contentHash: hash
         });
+        changes += 1;
         logger.info(`Created conditional edge from "${plan.sourceNodeName}"`);
       } else if (isEntityDirty(currentLock, CONDITIONAL_EDGE_SECTION, lockName, hash)) {
         await this.graphs.updateConditionalEdge(entry.backendId, body);
@@ -35426,6 +35803,7 @@ var GraphPusher = class {
           backendId: entry.backendId,
           contentHash: hash
         });
+        changes += 1;
         logger.info(`Updated conditional edge from "${plan.sourceNodeName}"`);
       }
     }
@@ -35440,9 +35818,10 @@ var GraphPusher = class {
           });
         }
         currentLock = removeEntity(currentLock, CONDITIONAL_EDGE_SECTION, name);
+        changes += 1;
       }
     }
-    return currentLock;
+    return { lock: currentLock, changes };
   }
 };
 function inheritUnrepresentableFields(desired, remote) {
@@ -35456,12 +35835,33 @@ function inheritUnrepresentableFields(desired, remote) {
     if (node.type === "webhook-trigger" && previous.type === "webhook-trigger") {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.python_code.secret_ids ??= previous.data.python_code.secret_ids;
+      node.data.python_code.id ??= previous.data.python_code.id;
     } else if (node.type === "telegram-trigger" && previous.type === "telegram-trigger") {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
     } else if (node.type === "python" && previous.type === "python") {
       node.data.secret_ids ??= previous.data.secret_ids;
+      node.data.id ??= previous.data.id;
+      node.data.use_storage ??= false;
+    } else if (node.type === "agent" && previous.type === "agent") {
+      inheritAgentTaskIds(node.data.tasks ?? [], previous.data.tasks ?? []);
+    } else if (node.type === "note" && previous.type === "note") {
+      previous.node_name = node.node_name;
     }
+  }
+}
+function inheritAgentTaskIds(tasks, previousTasks) {
+  tasks.forEach((task, index) => {
+    const previousTask = previousTasks[index];
+    if (task.id == null && previousTask?.id != null) task.id = previousTask.id;
+  });
+  const idByTempId = /* @__PURE__ */ new Map();
+  for (const task of tasks) if (task.id != null) idByTempId.set(task.tempId, task.id);
+  for (const task of tasks) {
+    task.contextRefs = (task.contextRefs ?? []).map((ref) => {
+      const id = ref.id ?? (ref.tempId !== void 0 ? idByTempId.get(ref.tempId) : void 0);
+      return id !== void 0 ? { id } : ref;
+    });
   }
 }
 
@@ -35470,11 +35870,31 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 function prepareRestoreState(dto) {
   const state = buildRemoteState(dto);
   const warnings = [];
-  const conditionalEdges = Array.isArray(dto.conditional_edge_list) ? dto.conditional_edge_list.length : 0;
-  if (conditionalEdges > 0) {
-    warnings.push(
-      `${conditionalEdges} conditional edge(s) were NOT restored \u2014 they use a dedicated endpoint that bulk-save does not cover. Recreate them by hand.`
-    );
+  const uuidByDumpedId = /* @__PURE__ */ new Map();
+  for (const node of state.nodes) if (node.backendId != null) uuidByDumpedId.set(node.backendId, node.id);
+  const conditionalEdges = [];
+  for (const edge of dto.conditional_edge_list ?? []) {
+    const sourceUuid = uuidByDumpedId.get(edge.source_node_id);
+    if (sourceUuid === void 0) {
+      warnings.push(
+        `Conditional edge #${edge.id} starts at node #${edge.source_node_id}, which is not part of the dump \u2014 skipped.`
+      );
+      continue;
+    }
+    const code = edge.python_code;
+    conditionalEdges.push({
+      sourceNode: sourceUuid,
+      dumpedSourceNodeId: edge.source_node_id,
+      python_code: {
+        code: code.code,
+        entrypoint: code.entrypoint,
+        libraries: code.libraries ?? [],
+        ...code.global_kwargs !== void 0 && code.global_kwargs !== null ? { global_kwargs: code.global_kwargs } : {},
+        ...code.secrets?.length ? { secret_ids: code.secrets.map((secret) => secret.id) } : {}
+      },
+      input_map: edge.input_map ?? {},
+      metadata: edge.metadata ?? {}
+    });
   }
   let pythonCodeRows = 0;
   let agentTasks = 0;
@@ -35525,11 +35945,52 @@ function prepareRestoreState(dto) {
   for (const old of ordered) json = json.split(old).join(fresh.get(old));
   return {
     state: JSON.parse(json),
+    conditionalEdges: conditionalEdges.map((edge) => ({ ...edge, sourceNode: fresh.get(edge.sourceNode) ?? edge.sourceNode })),
     detached: { python_code_rows: pythonCodeRows, agent_tasks: agentTasks },
     remappedUuids: ordered.length,
     warnings
   };
 }
+async function restoreConditionalEdges(graphs, graphId, plans, nodeIdByUuid) {
+  let created = 0;
+  for (const plan of plans) {
+    const sourceNodeId = nodeIdByUuid.get(plan.sourceNode);
+    if (sourceNodeId === void 0) {
+      throw new Error(
+        `Conditional edge from dumped node #${plan.dumpedSourceNodeId} could not be restored: its node has no backend id in graph #${graphId} after the save.`
+      );
+    }
+    await graphs.createConditionalEdge({
+      graph: graphId,
+      source_node_id: sourceNodeId,
+      python_code: plan.python_code,
+      input_map: plan.input_map,
+      metadata: plan.metadata
+    });
+    created += 1;
+  }
+  return created;
+}
+
+// src/util/keyed-mutex.ts
+var KeyedMutex = class {
+  tails = /* @__PURE__ */ new Map();
+  async runExclusive(key, work) {
+    const previous = this.tails.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => void 0).then(work);
+    const tail = run.catch(() => void 0);
+    this.tails.set(key, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    }
+  }
+  /** Number of keys with work in flight (for tests). */
+  get size() {
+    return this.tails.size;
+  }
+};
 
 // src/tools/flow.tools.ts
 var FLOW_TEMPLATE = `# EpicStaff flow source \u2014 edit and push with push_flow.
@@ -35542,12 +36003,17 @@ meta:
 
 llm_configs:
   default:
-    model: gpt-4o
+    model: gpt-4o-mini
+    provider: openai
+    # api_key_env: OPENAI_API_KEY   # env var holding the provider key (stored as an org secret)
 
 agents:
   assistant:
     instructions: You are a helpful assistant.
     llm_config: default
+
+variables:
+  question: { default: "" }
 
 flow:
   nodes:
@@ -35556,12 +36022,26 @@ flow:
     work:
       type: agent
       agent: assistant
+      # An agent node needs at least one task.
+      tasks:
+        - name: answer
+          instructions: Answer the question in one short paragraph \u2014 {question}
+      input_map: { question: variables.question }
+      output_variable_path: variables.answer
     finish:
       type: end
   edges:
     - { from: start, to: work }
     - { from: work, to: finish }
 `;
+var flowDirPushes = new KeyedMutex();
+var flowDirKey = (flowDir) => {
+  try {
+    return realpathSync(flowDir);
+  } catch {
+    return resolve(flowDir);
+  }
+};
 function registerFlowTools(server, context) {
   server.registerTool(
     "init_flow",
@@ -35706,7 +36186,7 @@ function registerFlowTools(server, context) {
     "restore_graph",
     {
       title: "Restore a dump_graph JSON into a NEW graph (faithful copy)",
-      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python test_input and secrets, task output_schema, and error routes. Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
+      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python test_input and secrets, task output_schema, error routes and conditional edges (recreated through their dedicated endpoint, so the copy routes identically). Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
       inputSchema: {
         dump_path: external_exports.string().describe("Absolute path of a JSON file previously written by dump_graph"),
         name: external_exports.string().optional().describe("Name for the new graph (required unless target_graph_id is given)"),
@@ -35718,7 +36198,7 @@ function registerFlowTools(server, context) {
     },
     async ({ dump_path, name, description, target_graph_id }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       if (!isAbsolute(dump_path)) throw new Error("dump_path must be an absolute path.");
       if (!existsSync3(dump_path)) throw new Error(`No dump file at ${dump_path} \u2014 run dump_graph first.`);
       let dto;
@@ -35730,7 +36210,7 @@ function registerFlowTools(server, context) {
       if (dto == null || typeof dto !== "object" || !Array.isArray(dto.edge_list)) {
         throw new Error(`${dump_path} does not look like a dump_graph snapshot (no edge_list).`);
       }
-      const { state, detached, remappedUuids, warnings } = prepareRestoreState(dto);
+      const { state, conditionalEdges, detached, remappedUuids, warnings } = prepareRestoreState(dto);
       const source = dto;
       const graphs = new GraphsApi(context.client);
       let targetId;
@@ -35739,9 +36219,11 @@ function registerFlowTools(server, context) {
       let remote;
       let createdGraph = false;
       let replaced = 0;
+      let staleConditionalEdgeIds = [];
       if (target_graph_id != null) {
         const targetDto = await graphs.get(target_graph_id);
         remote = buildRemoteState(targetDto);
+        staleConditionalEdgeIds = (targetDto.conditional_edge_list ?? []).map((edge) => edge.id);
         targetId = target_graph_id;
         targetName = targetDto.name;
         baseSaveVersion = targetDto.save_version;
@@ -35777,6 +36259,21 @@ function registerFlowTools(server, context) {
           createdGraph ? `Graph shell #${targetId} ("${targetName}") was created but bulk-save failed, so it is empty \u2014 delete it and retry. Cause: ${cause}` : `Overwrite of graph #${targetId} ("${targetName}") failed; it is unchanged. Cause: ${cause}`
         );
       }
+      let conditionalEdgesRestored = 0;
+      try {
+        for (const edgeId of staleConditionalEdgeIds) await graphs.deleteConditionalEdge(edgeId);
+        conditionalEdgesRestored = await restoreConditionalEdges(
+          graphs,
+          targetId,
+          conditionalEdges,
+          applySaveResponse(state, { nodes: remote.nodes, edges: remote.edges }, saved)
+        );
+      } catch (error2) {
+        const cause = error2 instanceof Error ? error2.message : String(error2);
+        throw new Error(
+          `Graph #${targetId} ("${targetName}") was saved, but restoring its conditional edges failed after ${conditionalEdgesRestored} of ${conditionalEdges.length} \u2014 it will not route like the dump. Cause: ${cause}`
+        );
+      }
       const labelIds = source.label_ids ?? [];
       let labelsCopied = false;
       if (labelIds.length > 0 && createdGraph) {
@@ -35801,6 +36298,7 @@ function registerFlowTools(server, context) {
         restoredFrom: { graph_id: dto.id, graph_name: dto.name, save_version: dto.save_version, dump_path },
         nodes: state.nodes.length,
         edges: state.edges.length,
+        conditionalEdges: conditionalEdgesRestored,
         detached,
         remappedUuids,
         warnings,
@@ -35820,7 +36318,7 @@ function registerFlowTools(server, context) {
     },
     async ({ flow_dir }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const artifact = await compileFlow(flow_dir);
       if (hasErrors(artifact.diagnostics)) {
         throw new Error("Flow source has errors \u2014 run validate_flow first.");
@@ -35844,8 +36342,24 @@ function registerFlowTools(server, context) {
       if (lock.graphId === null) {
         graphStatus = { wouldDo: "create graph + all nodes/edges" };
       } else {
-        const { GraphsApi: GraphsApi2 } = await Promise.resolve().then(() => (init_graphs(), graphs_exports));
-        const remoteDto = await new GraphsApi2(context.client).get(lock.graphId);
+        let remoteDto;
+        try {
+          remoteDto = await new GraphsApi(context.client).get(lock.graphId);
+        } catch (error2) {
+          if (!(error2 instanceof ApiError && error2.status === 404)) throw error2;
+          return {
+            entities: entityPlan,
+            graph: {
+              graphId: lock.graphId,
+              wouldDo: "recreate graph + all nodes/edges",
+              warning: `Graph #${lock.graphId} recorded in flow.lock.json no longer exists (deleted, or the lockfile comes from another EpicStaff instance) \u2014 push_flow will create a new graph and re-verify the locked entity ids.`
+            }
+          };
+        }
+        const mismatch = lockedGraphMismatch(remoteDto, artifact.flowName);
+        if (mismatch !== null) {
+          return { entities: entityPlan, graph: { graphId: lock.graphId, wouldDo: "refuse (not this flow's graph)", conflict: mismatch } };
+        }
         graphStatus = {
           graphId: lock.graphId,
           remoteSaveVersion: remoteDto.save_version,
@@ -35863,12 +36377,15 @@ function registerFlowTools(server, context) {
       description: "Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order (secrets + key-value tables \u2192 llm-configs \u2192 tools \u2192 knowledge+documents+RAG \u2192 surfaces \u2192 agent-definitions), then create/update the graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) \u2014 never duplicates. Fails on remote save_version conflict unless force is set.",
       inputSchema: {
         flow_dir: external_exports.string().describe("Absolute path of the flow directory"),
-        force: external_exports.boolean().optional().describe("Overwrite remote graph changes on save_version conflict (default false)")
+        force: external_exports.boolean().optional().describe("Overwrite remote graph changes on save_version conflict (default false)"),
+        rename: external_exports.boolean().optional().describe(
+          "The flow was renamed (meta.name changed): rename the locked remote graph to meta.name instead of refusing (default false). Only use when this directory really is that flow, not a copy of it."
+        )
       }
     },
-    async ({ flow_dir, force }) => runTool(async () => {
+    async ({ flow_dir, force, rename }) => runTool(() => flowDirPushes.runExclusive(flowDirKey(flow_dir), async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const artifact = await compileFlow(flow_dir);
       if (hasErrors(artifact.diagnostics)) {
         const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
@@ -35877,9 +36394,19 @@ function registerFlowTools(server, context) {
         );
       }
       let lock = await readLock(flow_dir) ?? createLock(artifact.flowName);
+      const reconciled = await reconcileLockedGraph(new GraphsApi(context.client), lock, artifact.flowName, {
+        rename,
+        force
+      });
+      lock = reconciled.lock;
+      const warnings = reconciled.warning ? [reconciled.warning] : [];
       const entityPusher = new EntityPusher(context);
-      const entityResult = await entityPusher.push(artifact, lock);
+      const entityResult = await entityPusher.push(artifact, lock, {
+        verifyLockedIds: reconciled.graphMissing,
+        persistLock: (partial2) => writeLock(flow_dir, partial2)
+      });
       lock = entityResult.lock;
+      warnings.push(...entityResult.warnings);
       await writeLock(flow_dir, lock);
       const flowRefs = await resolveFlowRefs(artifact, flow_dir, context);
       for (const [refKey, graphId] of flowRefs) {
@@ -35896,16 +36423,23 @@ function registerFlowTools(server, context) {
       });
       lock = graphResult.lock;
       await writeLock(flow_dir, lock);
+      warnings.push(...graphResult.warnings);
+      const entitiesChanged = entityResult.actions.some(
+        (action) => action.action === "created" || action.action === "updated"
+      );
       return {
         graphId: graphResult.graphId,
         saveVersion: graphResult.saveVersion,
         createdGraph: graphResult.createdGraph,
+        changed: graphResult.changed || entitiesChanged,
+        ...graphResult.changed || entitiesChanged ? {} : { status: "no changes \u2014 the remote graph and entities already match the flow source" },
         entities: entityResult.actions,
         nodes: graphResult.nodeActions,
+        ...warnings.length > 0 ? { warnings } : {},
         openInEditor: `${context.config.apiUrl.replace(/\/api\/$/, "")}/flows/${graphResult.graphId}`,
         next: "Open the flow in the EpicStaff editor to inspect it, or run_flow to execute it."
       };
-    })
+    }))
   );
   server.registerTool(
     "provision_knowledge",
@@ -35916,9 +36450,9 @@ function registerFlowTools(server, context) {
         flow_dir: external_exports.string().describe("Absolute path of the flow directory")
       }
     },
-    async ({ flow_dir }) => runTool(async () => {
+    async ({ flow_dir }) => runTool(() => flowDirPushes.runExclusive(flowDirKey(flow_dir), async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const artifact = await compileFlow(flow_dir);
       if (hasErrors(artifact.diagnostics)) {
         const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
@@ -35928,7 +36462,8 @@ function registerFlowTools(server, context) {
       }
       let lock = await readLock(flow_dir) ?? createLock(artifact.flowName);
       const entityResult = await new EntityPusher(context).push(artifact, lock, {
-        sections: ["llm_configs", "knowledge"]
+        sections: ["llm_configs", "knowledge"],
+        persistLock: (partial2) => writeLock(flow_dir, partial2)
       });
       lock = entityResult.lock;
       await writeLock(flow_dir, lock);
@@ -35947,7 +36482,7 @@ function registerFlowTools(server, context) {
         indexingStarted: true,
         next: "Author/build the rest of the flow, then push_flow (these collections will be reused, not re-indexed), then wait_for_collections before running."
       };
-    })
+    }))
   );
   server.registerTool(
     "pull_flow",
@@ -35961,7 +36496,7 @@ function registerFlowTools(server, context) {
     },
     async ({ graph_id, target_dir }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const { files, warnings } = await decompileFlow(
         {
           graphs: new GraphsApi(context.client),
@@ -36235,7 +36770,7 @@ function registerRunTools(server, context) {
         if (allTerminal || Date.now() >= deadline) {
           break;
         }
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        await new Promise((resolve2) => setTimeout(resolve2, intervalMs));
       }
       const anyFailed = collections.some(
         (collection) => collection.rags.some((rag) => rag.status === "failed")
@@ -36254,9 +36789,6 @@ function registerRunTools(server, context) {
     })
   );
 }
-
-// src/tools/reference.tools.ts
-init_graphs();
 
 // src/reference/node-reference.ts
 var NODE_REFERENCE = {
@@ -36654,7 +37186,6 @@ function registerReferenceTools(server, context) {
 // src/tools/ui.tools.ts
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname2, isAbsolute as isAbsolute2 } from "node:path";
-init_graphs();
 
 // src/ui/chat-ui.ts
 function resolveConfig(config2) {
@@ -36959,7 +37490,7 @@ function registerUiTools(server, context) {
     "generate_chat_ui",
     {
       title: "Generate a chat UI",
-      description: "Generate a self-contained HTML chat UI (inline CSS/JS, no external assets) for a pushed flow graph. The page drives the graph via its run-session API, authenticating with the current API key + active organization (both CORS-allowed), so it works from file:// or any static host with no backend change. Configure how the user message maps into the flow via input_path, and where the reply is read from via reply_path. Set reset_variables to the downstream fields to clear each turn so persistent-variables graphs do not carry stale answers. Open the returned file path in a browser.",
+      description: "Generate a self-contained HTML chat UI (inline CSS/JS, no external assets) for a pushed flow graph. The page drives the graph via its run-session API, authenticating with an API key + the active organization (both CORS-allowed), so it works from file:// or any static host with no backend change. By default the key is NOT written into the file \u2014 the user enters it in the page (gear icon). Configure how the user message maps into the flow via input_path, and where the reply is read from via reply_path. Set reset_variables to the downstream fields to clear each turn so persistent-variables graphs do not carry stale answers. Open the returned file path in a browser.",
       inputSchema: {
         graph_id: external_exports.number().int().describe("Backend graph id to drive (from push_flow / list_graphs)."),
         output_path: external_exports.string().describe("Absolute path of the .html file to write."),
@@ -36969,7 +37500,9 @@ function registerUiTools(server, context) {
         reply_path: external_exports.string().optional().describe('Dotted variable path holding the reply in the final state. Default "reply".'),
         reset_variables: external_exports.record(external_exports.unknown()).optional().describe('Variables sent fresh each turn before the message is written, e.g. {"extraction":{},"quote":{},"reply":null}.'),
         welcome: external_exports.string().optional().describe("Greeting bubble shown before the first user message."),
-        embed_api_key: external_exports.boolean().optional().describe("Prefill the current API key into the page (default true). Set false to make the user enter it.")
+        embed_api_key: external_exports.boolean().optional().describe(
+          "Write the MCP server's own long-lived API key into the HTML (default false). Anyone who gets the file can then act as this user \u2014 only enable it for a private, local file."
+        )
       }
     },
     async ({ graph_id, output_path, title, subtitle, input_path, reply_path, reset_variables, welcome, embed_api_key }) => runTool(async () => {
@@ -36977,7 +37510,8 @@ function registerUiTools(server, context) {
         throw new Error("output_path must be an absolute path to a .html file.");
       }
       const apiKey = await context.auth.ensureAuthenticated();
-      const orgId = context.org.requireActiveOrg();
+      const embedKey = embed_api_key === true;
+      const orgId = await context.org.requireActiveOrg();
       const light = await graphs.listLight();
       const graph = light.find((candidate) => candidate.id === graph_id);
       if (!graph) {
@@ -36988,7 +37522,7 @@ function registerUiTools(server, context) {
         graphId: graph_id,
         graphName: graph.name,
         orgId,
-        apiKey: embed_api_key === false ? "" : apiKey,
+        apiKey: embedKey ? apiKey : "",
         title,
         subtitle: subtitle ?? (graph.description || void 0),
         inputPath: input_path,
@@ -37004,8 +37538,11 @@ function registerUiTools(server, context) {
         graph_id,
         graph_name: graph.name,
         bytes: html.length,
-        embedded_api_key: embed_api_key !== false,
-        next: "Open the file in a browser. Use the gear icon to change API base / key / org / graph id."
+        embedded_api_key: embedKey,
+        ...embedKey ? {
+          warning: "The file CONTAINS the long-lived EpicStaff API key of the MCP user (stored in plain text). Do not share, commit or host it; revoke the key in EpicStaff (Profile \u2192 API keys) if it leaks."
+        } : {},
+        next: embedKey ? "Open the file in a browser. Use the gear icon to change API base / key / org / graph id." : "Open the file in a browser and enter an EpicStaff API key via the gear icon (no key is embedded)."
       };
     })
   );
@@ -37250,7 +37787,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ name, ...body }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const request = await buildSurfaceRequest(name, body);
       const created = await createOrExplainConflict(() => surfaces.create(request), name, "update_surface");
       return {
@@ -37272,7 +37809,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ surface, name, ...body }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const surfaceId = await resolveSurface(surface);
       const current = await surfaces.get(surfaceId);
       const merged = mergeSurfaceBody(current, name, body);
@@ -37292,7 +37829,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ surface }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const surfaceId = await resolveSurface(surface);
       return surfaces.get(surfaceId);
     })
@@ -37308,7 +37845,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ surface }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const surfaceId = await resolveSurface(surface);
       const current = await surfaces.get(surfaceId);
       await surfaces.delete(surfaceId);
@@ -37346,7 +37883,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ name, ...body }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const request = await buildAgentRequest(name, body, {
         resolveLlmConfig,
         resolveSurface
@@ -37387,7 +37924,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ agent, ...body }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const agentId = await resolveAgent(agent);
       const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
       const updated = await agents.update(agentId, request);
@@ -37405,7 +37942,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ agent }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const agentId = await resolveAgent(agent);
       return agents.get(agentId);
     })
@@ -37421,7 +37958,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ agent }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const agentId = await resolveAgent(agent);
       const current = await agents.get(agentId);
       await agents.delete(agentId);
@@ -37444,7 +37981,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ name, documents, rag }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       if (documents && documents.length > 0) {
         const missing = documents.filter((path6) => !existsSync5(path6));
         if (missing.length > 0) {
@@ -37487,7 +38024,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ collection_id, strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       const attached = await attachAndIndexRag(
         collection_id,
         { strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings },
@@ -37513,7 +38050,7 @@ function registerCatalogTools(server, context) {
     },
     async ({ collection_id }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
       await knowledge.deleteCollection(collection_id);
       return {
         deleted: { collectionId: collection_id },
@@ -37616,8 +38153,7 @@ async function attachAndIndexRag(collectionId, rag, ctx) {
 }
 
 // src/tools/registry.ts
-function registerAllTools(server, config2) {
-  const context = createContext(config2);
+function registerAllTools(server, context) {
   registerAuthOrgTools(server, context);
   registerFlowTools(server, context);
   registerRunTools(server, context);
@@ -37645,13 +38181,28 @@ var EPICSTAFF_INSTRUCTIONS = [
   'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
   '"crew" (removed from EpicStaff \u2014 use agent/task nodes). A key-value node writes its read entries',
   "to their own state paths, not output_variable_path. Credentials come from env vars",
-  "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source.",
+  "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source;",
+  "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
+  "llm_configs follow the backend bounds: temperature 0\u20132, max_tokens >= 500.",
   "Call describe_node_types for the full node catalog (fields + runtime caveats).",
   "",
   "Build flows with the es-* skills (front door: es-deliver \u2192 es-write-flow \u2192 build \u2192 push \u2192 test)."
 ].join("\n");
+function buildContext() {
+  try {
+    const config2 = loadConfig();
+    return {
+      context: createContext(config2),
+      startupSummary: `api: ${config2.apiUrl}, auth: ${config2.email ?? "api-token"}`
+    };
+  } catch (error2) {
+    if (!(error2 instanceof ConfigurationError)) throw error2;
+    logger.error(error2.message);
+    return { context: createUnconfiguredContext(error2), startupSummary: "NOT CONFIGURED \u2014 tools report the problem" };
+  }
+}
 async function main() {
-  const config2 = loadConfig();
+  const { context, startupSummary } = buildContext();
   const server = new McpServer(
     {
       name: "epicstaff",
@@ -37659,12 +38210,10 @@ async function main() {
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
-  registerAllTools(server, config2);
+  registerAllTools(server, context);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info(
-    `EpicStaff MCP server started (api: ${config2.apiUrl}, auth: ${config2.email ?? "api-token"})`
-  );
+  logger.info(`EpicStaff MCP server started (${startupSummary})`);
 }
 main().catch((error2) => {
   logger.error("Fatal startup error", error2);
