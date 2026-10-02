@@ -1,0 +1,10 @@
+# Invalid: EpicStaff's LLMConfig requires max_tokens >= 500 (the backend rejects smaller values on push).
+meta: { name: small-max-tokens-example }
+llm_configs:
+  tiny: { model: __MODEL__, max_tokens: 100 }
+flow:
+  nodes:
+    __start__: { type: start }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: __end__ }

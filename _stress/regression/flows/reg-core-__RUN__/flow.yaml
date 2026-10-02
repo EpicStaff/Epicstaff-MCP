@@ -1,0 +1,88 @@
+# Regression core flow. __RUN__ / __MODEL__ / __PROVIDER__ / __KEY_ENV__ are substituted per run.
+meta:
+  name: reg-core-__RUN__
+  description: Regression - python, decision-table, conditional edge, key-value, agent+task, note.
+variables:
+  amount: { default: 0 }
+  customer: { default: "anon" }
+llm_configs:
+  reg-llm-__RUN__:
+    model: __MODEL__
+    provider: __PROVIDER__
+    api_key_env: __KEY_ENV__
+    temperature: 0
+    max_tokens: 500
+agents:
+  reg_writer___RUN__:
+    description: Writes a one-line verdict.
+    instructions: Answer with exactly one short sentence. No preamble.
+    llm_config: reg-llm-__RUN__
+flow:
+  nodes:
+    __start__: { type: start }
+    Info: { type: note, text: "Regression flow - safe to delete." }
+    Score:
+      type: python
+      code: |-
+        def main(a):
+            a = int(a)
+            return {"amount": a, "band": "high" if a >= 100 else "low"}
+      input_map: { a: variables.amount }
+      output_variable_path: variables.score
+    Route:
+      type: decision-table
+      rules:
+        - { name: high, condition: "variables['score']['band'] == 'high'", next_node: High }
+      default_next_node: Low
+    High:
+      type: python
+      code: |-
+        def main(s):
+            return {"tier": "gold", "amount": s["amount"]}
+      input_map: { s: variables.score }
+      output_variable_path: variables.tier
+    Low:
+      type: python
+      code: |-
+        def main(s):
+            return {"tier": "basic", "amount": s["amount"]}
+      input_map: { s: variables.score }
+      output_variable_path: variables.tier
+    Save:
+      type: key-value
+      table: Regression KV
+      mode: write
+      entries:
+        - { key: last_tier, value: variables.tier }
+    Load:
+      type: key-value
+      table: Regression KV
+      mode: read
+      entries:
+        - { key: last_tier, value: variables.loaded }
+    Verdict:
+      type: agent
+      agent: reg_writer___RUN__
+      tasks:
+        - name: verdict
+          instructions: 'Customer tier is {tier}. Say "Tier is {tier}." exactly.'
+      input_map: { tier: variables.loaded.tier }
+      output_variable_path: variables.verdict
+    Gold: { type: python, code: "def main():\n    return 'gold-path'", output_variable_path: variables.path }
+    Basic: { type: python, code: "def main():\n    return 'basic-path'", output_variable_path: variables.path }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Score }
+    - { from: Score, to: Route }
+    - { from: High, to: Save }
+    - { from: Low, to: Save }
+    - { from: Save, to: Load }
+    - { from: Load, to: Verdict }
+    - from: Verdict
+      condition:
+        code: |-
+          def main(t):
+              return "Gold" if t == "gold" else "Basic"
+        input_map: { t: variables.loaded.tier }
+    - { from: Gold, to: __end__ }
+    - { from: Basic, to: __end__ }

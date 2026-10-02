@@ -1,0 +1,10 @@
+meta: { name: reg-parent-__RUN__, description: Regression subgraph parent. }
+variables: { n: { default: 0 } }
+flow:
+  nodes:
+    __start__: { type: start }
+    Child: { type: subgraph, graph: reg-child-__RUN__, input_map: { x: variables.n }, output_variable_path: variables.child }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Child }
+    - { from: Child, to: __end__ }

@@ -1,0 +1,20 @@
+meta: { name: reg-classify-__RUN__, description: "Regression: classification decision table (push only)." }
+variables: { text: { default: "" } }
+flow:
+  nodes:
+    __start__: { type: start }
+    Classify:
+      type: classification-decision-table
+      llm_config: { existing: "reg-llm-__RUN__" }
+      categories:
+        - { name: billing, description: "Billing questions", next_node: Billing }
+        - { name: other, description: "Anything else", next_node: Other }
+      default_next_node: Other
+      input_map: { text: variables.text }
+    Billing: { type: python, code: "def main():\n    return 'billing'", output_variable_path: variables.route }
+    Other: { type: python, code: "def main():\n    return 'other'", output_variable_path: variables.route }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Classify }
+    - { from: Billing, to: __end__ }
+    - { from: Other, to: __end__ }

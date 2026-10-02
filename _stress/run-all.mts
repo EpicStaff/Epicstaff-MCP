@@ -1,3 +1,14 @@
+/**
+ * Live stress run: compile → push → run → verify a set of flows against a running EpicStaff.
+ *
+ *   EPICSTAFF_BASE_URL / EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD   the instance and user
+ *   ES_MCP_STATE_DIR (optional)                                    reuse one minted API key across runs
+ *
+ * The f5 agent flow needs the "stress-4o-mini" LLM config: run `npx tsx _stress/provision-llm.mts`
+ * once per instance (needs STRESS_OPENAI_KEY). Lockfiles written under _stress/flows/ are local
+ * state (gitignored), so a fresh checkout creates its own graphs.
+ */
+import { loadConfig } from '../src/config.js';
 import { connect, compile, push, run, type RunResult } from './lib.mjs';
 
 type FV = Record<string, any> | null;
@@ -70,7 +81,8 @@ const cases: Case[] = [
 ];
 
 const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
-const HT = process.env.ES_URL!.replace(/\/+$/, '') + '/ht/';
+// Health endpoint at the server root, derived from EPICSTAFF_BASE_URL (same normalization as the server).
+const HT = new URL('../ht/', loadConfig().apiUrl).toString();
 async function waitHealthy(): Promise<void> {
   for (let i = 0; i < 90; i++) {
     try {
@@ -129,9 +141,10 @@ for (const c of cases) {
     console.log(`${res.pass ? 'PASS' : 'FAIL'}  ${name}  ${res.detail}`);
     if (!res.pass && res.fv) console.log('      finalVariables:', JSON.stringify(res.fv));
   } catch (e) {
-    results.push({ name, pass: false, detail: (e as Error).message });
+    const failure = e as Error & { url?: string; bodyExcerpt?: string };
+    results.push({ name, pass: false, detail: [failure.message, failure.url, failure.bodyExcerpt].filter(Boolean).join(' | ') });
     streak = 0;
-    console.log(`FAIL  ${name}  ${(e as Error).message}`);
+    console.log(`FAIL  ${name}  ${results.at(-1)!.detail}`);
   }
 }
 
