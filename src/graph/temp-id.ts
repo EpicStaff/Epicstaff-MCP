@@ -3,9 +3,16 @@
  *
  * `applySaveResponse` ports the frontend's
  * `visual-programming/utils/save/patch.ts#buildCreatedNodeIdMap`: the backend does not
- * echo `temp_id`s, so created nodes are matched positionally — for each node type, the
- * i-th node sent for creation maps to the i-th response node whose id was not present
- * in the remote (pre-save) state.
+ * echo `temp_id`s, so created nodes have to be matched to the response.
+ *
+ * Divergence: the frontend matches positionally — the i-th node sent for creation maps to the
+ * i-th new node in the response list. But the backend serializes `<type>_node_list` from an
+ * unordered queryset (no Meta.ordering on the node models), so Postgres may return rows in heap
+ * order, which differs from insertion order once rows are rewritten (observed live at e310ee3:
+ * python ids 1487..1491 came back as [1490, 1491, 1487, 1488, 1489] and the lockfile got every
+ * python node's id rotated). Here a created node is matched by its node_name when exactly one new
+ * response node carries it; the rest fall back to creation order = ascending id (the bulk save
+ * inserts nodes in list order within one transaction).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -43,23 +50,37 @@ export function applySaveResponse(
     );
 
   const mapByNewIds = (
-    createdNodes: Array<{ id: string }>,
-    backendNodes: Array<{ id: number }>,
+    createdNodes: Array<{ id: string; node_name?: string }>,
+    backendNodes: Array<{ id: number; node_name?: string | null }>,
     existingIds: Set<number>
   ): void => {
-    const newlyCreatedBackendNodes = backendNodes.filter((backendNode) => !existingIds.has(backendNode.id));
-    createdNodes.forEach((node, index) => {
-      const backendNode = newlyCreatedBackendNodes[index];
-      if (backendNode) {
-        mapping.set(node.id, backendNode.id);
+    const unclaimed = backendNodes
+      .filter((backendNode) => !existingIds.has(backendNode.id))
+      .sort((left, right) => left.id - right.id);
+    const unmatched: Array<{ id: string }> = [];
+    for (const node of createdNodes) {
+      const name = node.node_name ?? '';
+      const sameName = name === '' ? [] : unclaimed.filter((backendNode) => backendNode.node_name === name);
+      const match = sameName.length === 1 ? sameName[0] : undefined;
+      if (match) {
+        mapping.set(node.id, match.id);
+        unclaimed.splice(unclaimed.indexOf(match), 1);
+      } else {
+        unmatched.push(node);
       }
+    }
+    unmatched.forEach((node, index) => {
+      const backendNode = unclaimed[index];
+      if (backendNode) mapping.set(node.id, backendNode.id);
     });
   };
 
   const startCreated = nodeDiff.startNodes.toCreate;
   if (startCreated.length > 0) {
     const startExistingIds = existingIdsByType('start');
-    const startCandidates = (response.start_node_list ?? []).filter((node) => !startExistingIds.has(node.id));
+    const startCandidates = (response.start_node_list ?? [])
+      .filter((node) => !startExistingIds.has(node.id))
+      .sort((left, right) => left.id - right.id);
     if (startCandidates[0] && startCreated[0]) {
       mapping.set(startCreated[0].id, startCandidates[0].id);
     }

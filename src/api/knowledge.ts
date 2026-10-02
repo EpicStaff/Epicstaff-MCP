@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Knowledge / RAG API — ported from features/knowledge-sources/services/
@@ -96,7 +96,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class KnowledgeApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async listCollections(): Promise<SourceCollection[]> {
     return unwrap(

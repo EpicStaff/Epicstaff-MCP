@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Surface API — ported from features/agent-definitions/services/surfaces-api.service.ts
@@ -90,7 +90,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class SurfacesApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async list(): Promise<Surface[]> {
     return unwrap(await this.client.get<Paginated<Surface> | Surface[]>('surfaces/', { query: { limit: 1000 } }));

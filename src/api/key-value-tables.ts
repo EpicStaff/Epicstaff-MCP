@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Key-Value tables API — ported from
@@ -20,7 +20,7 @@ interface Paginated<T> {
 }
 
 export class KeyValueTablesApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async list(): Promise<KeyValueTable[]> {
     const response = await this.client.get<Paginated<KeyValueTable> | KeyValueTable[]>('key-value-tables/', {

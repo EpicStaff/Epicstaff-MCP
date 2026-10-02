@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Tools API — ported from features/tools/services/
@@ -85,7 +85,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class ToolsApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   /** Built-in catalog tools: the `built_in` rows of `python-code-tool/`. */
   async listBuiltinTools(): Promise<PythonCodeTool[]> {

@@ -61,16 +61,20 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
   source.flow.edges.forEach((edge, index) => {
     if (edge.condition?.input_map) {
       const basePath = `flow.edges[${index}].condition.input_map`;
+      // The condition runs AFTER its source node has written its output, so — unlike the
+      // node's own input_map — the source's writes count as produced for it.
       checkReads(
         Object.entries(edge.condition.input_map).map(([key, path]) => ({ at: `${basePath}.${key}`, path })),
         edge.from,
+        { readerHasWritten: true },
       );
     }
   });
 
   return diagnostics;
 
-  function checkReads(reads: NodeReadPath[], readerNode: string): void {
+  function checkReads(reads: NodeReadPath[], readerNode: string, options: { readerHasWritten?: boolean } = {}): void {
+    const ownWrites = options.readerHasWritten ? (producedByNode.get(readerNode) ?? []) : [];
     for (const { at: readPath, path: rawValue } of reads) {
       if (rawValue === '__all__') continue; // whole-state read
       const parsed = parseVarPath(rawValue);
@@ -81,7 +85,7 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
       if (parsed.isShared || parsed.hasDefault) continue;
 
       const read = parsed.segments;
-      const reaching = [...declared, ...ancestorProduced(readerNode)];
+      const reaching = [...declared, ...ownWrites, ...ancestorProduced(readerNode)];
       if (reaching.some((produced) => sharesPrefix(read, produced))) {
         continue; // may-reach: produced on some reaching path (or declared)
       }
@@ -133,7 +137,8 @@ function startInitialStateKeys(source: FlowSource): string[] {
  * decision-table / CDT routes. A node with an outgoing conditional edge routes to a
  * runtime-decided target we cannot know, so it is treated as able to reach every node
  * (over-approximation → keeps may-reach false positives near zero). A node never counts
- * as its own ancestor: a node's own output does not satisfy its own input.
+ * as its own ancestor: a node's own output does not satisfy its own input (its outgoing
+ * condition is the exception — handled by `readerHasWritten` in checkReads).
  */
 function buildAncestors(source: FlowSource): Map<string, Set<string>> {
   const nodeNames = Object.keys(source.flow.nodes);

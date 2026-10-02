@@ -12,8 +12,10 @@ import { ApiError } from './errors.js';
  * (src/django_app/rbac/views/{auth,api_keys}.py), adapted for a long-running client:
  *
  *   1. If a persisted API key exists, validate it (GET auth/api-key/validate/).
- *   2. Otherwise login with credentials (POST auth/login/ → access token in the body,
- *      refresh token in the HttpOnly `auth.refresh` cookie), then either:
+ *   2. Otherwise obtain a user session — the stored JWT access token while it is unexpired,
+ *      else a refresh through the stored `auth.refresh` cookie, and only when both fail a
+ *      login with credentials (POST auth/login/ → access token in the body, refresh token in
+ *      the HttpOnly `auth.refresh` cookie) — then either:
  *      a. mint a dedicated API key (POST profile/api-keys/ with the access token — the
  *         raw key is returned exactly once), persist it; or
  *      b. if profile/api-keys/ doesn't exist (a legacy backend that predates the
@@ -53,6 +55,13 @@ interface ApiKeyMintResponse {
 /** Name of the HttpOnly refresh-token cookie (rbac/identity/refresh_cookie.py). */
 export const REFRESH_COOKIE_NAME = 'auth.refresh';
 
+/**
+ * A key this process minted that is rejected sooner than this is not replaced by another
+ * mint: the server is refusing fresh keys (revoked on creation, clock skew, a proxy dropping
+ * the header), and re-minting would burn through the per-user active-key cap in a loop.
+ */
+export const MIN_REMINT_INTERVAL_MS = 60_000;
+
 /** Refresh a JWT this many seconds before its `exp`, so it cannot expire in flight. */
 const ACCESS_TOKEN_EXPIRY_MARGIN_SECONDS = 30;
 
@@ -89,6 +98,8 @@ function isJwtExpired(token: string, nowSeconds: number = Date.now() / 1000): bo
 export class AuthService implements UserSession {
   private bootstrapPromise: Promise<string> | null = null;
   private sessionPromise: Promise<string> | null = null;
+  /** When this process last minted an API key (loop guard, see MIN_REMINT_INTERVAL_MS). */
+  private lastMintAt: number | null = null;
 
   constructor(
     private readonly config: Config,
@@ -154,9 +165,14 @@ export class AuthService implements UserSession {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
     }
-    // Drop the rejected credential; bootstrap() below picks whichever path still has
-    // something to work with (refresh token, credentials, or nothing).
-    this.store.update({ apiKey: null, keyPrefix: null, bearerAccessToken: null });
+    // Drop only the rejected credential. In API-key mode the JWT session is a different
+    // credential and stays usable for minting the replacement key without a login; in
+    // JWT-only mode the access token IS the rejected credential.
+    if (this.store.get().jwtOnly) {
+      this.store.update({ bearerAccessToken: null });
+    } else {
+      this.store.update({ apiKey: null, keyPrefix: null });
+    }
     return this.ensureAuthenticated();
   }
 
@@ -282,26 +298,56 @@ export class AuthService implements UserSession {
     return { access: tokens.access, refresh: refreshCookie ?? tokens.refresh ?? null };
   }
 
+  /**
+   * Mint a dedicated API key with the user's JWT session. The session comes from the store
+   * when possible (unexpired access token, else a cookie refresh) — a login happens only when
+   * neither works, because LoginThrottle allows just a handful per minute.
+   */
   private async establishCredential(): Promise<string> {
-    // Every caller (bootstrap, useProvidedToken's fallback check) already verified
-    // both are set before reaching here.
-    if (this.config.email === undefined || this.config.password === undefined) {
-      throw new Error('establishCredential() called without credentials — this is a bug in AuthService.');
+    this.assertNotRemintLoop();
+    const storedAccess = this.store.get().bearerAccessToken;
+    const access = await this.accessToken();
+    try {
+      return await this.mintWith(access);
+    } catch (error) {
+      // A stored access token can be revoked server-side before its `exp` (logout elsewhere).
+      // Drop it and renew once — refresh cookie, else login — then retry the mint.
+      if (error instanceof ApiError && error.status === 401 && access === storedAccess) {
+        logger.info('Stored access token was rejected while minting — renewing the session');
+        this.store.update({ bearerAccessToken: null });
+        return this.mintWith(await this.renewAccessToken());
+      }
+      throw error;
     }
-    const session = await this.login();
+  }
 
+  private assertNotRemintLoop(): void {
+    if (this.lastMintAt === null) return;
+    const ageMs = Date.now() - this.lastMintAt;
+    if (ageMs < MIN_REMINT_INTERVAL_MS) {
+      throw new Error(
+        `The API key this server minted ${Math.round(ageMs / 1000)}s ago was rejected right away — not minting ` +
+          'another one (that would loop and exhaust the active-key limit). Check the EpicStaff API-key settings, ' +
+          'the server clock, and any proxy that might strip the X-Api-Key header, then call check_connection again.',
+      );
+    }
+  }
+
+  private async mintWith(access: string): Promise<string> {
+    const { bearerRefreshToken } = this.store.get();
     try {
       // Raw key is returned exactly once (server stores only hash + prefix) — persist immediately.
-      // The route is JWT-only (DenyApiKeyAuth) — hence the one-off bearer token.
+      // The route is JWT-only (DenyApiKeyAuth) — hence the bearer token.
       const minted = await this.client.post<ApiKeyMintResponse>('profile/api-keys/', {
-        bearerToken: session.access,
+        bearerToken: access,
         body: { name: `es-mcp (${hostname()})` },
       });
+      this.lastMintAt = Date.now();
       this.store.update({
         apiKey: minted.api_key,
         keyPrefix: minted.prefix,
-        bearerAccessToken: session.access,
-        bearerRefreshToken: session.refresh,
+        bearerAccessToken: access,
+        bearerRefreshToken,
         jwtOnly: false,
       });
       logger.info(`Minted API key ${minted.prefix}… and persisted it`);
@@ -316,11 +362,11 @@ export class AuthService implements UserSession {
       this.store.update({
         apiKey: null,
         keyPrefix: null,
-        bearerAccessToken: session.access,
-        bearerRefreshToken: session.refresh,
+        bearerAccessToken: access,
+        bearerRefreshToken,
         jwtOnly: true,
       });
-      return session.access;
+      return access;
     }
   }
 }

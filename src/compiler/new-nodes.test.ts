@@ -220,6 +220,44 @@ ${edgesYaml}
     expect(errors.map((error) => error.path)).toStrictEqual(['flow.nodes.kv.table']);
   });
 
+  it('rejects api_key_env / bot_token_env naming the MCP server own variables (EPICSTAFF_*, ES_MCP_*)', async () => {
+    writeFlow(
+      `    bot:
+      type: telegram-trigger
+      bot_token_env: es_mcp_state_dir`,
+      `    - { from: start, to: finish }`,
+      `llm_configs:
+  leak: { model: gpt-4o, api_key_env: EPICSTAFF_PASSWORD }`,
+    );
+    const artifact = await compileFlow(flowDir);
+    const errors = errorsOf(artifact.diagnostics);
+    expect(errors.map((error) => error.path).sort()).toStrictEqual([
+      'flow.nodes.bot.bot_token_env',
+      'llm_configs.leak.api_key_env',
+    ]);
+    expect(errors[0]!.message).toMatch(/MCP server's own credentials/);
+    expect(artifact.entities.filter((plan) => plan.kind === 'secret')).toStrictEqual([]);
+  });
+
+  it('mirrors the backend LLMConfig bounds: max_tokens >= 500, temperature 0..2, context_window >= 1000', async () => {
+    writeFlow(
+      ``,
+      `    - { from: start, to: finish }`,
+      `llm_configs:
+  short: { model: gpt-4o, max_tokens: 499 }
+  hot: { model: gpt-4o, temperature: 2.5 }
+  narrow: { model: gpt-4o, params: { context_window: 999, max_tokens: 100 } }
+  ok: { model: gpt-4o, max_tokens: 500, temperature: 0, params: { context_window: 1000, top_p: 0.9 } }`,
+    );
+    const errors = errorsOf((await compileFlow(flowDir)).diagnostics);
+    expect(errors.map((error) => error.path).sort()).toStrictEqual([
+      'llm_configs.hot.temperature',
+      'llm_configs.narrow.params.context_window',
+      'llm_configs.narrow.params.max_tokens',
+      'llm_configs.short.max_tokens',
+    ]);
+  });
+
   it('turns api_key_env and bot_token_env into secret ensure plans — never a raw value', async () => {
     writeFlow(
       `    bot:

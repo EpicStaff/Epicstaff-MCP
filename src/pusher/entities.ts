@@ -16,11 +16,14 @@ import {
   getDocument,
   getEntity,
   isEntityDirty,
+  removeEntity,
   setDocument,
   setEntity,
 } from '../flow-source/lockfile.js';
 import { logger } from '../util/logger.js';
 import { readFileSync } from 'node:fs';
+import { isReservedEnvName, readEnv } from '../config.js';
+import { ApiError } from '../http/errors.js';
 
 /**
  * Entity pusher — materializes the dependency tree of a BuildArtifact in order
@@ -44,6 +47,8 @@ export interface EntityPushResult {
   idMap: Map<string, number>;
   lock: FlowLock;
   actions: EntityPushAction[];
+  /** Stale lock entries dropped / entities adopted — push_flow relays them to the user. */
+  warnings: string[];
 }
 
 
@@ -76,14 +81,34 @@ export class EntityPusher {
    * provision_knowledge to materialize just `llm_configs` + `knowledge` ahead of
    * the full flow. Omitting `options` pushes everything (the default push_flow
    * behavior, unchanged).
+   * @param options.verifyLockedIds Re-check every locked id against the backend before trusting
+   * it (the id must exist AND carry the entity's name); a stale id is dropped and the entity
+   * created anew. Set by push_flow when the lockfile's graph turned out to be gone — a sign the
+   * lockfile is stale or from another instance, where a reused id could point at an unrelated entity.
    */
   async push(
     artifact: BuildArtifact,
     lock: FlowLock,
-    options?: { sections?: string[] },
+    options?: {
+      sections?: string[];
+      verifyLockedIds?: boolean;
+      /**
+       * Persist the lock after every entity, so a failure later in the walk does not orphan the
+       * entities already created (their ids would be lost and the retry would collide on the
+       * backend's unique names). Supplied by push_flow / provision_knowledge.
+       */
+      persistLock?: (lock: FlowLock) => Promise<void>;
+      /**
+       * An entity with no lock entry adopts (and updates) a same-named backend entity instead of
+       * failing on the backend's unique name. NEVER set by push_flow — adopting could overwrite an
+       * entity another flow owns; used only by the live test harnesses, whose lockfiles are local state.
+       */
+      adoptByName?: boolean;
+    },
   ): Promise<EntityPushResult> {
     const idMap = new Map<string, number>();
     const actions: EntityPushAction[] = [];
+    const warnings: string[] = [];
     let currentLock = lock;
 
     for (const plan of artifact.entities) {
@@ -107,11 +132,36 @@ export class EntityPusher {
 
       const resolvedPayload = await this.resolvePayload(plan.payload ?? {}, idMap, plan.key);
       const hash = plan.contentHash ?? contentHash(plan.payload ?? {});
-      const lockEntry = getEntity(currentLock, plan.section, plan.name);
+      let lockEntry = getEntity(currentLock, plan.section, plan.name);
+      let adoptedId: number | undefined;
+
+      if (lockEntry && options?.verifyLockedIds === true && !(await this.isLockedIdValid(plan, lockEntry.backendId))) {
+        // A stale id (deleted, or a foreign lockfile) is dropped — never re-pointed at a same-named
+        // entity: names are not namespaced per flow, so that entity may be shared by other flows.
+        // The entity is created fresh; a unique-name conflict surfaces as an actionable error.
+        warnings.push(
+          `${plan.key}: locked id #${lockEntry.backendId} no longer exists under "${expectedRemoteName(plan)}" in this ` +
+            'organization — dropped from flow.lock.json and created anew.',
+        );
+        logger.warn(`Locked id #${lockEntry.backendId} of ${plan.key} is stale — dropping it`);
+        currentLock = removeEntity(currentLock, plan.section, plan.name);
+        currentLock = removeEntity(currentLock, plan.section, `${plan.name}#rag`);
+        lockEntry = undefined;
+      }
+      if (lockEntry === undefined && options?.adoptByName === true) {
+        // Live test harnesses only (their lockfiles are local state): reuse a same-named entity.
+        adoptedId = await this.lookupByName(plan, expectedRemoteName(plan));
+        if (adoptedId !== undefined) {
+          warnings.push(`${plan.key}: adopted the existing same-named entity #${adoptedId} and updated it.`);
+        }
+      }
 
       let backendId: number;
       let action: EntityPushAction['action'];
-      if (lockEntry && !isEntityDirty(currentLock, plan.section, plan.name, hash)) {
+      if (adoptedId !== undefined) {
+        backendId = await this.updateEntity(plan, adoptedId, resolvedPayload);
+        action = 'updated';
+      } else if (lockEntry && !isEntityDirty(currentLock, plan.section, plan.name, hash)) {
         backendId = lockEntry.backendId;
         action = 'reused';
       } else if (lockEntry) {
@@ -125,6 +175,7 @@ export class EntityPusher {
       currentLock = setEntity(currentLock, plan.section, plan.name, { backendId, contentHash: hash });
       idMap.set(plan.key, backendId);
       actions.push({ key: plan.key, kind: plan.kind, action, backendId });
+      if (action !== 'reused') await options?.persistLock?.(currentLock);
 
       if (plan.kind === 'knowledge_collection') {
         currentLock = await this.pushCollectionExtras(plan, backendId, idMap, currentLock);
@@ -136,14 +187,17 @@ export class EntityPusher {
       }
     }
 
-    return { idMap, lock: currentLock, actions };
+    return { idMap, lock: currentLock, actions, warnings };
   }
 
   /**
-   * Substitute every placeholder kind the compiler emits:
+   * Substitute the placeholder kinds an upsert payload may carry:
    * `{$ref}` (entity pushed earlier in this walk), `{$model}` (LLM model by name),
-   * `{$env}` (environment variable — secrets never live in flow source),
    * `{$tool}` (built-in catalog tool by name), `{$storageFile}` (org storage path).
+   *
+   * `{$env}` is deliberately NOT substituted here: environment values reach the backend only
+   * through `ensure` secret plans (see ensureSecret), so a pass-through field such as
+   * `llm_configs.*.params` can never smuggle an arbitrary environment variable into a payload.
    */
   private async resolvePayload(
     payload: Record<string, unknown>,
@@ -166,9 +220,6 @@ export class EntityPusher {
   private async substituteTemplateRefs(value: unknown): Promise<unknown> {
     if (isModelRef(value)) {
       return this.resolveModelId(value.$model, value.provider);
-    }
-    if (isEnvRef(value)) {
-      return this.readEnv(value.$env);
     }
     if (isBuiltinToolRef(value)) {
       return this.resolveBuiltinToolId(value.$tool);
@@ -239,8 +290,15 @@ export class EntityPusher {
   }
 
   private readEnv(envName: string): string {
-    const resolved = process.env[envName];
-    if (resolved === undefined || resolved === '') {
+    // Defense in depth — the flow-source schema already rejects these names.
+    if (isReservedEnvName(envName)) {
+      throw new Error(
+        `Environment variable "${envName}" belongs to the MCP server's own configuration and cannot be stored ` +
+          'as a flow credential. Export the provider key under its own name and reference that instead.',
+      );
+    }
+    const resolved = readEnv(process.env, envName);
+    if (resolved === undefined) {
       throw new Error(
         `Environment variable "${envName}" is not set for the MCP server. ` +
           'Secrets referenced in flow source must be provided in the plugin environment.',
@@ -303,6 +361,12 @@ export class EntityPusher {
     return found;
   }
 
+  /** The locked id still exists and still names this entity (not a recycled / foreign id). */
+  private async isLockedIdValid(plan: EntityPlan, backendId: number): Promise<boolean> {
+    // Same id under another name = a foreign row; absent = deleted. Either way not ours.
+    return (await this.lookupByName(plan, expectedRemoteName(plan))) === backendId;
+  }
+
   private async lookupByName(plan: EntityPlan, remoteName: string): Promise<number | undefined> {
     const nameMatches = (candidate: { id: number; name?: string }): boolean =>
       (candidate.name ?? '').toLowerCase() === remoteName.toLowerCase();
@@ -335,6 +399,23 @@ export class EntityPusher {
   }
 
   private async createEntity(plan: EntityPlan, payload: Record<string, unknown>): Promise<number> {
+    try {
+      return await this.createEntityRequest(plan, payload);
+    } catch (error) {
+      // Names are unique per organization (LLM configs, agents, tools, surfaces): without a lock
+      // entry pointing at that row the pusher must not take it over — it may belong to other flows.
+      if (
+        error instanceof ApiError &&
+        (error.status === 400 || error.status === 409) &&
+        /already exists/i.test(`${error.message} ${error.bodyExcerpt ?? ''}`)
+      ) {
+        throw nameConflictError(plan);
+      }
+      throw error;
+    }
+  }
+
+  private async createEntityRequest(plan: EntityPlan, payload: Record<string, unknown>): Promise<number> {
     logger.info(`Creating ${plan.kind} "${plan.name}"`);
     switch (plan.kind) {
       case 'llm_config':
@@ -347,14 +428,13 @@ export class EntityPusher {
         return (await this.tools.createMcpTool(payload as never)).id;
       case 'knowledge_collection': {
         const collectionName = (payload.collection_name as string | undefined) ?? plan.name;
-        // Collections have no unique-name constraint and the lockfile is only
-        // persisted after the whole entity walk succeeds, so a mid-push failure
-        // (e.g. a later RAG/indexing error) would otherwise create a fresh
-        // duplicate on every retry. Reuse an existing same-named collection.
-        const existingId = await this.lookupByName(plan, collectionName);
-        if (existingId !== undefined) {
-          logger.info(`Reusing existing collection "${collectionName}" (#${existingId})`);
-          return existingId;
+        // Collection names are unique per org (UniqueConstraint(org, collection_name)), but the
+        // backend does not reject a duplicate — SourceCollection.save() silently renames it to
+        // "<name> (1)". Check first: a same-named collection without a lock entry belongs to someone
+        // else, and uploading this flow's documents / attaching a RAG to it would mix knowledge
+        // across flows. (Retries cannot duplicate: the lock is persisted after every create.)
+        if ((await this.lookupByName(plan, collectionName)) !== undefined) {
+          throw nameConflictError(plan);
         }
         const collection = await this.knowledge.createCollection(collectionName);
         const id = collection.collection_id ?? collection.id;
@@ -510,6 +590,26 @@ export class EntityPusher {
 
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
   }
+}
+
+/** Actionable error for a same-named org entity that flow.lock.json does not point at. */
+function nameConflictError(plan: EntityPlan): Error {
+  const name = expectedRemoteName(plan);
+  return new Error(
+    `A ${plan.kind.replaceAll('_', ' ')} named "${name}" already exists in this organization, and flow.lock.json ` +
+      `does not point at it (${plan.key}). Reference it with { existing: "${name}" } to reuse it as-is, pull_flow ` +
+      'the flow that owns it, or rename the entity in the flow source.',
+  );
+}
+
+/** The name an upserted entity carries on the backend (its payload's name field). */
+function expectedRemoteName(plan: EntityPlan): string {
+  const payload = plan.payload ?? {};
+  for (const field of ['custom_name', 'collection_name', 'name']) {
+    const value = payload[field];
+    if (typeof value === 'string' && value !== '') return value;
+  }
+  return plan.name;
 }
 
 function isSymbolicRefLike(value: object): boolean {

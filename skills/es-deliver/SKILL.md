@@ -63,7 +63,9 @@ what it produces. Build the *smallest* wrapper that exercises that shape well. E
 menu:
 
 - turn-based text in → text out → a chat UI (the `generate_chat_ui` tool emits a self-contained
-  one; give it the input/reply variable paths).
+  one; give it the input/reply variable paths). It does not write an API key into the file by
+  default — the user enters one in the page. Pass `embed_api_key: true` only for a private, local
+  file, and tell the user the file then contains a live key.
 - a fixed set of fields → one result → a form + result view.
 - a document / dataset in → a structured report → an upload + report page, or a batch runner.
 - event/schedule-triggered → usually no UI at all; deliver the trigger config and a status view if

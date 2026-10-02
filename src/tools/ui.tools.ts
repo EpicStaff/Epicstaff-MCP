@@ -21,9 +21,10 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
       title: 'Generate a chat UI',
       description:
         'Generate a self-contained HTML chat UI (inline CSS/JS, no external assets) for a pushed flow ' +
-        'graph. The page drives the graph via its run-session API, authenticating with the current ' +
-        'API key + active organization (both CORS-allowed), so it works from file:// or any static ' +
-        'host with no backend change. Configure how the user message maps into the flow via ' +
+        'graph. The page drives the graph via its run-session API, authenticating with an API key + the ' +
+        'active organization (both CORS-allowed), so it works from file:// or any static host with no ' +
+        'backend change. By default the key is NOT written into the file — the user enters it in the page ' +
+        '(gear icon). Configure how the user message maps into the flow via ' +
         'input_path, and where the reply is read from via reply_path. Set reset_variables to the ' +
         'downstream fields to clear each turn so persistent-variables graphs do not carry stale ' +
         'answers. Open the returned file path in a browser.',
@@ -48,7 +49,10 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
         embed_api_key: z
           .boolean()
           .optional()
-          .describe('Prefill the current API key into the page (default true). Set false to make the user enter it.'),
+          .describe(
+            'Write the MCP server\'s own long-lived API key into the HTML (default false). Anyone who gets the file ' +
+              'can then act as this user — only enable it for a private, local file.',
+          ),
       },
     },
     async ({ graph_id, output_path, title, subtitle, input_path, reply_path, reset_variables, welcome, embed_api_key }) =>
@@ -57,7 +61,8 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
           throw new Error('output_path must be an absolute path to a .html file.');
         }
         const apiKey = await context.auth.ensureAuthenticated();
-        const orgId = context.org.requireActiveOrg();
+        const embedKey = embed_api_key === true;
+        const orgId = await context.org.requireActiveOrg();
 
         const light = await graphs.listLight();
         const graph = light.find((candidate) => candidate.id === graph_id);
@@ -70,7 +75,7 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
           graphId: graph_id,
           graphName: graph.name,
           orgId,
-          apiKey: embed_api_key === false ? '' : apiKey,
+          apiKey: embedKey ? apiKey : '',
           title,
           subtitle: subtitle ?? (graph.description || undefined),
           inputPath: input_path,
@@ -88,8 +93,17 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
           graph_id,
           graph_name: graph.name,
           bytes: html.length,
-          embedded_api_key: embed_api_key !== false,
-          next: 'Open the file in a browser. Use the gear icon to change API base / key / org / graph id.',
+          embedded_api_key: embedKey,
+          ...(embedKey
+            ? {
+                warning:
+                  'The file CONTAINS the long-lived EpicStaff API key of the MCP user (stored in plain text). Do not ' +
+                  'share, commit or host it; revoke the key in EpicStaff (Profile → API keys) if it leaks.',
+              }
+            : {}),
+          next: embedKey
+            ? 'Open the file in a browser. Use the gear icon to change API base / key / org / graph id.'
+            : 'Open the file in a browser and enter an EpicStaff API key via the gear icon (no key is embedded).',
         };
       }),
   );

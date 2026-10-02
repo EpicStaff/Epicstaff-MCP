@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Session / run API — ported from the frontend's
@@ -51,7 +51,7 @@ export interface Paginated<T> {
 }
 
 export class SessionsApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   /**
    * POST run-session/ — multipart.

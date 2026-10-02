@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * LLM stack API — ported from shared/services/llms/{llm-providers,llm-models,llm-config}.service.ts
@@ -62,7 +62,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class LlmApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async listProviders(): Promise<LlmProvider[]> {
     return unwrap(await this.client.get<Paginated<LlmProvider> | LlmProvider[]>('providers/', { query: { limit: 1000 } }));

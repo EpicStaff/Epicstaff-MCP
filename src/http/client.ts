@@ -12,6 +12,8 @@ import { ApiError, toApiError } from './errors.js';
  *            `Authorization: Bearer`); on 401 run a single-flight re-auth and retry once.
  *  - org:    attach `X-Organization-Id` when an active org is selected; skipped for
  *            auth endpoints and admin organization routes, same rules as the frontend.
+ *            The frontend resolves the active org once at startup (ProfileService.bootstrapUser);
+ *            the headless analogue resolves it lazily before the first org-scoped request.
  *  - errors: normalize 400/422 `{errors:[{field,value,reason}]}` bodies into ApiError.
  */
 export interface RequestOptions {
@@ -29,11 +31,40 @@ export interface RequestOptions {
   onResponseHeaders?: (headers: Headers) => void;
 }
 
+/**
+ * The request surface API wrappers (src/api/*) depend on — not the concrete client — so a server
+ * started without a valid environment can hand them a stand-in whose every call reports the
+ * configuration problem (see {@link unconfiguredClient}).
+ */
+export type ApiClient = Pick<EpicStaffClient, 'apiUrl' | 'get' | 'post' | 'put' | 'patch' | 'delete' | 'request'>;
+
+/** An {@link ApiClient} whose every request rejects with `error` (invalid server environment). */
+export function unconfiguredClient(error: Error): ApiClient {
+  const reject = async (): Promise<never> => {
+    throw error;
+  };
+  return {
+    get apiUrl(): string {
+      throw error;
+    },
+    get: reject,
+    post: reject,
+    put: reject,
+    patch: reject,
+    delete: reject,
+    request: reject,
+  };
+}
+
 const ORG_HEADER_SKIP = [/\/api\/auth\//, /\/admin\/organizations\/\d+\//];
+/** The org resolver itself reads `profile/`; it must not wait on its own resolution. */
+const ORG_RESOLUTION_SKIP = /\/api\/profile\//;
 
 export class EpicStaffClient {
   /** Installed by auth.ts — runs the single-flight re-mint. Returns the fresh API key. */
   private reauthenticate: (() => Promise<string>) | null = null;
+  /** Installed by org.ts — makes sure the active org is resolved before org-scoped calls. */
+  private ensureOrgContext: (() => Promise<void>) | null = null;
 
   constructor(
     private readonly config: Config,
@@ -42,6 +73,10 @@ export class EpicStaffClient {
 
   onUnauthorized(handler: () => Promise<string>): void {
     this.reauthenticate = handler;
+  }
+
+  onOrgContextNeeded(handler: () => Promise<void>): void {
+    this.ensureOrgContext = handler;
   }
 
   get apiUrl(): string {
@@ -70,6 +105,9 @@ export class EpicStaffClient {
 
   async request<T>(method: string, path: string, options: RequestOptions = {}, isRetry = false): Promise<T> {
     const url = this.buildUrl(path, options.query);
+    if (this.ensureOrgContext && this.isOrgScoped(url, options)) {
+      await this.ensureOrgContext();
+    }
     const headers = this.buildHeaders(url, options);
 
     const init: RequestInit = { method, headers };
@@ -110,6 +148,20 @@ export class EpicStaffClient {
     }
     const text = await response.text();
     return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  /**
+   * A regular API-key request that carries the org header. Auth bootstrap traffic (skipAuth,
+   * one-off bearer tokens) and the profile lookup the resolver performs are excluded, so
+   * resolution can never wait on itself.
+   */
+  private isOrgScoped(url: string, options: RequestOptions): boolean {
+    return (
+      !options.skipAuth &&
+      !options.bearerToken &&
+      !ORG_RESOLUTION_SKIP.test(url) &&
+      !ORG_HEADER_SKIP.some((pattern) => pattern.test(url))
+    );
   }
 
   private buildUrl(path: string, query?: RequestOptions['query']): string {

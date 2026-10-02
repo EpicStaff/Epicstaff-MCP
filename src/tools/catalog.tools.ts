@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 import { ApiError } from '../http/errors.js';
 import { AgentDefinitionsApi, type CreateAgentDefinitionRequest } from '../api/agent-definitions.js';
 import { KnowledgeApi } from '../api/knowledge.js';
@@ -330,7 +330,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ name, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const request = await buildSurfaceRequest(name, body as SurfaceBodyInput);
         const created = await createOrExplainConflict(() => surfaces.create(request), name, 'update_surface');
         return {
@@ -362,7 +362,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ surface, name, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const surfaceId = await resolveSurface(surface);
         const current = await surfaces.get(surfaceId);
         const merged = mergeSurfaceBody(current, name, body as SurfaceBodyInput);
@@ -384,7 +384,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ surface }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const surfaceId = await resolveSurface(surface);
         return surfaces.get(surfaceId);
       }),
@@ -405,7 +405,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ surface }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const surfaceId = await resolveSurface(surface);
         const current = await surfaces.get(surfaceId);
         await surfaces.delete(surfaceId);
@@ -458,7 +458,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ name, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const request = await buildAgentRequest(name, body, {
           resolveLlmConfig,
           resolveSurface,
@@ -510,7 +510,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ agent, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
         const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
         const updated = await agents.update(agentId, request);
@@ -530,7 +530,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ agent }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
         return agents.get(agentId);
       }),
@@ -551,7 +551,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ agent }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
         const current = await agents.get(agentId);
         await agents.delete(agentId);
@@ -592,7 +592,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ name, documents, rag }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
 
         // Validate document paths up front so a bad path never orphans an empty collection.
         if (documents && documents.length > 0) {
@@ -649,7 +649,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ collection_id, strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const attached = await attachAndIndexRag(
           collection_id,
           { strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings },
@@ -681,7 +681,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ collection_id }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         await knowledge.deleteCollection(collection_id);
         return {
           deleted: { collectionId: collection_id },
@@ -808,7 +808,7 @@ function mergeSurfaceBody(
 interface RagContext {
   knowledge: KnowledgeApi;
   llm: LlmApi;
-  client: EpicStaffClient;
+  client: ApiClient;
   resolveLlmConfig: (ref: number | string) => Promise<number>;
 }
 

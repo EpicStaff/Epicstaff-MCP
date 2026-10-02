@@ -119,6 +119,50 @@ describe('applySaveResponse', () => {
     );
   });
 
+  it('maps by node_name even when the backend lists new nodes out of creation order', () => {
+    // Observed live: the node lists come from an unordered queryset, so rows rewritten after
+    // insert can be listed first. Positional mapping would rotate every id.
+    const named = (id: string, name: string): PythonGraphNode => ({ ...pythonNode(id, null), node_name: name });
+    const desired: GraphState = {
+      nodes: [named('u-score', 'Score'), named('u-high', 'High'), named('u-low', 'Low'), named('u-gold', 'Gold')],
+      edges: [],
+    };
+    const dto = (id: number, name: string) => ({ ...pythonDto(id), node_name: name });
+    const response = makeGraphDto({
+      // Created as Score=1487, High=1488, Low=1489, Gold=1490 — listed in heap order.
+      python_node_list: [dto(1489, 'Low'), dto(1490, 'Gold'), dto(1487, 'Score'), dto(1488, 'High')],
+    });
+
+    expect(applySaveResponse(desired, { nodes: [], edges: [] }, response)).toStrictEqual(
+      new Map([
+        ['u-score', 1487],
+        ['u-high', 1488],
+        ['u-low', 1489],
+        ['u-gold', 1490],
+      ])
+    );
+  });
+
+  it('falls back to creation order (ascending id) for nodes without a usable name', () => {
+    const note = (id: string): NoteGraphNode => ({ ...baseNode(id, null, ''), type: 'note', data: { content: id } });
+    const desired: GraphState = { nodes: [note('n-1'), note('n-2'), note('n-3')], edges: [] };
+    const response = makeGraphDto({
+      // GraphNote has no node_name column; listed out of order.
+      graph_note_list: [
+        { id: 72, graph: 42, content: 'n-3', metadata: {} },
+        { id: 70, graph: 42, content: 'n-1', metadata: {} },
+        { id: 71, graph: 42, content: 'n-2', metadata: {} },
+      ] as unknown as GraphDto['graph_note_list'],
+    });
+    expect(applySaveResponse(desired, { nodes: [], edges: [] }, response)).toStrictEqual(
+      new Map([
+        ['n-1', 70],
+        ['n-2', 71],
+        ['n-3', 72],
+      ])
+    );
+  });
+
   it('maps created knowledge-retriever and key-value nodes from their own response lists', () => {
     const retriever: GraphState['nodes'][number] = {
       ...baseNode('kr-a', null, 'Retrieve'),

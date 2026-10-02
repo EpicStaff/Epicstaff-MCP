@@ -22,17 +22,23 @@ The plugin bundles the MCP server as built JS — no npm install needed at use t
      is minted on first use)
 3. With login credentials, the first tool call logs in, mints a dedicated API key
    (`POST /api/profile/api-keys/`), and persists it in `~/.es_mcp/` together with the login's
-   refresh token. With `EPICSTAFF_API_TOKEN`, the token is used directly.
+   refresh token. If that key is later revoked or expires, the replacement is minted with the
+   stored session (refreshed through the refresh token) — a new login happens only when the
+   session is gone too, and a key that is rejected right after minting is never re-minted in a
+   loop. With `EPICSTAFF_API_TOKEN`, the token is used directly. Unset variables that reach the
+   server as a literal `${VAR}` count as unset; with a missing or invalid configuration the server
+   still starts and every backend tool returns the configuration error (local tools keep working).
 4. Credentials a flow needs (LLM API keys, a Telegram bot token) come from environment variables
    named in the flow (`api_key_env`, `bot_token_env`). On push each is stored as an org **Secret**
    named `es-mcp:<ENV_NAME>` and referenced by id — values never enter flow source, the graph or the
-   lockfile. EpicStaff only lets a signed-in user manage secrets (not an API key), so pushing a
+   lockfile. The MCP server's own variables (`EPICSTAFF_*`, `ES_MCP_*`) cannot be named there.
+   EpicStaff only lets a signed-in user manage secrets (not an API key), so pushing a
    flow with such credentials needs `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD`; the session is
    refreshed through the refresh token rather than by logging in again. Secrets are immutable: if
    an env value changes, delete the old `es-mcp:<ENV_NAME>` secret in EpicStaff and push again.
 
-Organizations are resolved automatically (`GET /api/profile/`). One org → auto-selected;
-several → pick with `set_active_organization`.
+Organizations are resolved automatically (`GET /api/profile/`) before the first org-scoped call
+of every server process. One org → auto-selected; several → pick with `set_active_organization`.
 
 ## Skills (the workflow)
 
@@ -60,7 +66,9 @@ backend — so it works from `file://` or any static host with no backend change
 `graph_id`, tell it the `input_path` the user message lands in and the `reply_path` the answer is
 read from, and set `reset_variables` to clear downstream state each turn (so `persistent_variables`
 graphs don't carry a stale answer forward). Open the emitted file; the gear icon edits API base /
-key / org / graph id (persisted in `localStorage`). It is one option `es-deliver` reaches for when
+key / org / graph id (persisted in `localStorage`). The file carries **no API key** unless you pass
+`embed_api_key: true` — then it contains the MCP user's long-lived key in plain text (the result
+says so); keep such a file private and never host or commit it. It is one option `es-deliver` reaches for when
 a flow's interaction shape is conversational; non-chat apps are built to fit their own shape (form,
 dashboard, batch runner, …) against the same run-session contract — which is also what
 "ES + Integration" wires into an existing app.
@@ -174,8 +182,24 @@ To silence a read that's only set on *some* branches, declare it with a default
 ## Identity & sync — `flow.lock.json`
 
 Push writes a lockfile mapping symbolic names → backend ids (+ `save_version`, content
-hashes). Repush **updates in place** — never duplicates. Commit it with the source.
-Remote edits are detected via `save_version`; resolve with `pull_flow` or `force`.
+hashes). Repush **updates in place** — never duplicates; a push with nothing to change skips the
+graph save entirely (`changed: false`, `save_version` unchanged). Commit it with the source.
+Remote edits are detected via `save_version`; resolve with `pull_flow` or `force`. A lockfile whose
+graph no longer exists (deleted in the editor, or copied from another instance) makes push recreate
+the graph and re-verify every locked entity id, with a warning in the result: a stale entity id is
+dropped and the entity created anew — push never takes over a same-named entity it has no lock entry
+for (names are org-wide, so it may serve other flows); that is reported as an error telling you to
+reference it with `{ existing: … }`, pull its flow, or rename. Knowledge collections follow the same
+rule: a flow never uploads into (or attaches a RAG to) a same-named collection it did not create.
+Ownership of the locked graph is proven only by its name matching `meta.name` — not by the lockfile —
+so a copied flow directory with a new `meta.name` is refused, even with `force`. To rename a flow on
+purpose, push with `rename: true`: the remote graph is renamed and the lockfile updated (only for a
+lockfile that recorded a completed push — `save_version` > 0 — unless `force` is also set).
+Node ids are matched to the bulk-save response by node name (the backend lists nodes in no
+guaranteed order); a lockfile whose node ids got swapped by an older version is repaired by name on
+the next push. If the remote graph holds two nodes with one name, push keeps the copy the lockfile
+points at, deletes the others and says so in `warnings`. Concurrent pushes of one flow directory in
+one server process run one after the other.
 
 ## Development
 
@@ -187,6 +211,27 @@ npm run typecheck
 npm run build      # emit dist/ (committed — the plugin launches dist/index.js)
 npm run gen:types  # regenerate src/models/generated/openapi.d.ts from openapi/schema.json
 ```
+
+### Live tests (need a running EpicStaff)
+
+Configured only through the environment — `EPICSTAFF_BASE_URL`, `EPICSTAFF_USERNAME`,
+`EPICSTAFF_PASSWORD`, plus `STRESS_OPENAI_KEY` for the LLM steps. EpicStaff allows **5 active API
+keys per user**: point `ES_MCP_STATE_DIR` at one directory and reuse it for every run, so the stored
+key is reused instead of minting a new one into a fresh state dir. The regression suite revokes the
+keys it minted itself when it finishes (never one it did not mint) and puts the pre-existing key back;
+`REG_KEEP=1` skips that cleanup.
+
+```bash
+npm run build                              # the regression suite tests the BUILT plugin
+npx tsx _stress/regression/run.mts         # every tool over MCP stdio → PASS/FAIL/SKIP table, exit 1 on FAIL
+npx tsx _stress/provision-llm.mts          # once per instance: the "stress-4o-mini" config the stress flows use
+npx tsx _stress/run-all.mts                # compile → push → run → verify the _stress/flows set
+```
+
+The regression suite gives every graph/agent/collection it creates a per-run name and deletes them
+at the end (`REG_KEEP=1` keeps them); `REG_LLM_MODEL` / `REG_LLM_PROVIDER` override the default
+`gpt-4o-mini` / `openai`. `attach_rag` and `provision_knowledge` are skipped (they need an embedding
+model). Scratch output and lockfiles written by these runs are gitignored local state.
 
 The server is a headless port of the EpicStaff Angular frontend's API layer: same
 endpoints, same request models, same auth/org headers, and a verbatim port of the

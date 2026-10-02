@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { err, ok, toContent } from '../util/result.js';
 import { ApiError } from '../http/errors.js';
+import { ConfigurationError } from '../config.js';
 
 /** Wrap a tool handler: run it, render the ToolResult envelope, normalize thrown errors. */
 export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typeof toContent>> {
@@ -21,6 +22,16 @@ export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typ
         }),
       );
     }
+    if (error instanceof ConfigurationError) {
+      return toContent(
+        err(error.message, {
+          hint:
+            'The EpicStaff MCP server is not configured. Export EPICSTAFF_BASE_URL plus EPICSTAFF_USERNAME + ' +
+            'EPICSTAFF_PASSWORD (or EPICSTAFF_API_TOKEN) in the shell that launches Claude Code, then restart it. ' +
+            'Local tools (init_flow, validate_flow, build_flow) work without it.',
+        }),
+      );
+    }
     return toContent(err(error instanceof Error ? error.message : String(error)));
   }
 }
@@ -31,6 +42,9 @@ function hintFor(error: ApiError): string | undefined {
   }
   if (error.status === 403) {
     return 'Check that the right organization is active (list_organizations / set_active_organization) and the user has permission.';
+  }
+  if (error.status === 400 && error.bodyExcerpt?.includes('org_context_required')) {
+    return 'No active organization was sent — call list_organizations, then set_active_organization.';
   }
   if (error.validationErrors?.length) {
     return 'Fix the listed fields in the flow source and retry.';

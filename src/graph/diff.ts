@@ -29,6 +29,7 @@ import type {
   WebhookTriggerGraphNode,
 } from './graph-state.js';
 import { toNodeMetadata } from './metadata.js';
+import { canonicalJson } from '../flow-source/lockfile.js';
 
 export interface NodeDiff<T> {
   toCreate: T[];
@@ -61,8 +62,11 @@ export interface ConnectionDiff {
   toUpdate: GraphEdgeState[];
 }
 
+// Divergence: the frontend compares JSON.stringify output because both sides come from the same
+// loaded state. Here `previous` comes from the backend (Postgres jsonb reorders object keys) and
+// `current` from the compiler, so key order is compared canonically (array order still matters).
 function areEqual(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 export function buildUuidToBackendIdMap(nodes: GraphNode[]): Map<string, number> {
@@ -381,6 +385,11 @@ function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: G
 }
 
 export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiffByType {
+  // Divergence: the frontend resolves route targets of BOTH sides against current.nodes, since
+  // its previous/current states share node uuids. A backend-derived previous state has its own
+  // uuids (remote-<type>-<id>), so its refs must resolve against its own nodes too; current
+  // comes first, so shared-uuid callers behave exactly as before.
+  const refNodes = [...current.nodes, ...previous.nodes];
   return {
     startNodes: diffNodesByBackendId(
       nodesByType<StartGraphNode>(previous.nodes, 'start'),
@@ -440,7 +449,7 @@ export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiff
     decisionTableNodes: diffNodesByBackendId(
       nodesByType<DecisionTableGraphNode>(previous.nodes, 'decision-table'),
       nodesByType<DecisionTableGraphNode>(current.nodes, 'decision-table'),
-      (node) => toDecisionTableComparable(node, current.nodes)
+      (node) => toDecisionTableComparable(node, refNodes)
     ),
     noteNodes: diffNodesByBackendId(
       nodesByType<NoteGraphNode>(previous.nodes, 'note'),
@@ -450,7 +459,7 @@ export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiff
     classificationDecisionTableNodes: diffNodesByBackendId(
       nodesByType<ClassificationDecisionTableGraphNode>(previous.nodes, 'classification-decision-table'),
       nodesByType<ClassificationDecisionTableGraphNode>(current.nodes, 'classification-decision-table'),
-      (node) => toCdtComparable(node, current.nodes)
+      (node) => toCdtComparable(node, refNodes)
     ),
     knowledgeRetrieverNodes: diffNodesByBackendId(
       nodesByType<KnowledgeRetrieverGraphNode>(previous.nodes, 'knowledge-retriever'),

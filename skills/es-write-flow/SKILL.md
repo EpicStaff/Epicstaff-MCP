@@ -76,8 +76,12 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
      `output_variable_path`. Declare a variable to give it an initial default, a description, an
      early-read anchor, or a `persist:` scope.
    - `llm_configs` — model by name (e.g. `model: gpt-4o`); reuse `{ existing: ... }` when possible.
+     Numeric bounds follow the backend: `temperature` 0–2, `max_tokens` ≥ 500, `context_window`
+     (in `params`) ≥ 1000 — `build_flow` reports violations.
      A provider key goes in `api_key_env: <ENV_NAME>` (never the value): push stores it as the org
-     secret `es-mcp:<ENV_NAME>`. Same for a telegram trigger's `bot_token_env`.
+     secret `es-mcp:<ENV_NAME>`. Same for a telegram trigger's `bot_token_env`. Never name
+     `EPICSTAFF_*` / `ES_MCP_*` variables there — they are the MCP server's own credentials and
+     are rejected.
    - `tools` — `python_code_tools` / `mcp_tools` / `tool_configs` the agents need.
    - `knowledge` — collections with `documents:` (paths relative to the flow dir; put the
      files there) and a `rag:` strategy (`naive` or `graph`). **Author the knowledge section

@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 import { ApiError } from '../http/errors.js';
 
 /**
@@ -44,7 +44,7 @@ export function secretTail(value: string): string {
 
 export class SecretsApi {
   constructor(
-    private readonly client: EpicStaffClient,
+    private readonly client: ApiClient,
     private readonly session: UserSession,
   ) {}
 

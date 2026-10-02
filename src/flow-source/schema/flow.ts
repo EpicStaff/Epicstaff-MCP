@@ -10,6 +10,7 @@ import { z } from 'zod';
 
 import {
   entityRef,
+  credentialEnvName,
   entityRefSchema,
   inputMapSchema,
   positionSchema,
@@ -190,13 +191,11 @@ export const webhookTriggerNodeSchema = z.strictObject({
 export const telegramTriggerNodeSchema = z.strictObject({
   type: z.literal('telegram-trigger'),
   position: positionField,
-  bot_token_env: z
-    .string()
-    .optional()
-    .describe(
-      'Environment variable holding the Telegram bot token. The token never lives in flow source: ' +
-        'on push it is stored as an org Secret (named "es-mcp:<ENV>") and the node references that secret.',
-    ),
+  bot_token_env: credentialEnvName(
+    'Environment variable holding the Telegram bot token. The token never lives in flow source: ' +
+      'on push it is stored as an org Secret (named "es-mcp:<ENV>") and the node references that secret. ' +
+      'EPICSTAFF_* / ES_MCP_* names are rejected.',
+  ).optional(),
   output_variable_path: outputVariablePathField,
 });
 
