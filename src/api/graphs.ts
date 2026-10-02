@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 import type { BulkSavePayload, CreateGraphDtoRequest, GetGraphLightRequest, GraphDto } from '../models/graph.js';
 
 /**
@@ -17,7 +17,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class GraphsApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async listLight(): Promise<GetGraphLightRequest[]> {
     return unwrap(
@@ -39,6 +39,11 @@ export class GraphsApi {
   /** The main persistence path — returns the full GraphDto incl. new backend ids + save_version. */
   async bulkSave(graphId: number, payload: BulkSavePayload): Promise<GraphDto> {
     return this.client.post(`graphs/${graphId}/save/`, { body: payload });
+  }
+
+  /** Rename a graph. PATCH is optimistically locked like bulk-save — save_version is mandatory. */
+  async rename(graphId: number, name: string, saveVersion: number): Promise<GraphDto> {
+    return this.client.patch(`graphs/${graphId}/`, { body: { name, save_version: saveVersion } });
   }
 
   async delete(graphId: number): Promise<void> {

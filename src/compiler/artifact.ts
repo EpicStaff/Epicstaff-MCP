@@ -55,21 +55,46 @@ export function collectRefs(value: unknown, into: Set<string> = new Set()): Set<
 }
 
 export type EntityKind =
+  | 'secret'
+  | 'key_value_table'
   | 'llm_config'
   | 'tool_config'
   | 'python_code_tool'
   | 'mcp_tool'
   | 'knowledge_collection'
   | 'surface'
-  | 'agent_definition'
-  | 'crew';
+  | 'agent_definition';
 
 /** How the pusher obtains this entity's backend id. */
 export type EntityAction =
   /** Defined locally — create (or update when the lockfile has a stale hash). */
   | 'upsert'
   /** `existing:` reference — look up by name remotely; never created or modified. */
-  | 'resolve-existing';
+  | 'resolve-existing'
+  /**
+   * Org-level resource identified by name (secrets, key-value tables): look it up by
+   * name on EVERY push and create it only when missing. Never cached in the lockfile —
+   * the remote row may have been deleted or (for secrets) must be re-verified.
+   */
+  | 'ensure';
+
+/**
+ * Ref-key suffix for "the RAG of this collection": `<collection ref>#rag:<naive|graph>`
+ * resolves to the RAG impl id (`naive_rag_id` / `graph_rag_id`) a knowledge-retriever
+ * node searches. The pusher fills it from the lockfile (local collections) or from
+ * `source-collections/{id}/available-rags/` (existing ones).
+ */
+export function ragRefKey(collectionRefKey: string, ragType: 'naive' | 'graph'): string {
+  return `${collectionRefKey}#rag:${ragType}`;
+}
+
+const RAG_REF_KEY = /^(.+)#rag:(naive|graph)$/;
+
+export function parseRagRefKey(refKey: string): { collectionRefKey: string; ragType: 'naive' | 'graph' } | null {
+  const match = RAG_REF_KEY.exec(refKey);
+  if (!match) return null;
+  return { collectionRefKey: match[1] as string, ragType: match[2] as 'naive' | 'graph' };
+}
 
 export interface RagPlan {
   strategy: 'naive' | 'graph';
@@ -108,9 +133,9 @@ export interface EntityPlan {
   name: string;
   kind: EntityKind;
   action: EntityAction;
-  /** action=resolve-existing: the remote entity name to look up. */
+  /** action=resolve-existing / ensure: the remote entity name to look up. */
   remoteName?: string;
-  /** action=upsert: payload template (may contain SymbolicRef placeholders). */
+  /** action=upsert / ensure: payload template (may contain SymbolicRef / template placeholders). */
   payload?: Record<string, unknown>;
   /** action=upsert: content hash over the source definition (lockfile dirty check). */
   contentHash?: string;

@@ -23,6 +23,7 @@
  */
 import { makeError, makeWarning, type Diagnostic } from '../flow-source/diagnostics.js';
 import type { ResolvedFlow } from '../flow-source/resolver.js';
+import { validateKeyValueEntries } from './key-value-entries.js';
 import type {
   CatalogSurfaceSource,
   EntityRef,
@@ -43,8 +44,99 @@ export function validateFlow(source: FlowSource, resolved: ResolvedFlow): Diagno
   validateSurfaceBodies(source, diagnostics);
   validateOwnerAgentAttachments(source, diagnostics);
   validateTopology(source, diagnostics);
+  validateKnowledgeRetrieverNodes(source, diagnostics);
+  validateKeyValueNodes(source, diagnostics);
   validateUnusedEntities(source, resolved, diagnostics);
   return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// knowledge-retriever: RAG selection must be decidable at push time
+// ---------------------------------------------------------------------------
+
+const QUERY_PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+function validateKnowledgeRetrieverNodes(source: FlowSource, diagnostics: Diagnostic[]): void {
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    if (node.type !== 'knowledge-retriever') continue;
+    const nodePath = `flow.nodes.${nodeName}`;
+
+    let ragType = node.rag;
+    if (typeof node.collection === 'string') {
+      const strategy = source.knowledge[node.collection]?.rag.strategy;
+      if (strategy !== undefined && ragType !== undefined && ragType !== strategy) {
+        diagnostics.push(
+          makeError(
+            `${nodePath}.rag`,
+            `rag '${ragType}' does not match collection '${node.collection}', whose rag.strategy is '${strategy}'`,
+          ),
+        );
+      }
+      ragType ??= strategy;
+    } else if (ragType === undefined) {
+      diagnostics.push(
+        makeError(
+          `${nodePath}.rag`,
+          `collection { existing: "${node.collection.existing}" } is remote — set rag: naive | graph to pick which of its RAGs to search`,
+        ),
+      );
+    }
+
+    if (ragType === 'naive' && node.search_method !== undefined) {
+      diagnostics.push(makeError(`${nodePath}.search_method`, 'search_method applies to graph RAG only'));
+    }
+    if (ragType === 'naive' && node.search_configs?.graph !== undefined) {
+      diagnostics.push(makeError(`${nodePath}.search_configs.graph`, 'graph search configs apply to graph RAG only'));
+    }
+    if (ragType === 'graph' && node.search_configs?.naive !== undefined) {
+      diagnostics.push(makeError(`${nodePath}.search_configs.naive`, 'naive search configs apply to naive RAG only'));
+    }
+
+    // The runtime fills {name} from the mapped inputs and leaves unknown placeholders intact.
+    for (const match of node.query.matchAll(QUERY_PLACEHOLDER)) {
+      const placeholder = match[1] ?? '';
+      if (!(placeholder in node.input_map)) {
+        diagnostics.push(
+          makeWarning(
+            `${nodePath}.query`,
+            `query placeholder '{${placeholder}}' has no input_map entry — it is sent to the search literally`,
+          ),
+        );
+      }
+    }
+    if (node.output_variable_path === undefined) {
+      diagnostics.push(
+        makeWarning(nodePath, 'knowledge-retriever node has no output_variable_path — its search results are discarded'),
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// key-value: backend KeyValueEntriesValidator mirror
+// ---------------------------------------------------------------------------
+
+const PULL_PLACEHOLDER_NAMES: ReadonlySet<string> = new Set(['UNRESOLVED', 'UNASSIGNED']);
+
+function validateKeyValueNodes(source: FlowSource, diagnostics: Diagnostic[]): void {
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    if (node.type !== 'key-value') continue;
+    const nodePath = `flow.nodes.${nodeName}`;
+    // pull_flow writes these placeholders for a node without a (resolvable) table; the push
+    // would otherwise CREATE a table by that name.
+    if (PULL_PLACEHOLDER_NAMES.has(node.table)) {
+      diagnostics.push(
+        makeError(`${nodePath}.table`, `'${node.table}' is a pull_flow placeholder — set the Key-Value table name`),
+      );
+    }
+    if (node.entries.length === 0) {
+      diagnostics.push(makeWarning(`${nodePath}.entries`, 'key-value node has no entries — it does nothing at run time'));
+    }
+    for (const issue of validateKeyValueEntries(node.mode, node.entries)) {
+      const at = issue.index === null ? `${nodePath}.entries` : `${nodePath}.entries[${issue.index}]`;
+      diagnostics.push(makeError(at, issue.message));
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,15 +472,6 @@ function validateTopology(source: FlowSource, diagnostics: Diagnostic[]): void {
 
     if (node.type === 'task' && node.task.trim() === '') {
       diagnostics.push(makeError(`${nodePath}.task`, 'task text must not be blank'));
-    }
-
-    if (node.type === 'crew' && node.crew === undefined) {
-      diagnostics.push(
-        makeError(
-          `${nodePath}.crew`,
-          'crew node needs a crew reference ({existing: "<remote crew name>"}) — there is nothing to run without one',
-        ),
-      );
     }
 
     if (node.type === 'decision-table') {

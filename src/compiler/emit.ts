@@ -27,12 +27,23 @@
  *    `graph-light/`, or the sibling's `flow.lock.json` graphId) and the push_flow
  *    tool merges them into the idMap before the graph is pushed.
  *
+ *  - secrets:            `{$ref: "secrets.<ENV_NAME>"}` — one `ensure` plan per
+ *    environment variable a flow reads a credential from (`llm_configs.*.api_key_env`,
+ *    telegram `bot_token_env`). The pusher stores the value as an org Secret named
+ *    `es-mcp:<ENV_NAME>` and substitutes its id; the value never enters a payload
+ *    that is diffed, logged or written to the lockfile.
+ *  - key-value tables:   `{$ref: "key_value_tables.<table name>"}` — one `ensure`
+ *    plan per table name a key-value node uses (found by name, created if missing).
+ *  - collection RAGs:    `{$ref: "<collection ref>#rag:<naive|graph>"}` (see
+ *    `ragRefKey` in artifact.ts) — the RAG a knowledge-retriever node searches.
+ *
  * Numeric GraphState fields that carry refs (`agent_definition`, `surface_list`
- * entries, subgraph/crew `data.id`, `default_llm_config`, inline-surface tool /
- * collection / storage ids) and the string `telegram_bot_api_key` (an `{$env}`
- * ref) are populated via `as unknown as <T>` casts: the artifact contract
- * (artifact.ts) requires the pusher to substitute every placeholder before the
- * state is diffed or pushed, so the lie never reaches the wire.
+ * entries, subgraph `data.id`, `default_llm_config`, inline-surface tool /
+ * collection / storage ids, `telegram_bot_api_key_secret_id`, knowledge-retriever
+ * `source_collection` / `rag_id`, key-value `key_value_table`) are populated via
+ * `as unknown as <T>` casts: the artifact contract (artifact.ts) requires the pusher
+ * to substitute every placeholder before the state is diffed or pushed, so the lie
+ * never reaches the wire.
  *
  * Known, intentionally-documented lossy mappings (each emits a WARNING):
  *  - stdio MCP tools (`command`) — the backend `McpTool.transport` is a remote
@@ -79,7 +90,8 @@ import type {
 } from '../graph/graph-state.js';
 import { mintTempId } from '../graph/temp-id.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
-import type { EntityKind, EntityPlan, RagPlan, SymbolicRef } from './artifact.js';
+import { isWritableNode } from '../flow-source/schema/index.js';
+import { ragRefKey, type EntityKind, type EntityPlan, type RagPlan, type SymbolicRef } from './artifact.js';
 import {
   CANVAS_START_X,
   CANVAS_START_Y,
@@ -91,7 +103,7 @@ import {
   type LayoutConnection,
   type LayoutNode,
 } from './layout.js';
-import type { BuiltinToolRef, EnvRef, ModelRef, StorageFileRef } from './template-refs.js';
+import { secretName, type BuiltinToolRef, type EnvRef, type ModelRef, type StorageFileRef } from './template-refs.js';
 
 export interface ConditionalEdgePlan {
   /** Client uuid of the source node — matches a `GraphState` node id. */
@@ -111,12 +123,11 @@ export interface EmitResult {
 }
 
 // ---------------------------------------------------------------------------
-// Canvas metadata tables (mirrors frontend visual-programming/core/enums/node-config.ts)
+// Canvas metadata tables (mirrors frontend shared/models/node/node-config.ts)
 // ---------------------------------------------------------------------------
 
 const NODE_COLORS: Record<GraphNodeType, string> = {
   start: '#d3d3d3',
-  crew: '#5672cd', // frontend NodeType.PROJECT
   python: '#ffcf3f',
   task: '#2aba6b',
   agent: '#685fff',
@@ -130,11 +141,12 @@ const NODE_COLORS: Record<GraphNodeType, string> = {
   'schedule-trigger': '#FF5C00',
   'decision-table': '#00aaff', // frontend NodeType.TABLE
   'classification-decision-table': '#2a5bd7',
+  'knowledge-retriever': '#D9D9DE',
+  'key-value': '#14B8A6',
 };
 
 const NODE_ICONS: Record<GraphNodeType, string> = {
   start: 'ti ti-player-play-filled',
-  crew: 'ti ti-folder',
   python: 'ti ti-brand-python',
   task: 'ti ti-circle-check',
   agent: 'ti ti-robot',
@@ -148,6 +160,8 @@ const NODE_ICONS: Record<GraphNodeType, string> = {
   'schedule-trigger': 'ti ti-calendar',
   'decision-table': 'ti ti-table',
   'classification-decision-table': 'ti ti-table-options',
+  'knowledge-retriever': 'ti ti-books',
+  'key-value': 'ti ti-database',
 };
 
 /**
@@ -163,7 +177,6 @@ const NODE_SIZES: Partial<Record<GraphNodeType, { width: number; height: number 
 /** GraphState node type → layout node type (frontend NodeType enum value). */
 const LAYOUT_TYPE_BY_NODE_TYPE: Record<GraphNodeType, string> = {
   start: LAYOUT_NODE_TYPES.START,
-  crew: LAYOUT_NODE_TYPES.PROJECT,
   python: LAYOUT_NODE_TYPES.PYTHON,
   task: LAYOUT_NODE_TYPES.TASK,
   agent: LAYOUT_NODE_TYPES.AGENT,
@@ -177,6 +190,8 @@ const LAYOUT_TYPE_BY_NODE_TYPE: Record<GraphNodeType, string> = {
   'schedule-trigger': LAYOUT_NODE_TYPES.SCHEDULE_TRIGGER,
   'decision-table': LAYOUT_NODE_TYPES.TABLE, // 'table' — enum value differs
   'classification-decision-table': LAYOUT_NODE_TYPES.CLASSIFICATION_TABLE,
+  'knowledge-retriever': LAYOUT_NODE_TYPES.KNOWLEDGE_RETRIEVER,
+  'key-value': LAYOUT_NODE_TYPES.KEY_VALUE,
 };
 
 // ---------------------------------------------------------------------------
@@ -189,6 +204,45 @@ const LAYOUT_TYPE_BY_NODE_TYPE: Record<GraphNodeType, string> = {
  */
 class RefRegistry {
   private readonly existingBySection = new Map<string, Set<string>>();
+  /** Environment variable names a credential is read from — one Secret each. */
+  private readonly secretEnvNames = new Set<string>();
+  private readonly keyValueTableNames = new Set<string>();
+
+  /** `{$ref}` to the org Secret holding the value of environment variable `envName`. */
+  secret(envName: string): SymbolicRef {
+    this.secretEnvNames.add(envName);
+    return { $ref: entityKey('secrets', envName) };
+  }
+
+  /** `{$ref}` to the org Key-Value table named `tableName`. */
+  keyValueTable(tableName: string): SymbolicRef {
+    this.keyValueTableNames.add(tableName);
+    return { $ref: entityKey('key_value_tables', tableName) };
+  }
+
+  secretPlans(): EntityPlan[] {
+    return [...this.secretEnvNames].sort().map((envName) => ({
+      key: entityKey('secrets', envName),
+      section: 'secrets',
+      name: envName,
+      kind: 'secret',
+      action: 'ensure',
+      remoteName: secretName(envName),
+      payload: { name: secretName(envName), value: { $env: envName } satisfies EnvRef },
+    }));
+  }
+
+  keyValueTablePlans(): EntityPlan[] {
+    return [...this.keyValueTableNames].sort().map((tableName) => ({
+      key: entityKey('key_value_tables', tableName),
+      section: 'key_value_tables',
+      name: tableName,
+      kind: 'key_value_table',
+      action: 'ensure',
+      remoteName: tableName,
+      payload: { name: tableName },
+    }));
+  }
 
   ref(section: string, entityRef: EntityRef): SymbolicRef {
     if (typeof entityRef === 'string') {
@@ -252,22 +306,22 @@ function upsertPlan(
 }
 
 /** Payload template shaped like `CreateLlmConfigRequest` (src/api/llm.ts). */
-function buildLlmConfigPlans(source: FlowSource): EntityPlan[] {
+function buildLlmConfigPlans(source: FlowSource, registry: RefRegistry): EntityPlan[] {
   return Object.entries(source.llm_configs).map(([name, config]) => {
     const model: ModelRef = {
       $model: config.model,
       ...(config.provider !== undefined ? { provider: config.provider } : {}),
       ...(config.base_url !== undefined ? { base_url: config.base_url } : {}),
     };
-    const apiKey: EnvRef | string =
-      config.api_key_env !== undefined ? { $env: config.api_key_env } : '';
     const payload: Record<string, unknown> = {
       custom_name: name,
       // `model` is a numeric id on the wire; flow source only knows the model
       // NAME, so a {$model} template ref sits here — the pusher resolves it
       // via the llm-models list (see template-refs.ts).
       model,
-      api_key: apiKey,
+      // The key is an org Secret (LLMConfigSerializer.api_key_secret_id), never a raw value.
+      // Omitted without api_key_env so an update never clears a secret attached in the UI.
+      ...(config.api_key_env !== undefined ? { api_key_secret_id: registry.secret(config.api_key_env) } : {}),
       ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
       ...(config.max_tokens !== undefined ? { max_tokens: config.max_tokens } : {}),
       // Extra provider params (top_p, timeout, …) pass through at top level.
@@ -580,12 +634,13 @@ async function buildGraph(
   };
 
   let nodeNumber = 0;
-  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+  for (const [nodeName, parsedNode] of Object.entries(source.flow.nodes)) {
     nodeNumber += 1;
     const uuid = uuidOf(nodeName);
     const nodePath = `flow.nodes.${nodeName}`;
     // Forbidden legacy types are load-time ERRORS — emit never sees them.
-    invariant(node.type !== 'llm' && node.type !== 'code-agent', 'forbidden node type');
+    invariant(isWritableNode(parsedNode), 'forbidden node type');
+    const node = parsedNode;
     const type: GraphNodeType = node.type;
 
     const base = {
@@ -722,16 +777,6 @@ async function buildGraph(
         });
         break;
 
-      case 'crew': {
-        invariant(node.crew !== undefined, `crew node '${nodeName}' has no crew reference`);
-        nodes.push({
-          ...base,
-          type: 'crew',
-          data: { id: registry.ref('crews', node.crew) as unknown as number },
-        });
-        break;
-      }
-
       case 'webhook-trigger':
         nodes.push({
           ...base,
@@ -748,12 +793,12 @@ async function buildGraph(
           ...base,
           type: 'telegram-trigger',
           data: {
-            // {$env} ref in a string position — the token itself never lives
-            // in flow source; the pusher substitutes the env value.
-            telegram_bot_api_key:
+            // {$ref: "secrets.<ENV>"} in a numeric position — the token itself never
+            // lives in flow source or the graph; the pusher stores it as an org Secret.
+            telegram_bot_api_key_secret_id:
               node.bot_token_env !== undefined
-                ? (({ $env: node.bot_token_env } satisfies EnvRef) as unknown as string)
-                : '',
+                ? (registry.secret(node.bot_token_env) as unknown as number)
+                : null,
             webhook_trigger: null,
             fields: [],
           },
@@ -882,6 +927,62 @@ async function buildGraph(
         break;
       }
 
+      case 'knowledge-retriever': {
+        const collectionRef = registry.ref('knowledge', node.collection);
+        // validate.ts guarantees a rag type: explicit, or the local collection's strategy.
+        const ragType =
+          node.rag ??
+          (typeof node.collection === 'string' ? source.knowledge[node.collection]?.rag.strategy : undefined);
+        invariant(ragType !== undefined, `knowledge-retriever '${nodeName}' has no rag type`);
+        // search_method is write-only on the backend and read back only inside graph search
+        // configs, defaulting to "basic" (SearchConfigService.get_node_search_configs). Store
+        // that same default when graph configs are given, so a repush diffs clean.
+        const searchMethod =
+          node.search_method ?? (node.search_configs?.graph !== undefined ? ('basic' as const) : null);
+        nodes.push({
+          ...base,
+          type: 'knowledge-retriever',
+          data: {
+            source_collection: collectionRef as unknown as number,
+            rag_type: ragType,
+            rag_id: { $ref: ragRefKey(collectionRef.$ref, ragType) } as unknown as number,
+            query: node.query,
+            search_method: searchMethod,
+            search_configs:
+              node.search_configs !== undefined
+                ? {
+                    ...(node.search_configs.naive !== undefined ? { naive: node.search_configs.naive } : {}),
+                    ...(node.search_configs.graph !== undefined
+                      ? {
+                          graph: {
+                            ...node.search_configs.graph,
+                            search_method: searchMethod ?? 'basic',
+                          },
+                        }
+                      : {}),
+                  }
+                : null,
+          },
+        });
+        break;
+      }
+
+      case 'key-value':
+        nodes.push({
+          ...base,
+          type: 'key-value',
+          // The backend always stores null — no key-value mode writes a node output.
+          output_variable_path: null,
+          data: {
+            key_value_table: registry.keyValueTable(node.table) as unknown as number,
+            mode: node.mode,
+            entries: node.entries.map((entry) =>
+              node.mode === 'delete' ? { key: entry.key } : { key: entry.key, value: (entry.value ?? '').trim() },
+            ),
+          },
+        });
+        break;
+
       default: {
         invariant(false, `unhandled node type '${(node as { type: string }).type}'`);
       }
@@ -924,7 +1025,7 @@ function applyLayout(
 
   const pinnedByName = new Map<string, GraphPoint>();
   for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
-    if (node.type === 'llm' || node.type === 'code-agent') {
+    if (!isWritableNode(node)) {
       continue; // load-time errors — never reach emit
     }
     if (node.position !== undefined) {
@@ -989,7 +1090,7 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
   const diagnostics: Diagnostic[] = [];
   const registry = new RefRegistry();
 
-  const llmPlans = buildLlmConfigPlans(source);
+  const llmPlans = buildLlmConfigPlans(source, registry);
   const toolConfigPlans = buildToolConfigPlans(source);
   const pythonToolPlans = await buildPythonToolPlans(source, flowDir, diagnostics);
   const mcpToolPlans = buildMcpToolPlans(source, diagnostics);
@@ -1008,6 +1109,9 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
   // Dependency order per the artifact contract; every section's
   // resolve-existing plans precede its local upserts.
   const entities: EntityPlan[] = [
+    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    ...registry.secretPlans(),
+    ...registry.keyValueTablePlans(),
     ...registry.existingPlans('llm_configs', 'llm_config'),
     ...llmPlans,
     ...registry.existingPlans('tools.tool_configs', 'tool_config'),
@@ -1022,14 +1126,13 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
     ...surfacePlans,
     ...registry.existingPlans('agents', 'agent_definition'),
     ...agentPlans,
-    ...registry.existingPlans('crews', 'crew'),
   ];
 
   const nodesPerType: Record<string, number> = {};
   for (const node of nodes) {
     nodesPerType[node.type] = (nodesPerType[node.type] ?? 0) + 1;
   }
-  const plansPerAction: Record<string, number> = { upsert: 0, 'resolve-existing': 0 };
+  const plansPerAction: Record<string, number> = { upsert: 0, 'resolve-existing': 0, ensure: 0 };
   for (const plan of entities) {
     plansPerAction[plan.action] = (plansPerAction[plan.action] ?? 0) + 1;
   }

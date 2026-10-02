@@ -388,9 +388,11 @@ function collectNodeTypeDiagnostics(source: FlowSource, provenance: ProvenanceMa
       );
     } else if (node.type === 'crew') {
       diagnostics.push(
-        makeWarning(
+        makeError(
           `${nodePath}.type`,
-          "node type 'crew' is deprecated — prefer 'agent' and 'task' nodes",
+          "node type 'crew' was removed from EpicStaff (EST-3849: crews/projects no longer exist) — " +
+            "rewrite it as an 'agent' node (one agent, ordered tasks) or 'task' nodes, with the agent " +
+            "defined under 'agents:' or referenced via { existing: \"<agent name>\" }",
           file,
         ),
       );

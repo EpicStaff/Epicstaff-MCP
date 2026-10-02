@@ -1,6 +1,7 @@
 import type { StateStore } from '../state/store.js';
 import { logger } from '../util/logger.js';
 import type { EpicStaffClient } from './client.js';
+import { ApiError } from './errors.js';
 
 /**
  * Organization resolution — headless port of the frontend's
@@ -32,10 +33,41 @@ interface ProfileResponse {
 }
 
 export class OrgService {
+  /** Set once the persisted selection was validated against the profile in this process. */
+  private resolved = false;
+  private resolvePromise: Promise<void> | null = null;
+
   constructor(
     private readonly store: StateStore,
     private readonly client: EpicStaffClient,
-  ) {}
+  ) {
+    client.onOrgContextNeeded(() => this.ensureResolved());
+  }
+
+  /**
+   * Resolve the active org once per process, before the first org-scoped request: validates the
+   * persisted selection against the profile memberships and auto-selects a single org — the
+   * same as check_connection — so a fresh server process never sends org-scoped calls without
+   * X-Organization-Id. Single-flight; a failed lookup is retried on the next request.
+   */
+  async ensureResolved(): Promise<void> {
+    if (this.resolved) return;
+    this.resolvePromise ??= this.resolve()
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        // A backend without profile/ (pre-RBAC) has no org context to resolve.
+        if (error instanceof ApiError && error.status === 404) {
+          logger.info('profile/ not found — this backend has no organizations; sending no org header');
+          this.resolved = true;
+          return;
+        }
+        throw error;
+      })
+      .finally(() => {
+        this.resolvePromise = null;
+      });
+    return this.resolvePromise;
+  }
 
   async resolve(): Promise<OrgStatus> {
     const profile = await this.client.get<ProfileResponse>('profile/');
@@ -65,6 +97,7 @@ export class OrgService {
       logger.info(`Auto-selected the only organization: ${organizations[0]!.name} (${activeOrgId})`);
     }
 
+    this.resolved = true;
     return {
       organizations,
       activeOrgId,
@@ -83,7 +116,12 @@ export class OrgService {
     return { ...status, activeOrgId: orgId, selectionRequired: false };
   }
 
-  requireActiveOrg(): number {
+  /**
+   * The active org id for entity-creating calls. Resolves lazily first (see ensureResolved), so a
+   * fresh process with a saved selection — or a single membership — never needs check_connection.
+   */
+  async requireActiveOrg(): Promise<number> {
+    await this.ensureResolved();
     const { activeOrgId } = this.store.get();
     if (activeOrgId === null) {
       throw new Error(

@@ -1,0 +1,12 @@
+# Security check: this flow's collection name collides with an existing org collection
+# (created by the suite via create_collection) — push must refuse, not upload into it.
+meta: { name: reg-knowledge-__RUN__, description: "Regression: knowledge collection name conflict (never pushed successfully)." }
+knowledge:
+  reg-kc-__RUN__:
+    documents: [doc.txt]
+flow:
+  nodes:
+    __start__: { type: start }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: __end__ }

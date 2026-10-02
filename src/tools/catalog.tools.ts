@@ -2,11 +2,11 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 import { ApiError } from '../http/errors.js';
 import { AgentDefinitionsApi, type CreateAgentDefinitionRequest } from '../api/agent-definitions.js';
 import { KnowledgeApi } from '../api/knowledge.js';
-import { LlmApi } from '../api/llm.js';
+import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SurfacesApi, type CreateSurfaceRequest, type Surface } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
 import { runTool } from './auth-org.tools.js';
@@ -172,13 +172,9 @@ async function resolveNamedRef<T>(
  * Resolve the embedder for a RAG strategy. Number → used as-is; name → matched
  * against embedding-configs; omitted → the org default (ported from EntityPusher).
  */
-async function resolveEmbedderRef(
-  ref: number | string | undefined,
-  llm: LlmApi,
-  client: EpicStaffClient,
-): Promise<number> {
-  const configs = await llm.listEmbeddingConfigs();
+async function resolveEmbedderRef(ref: number | string | undefined, llm: LlmApi): Promise<number> {
   if (typeof ref === 'number') return ref;
+  const configs = await llm.listEmbeddingConfigs();
   if (typeof ref === 'string') {
     const wanted = ref.trim().toLowerCase();
     const named = configs.find(
@@ -193,36 +189,7 @@ async function resolveEmbedderRef(
       `Embedding config "${ref}" not found in the organization. Available: ${available || '(none)'}.`,
     );
   }
-  return resolveDefaultEmbedderId(configs, client);
-}
-
-async function resolveDefaultEmbedderId(
-  configs: Array<Record<string, unknown>>,
-  client: EpicStaffClient,
-): Promise<number> {
-  if (configs.length === 0) {
-    throw new Error(
-      'No embedding config exists in this organization — create one in EpicStaff settings ' +
-        '(knowledge indexing needs an embedder), or pass rag.embedder explicitly.',
-    );
-  }
-  const defaultConfig = await client
-    .get<{ model?: number } | undefined>('default-embedding-config/')
-    .catch(() => undefined);
-  const defaultModelId = defaultConfig?.model;
-  if (defaultModelId !== undefined) {
-    const byModel = configs.find((config) => config.model === defaultModelId);
-    if (byModel) return byModel.id as number;
-  }
-  if (configs.length === 1) return configs[0]!.id as number;
-  const available = configs
-    .map((config) => String(config.custom_name ?? config.name ?? ''))
-    .filter(Boolean)
-    .join(', ');
-  throw new Error(
-    'Cannot pick a default embedding config: the organization has several and none matches the ' +
-      `configured default embedding model. Pass rag.embedder as one of: ${available}.`,
-  );
+  return resolveDefaultEmbeddingConfigId(llm);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +330,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ name, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const request = await buildSurfaceRequest(name, body as SurfaceBodyInput);
         const created = await createOrExplainConflict(() => surfaces.create(request), name, 'update_surface');
         return {
@@ -395,7 +362,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ surface, name, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const surfaceId = await resolveSurface(surface);
         const current = await surfaces.get(surfaceId);
         const merged = mergeSurfaceBody(current, name, body as SurfaceBodyInput);
@@ -417,7 +384,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ surface }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const surfaceId = await resolveSurface(surface);
         return surfaces.get(surfaceId);
       }),
@@ -438,7 +405,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ surface }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const surfaceId = await resolveSurface(surface);
         const current = await surfaces.get(surfaceId);
         await surfaces.delete(surfaceId);
@@ -491,7 +458,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ name, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const request = await buildAgentRequest(name, body, {
           resolveLlmConfig,
           resolveSurface,
@@ -543,7 +510,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ agent, ...body }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
         const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
         const updated = await agents.update(agentId, request);
@@ -563,7 +530,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ agent }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
         return agents.get(agentId);
       }),
@@ -584,7 +551,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ agent }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
         const current = await agents.get(agentId);
         await agents.delete(agentId);
@@ -625,7 +592,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ name, documents, rag }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
 
         // Validate document paths up front so a bad path never orphans an empty collection.
         if (documents && documents.length > 0) {
@@ -682,7 +649,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ collection_id, strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const attached = await attachAndIndexRag(
           collection_id,
           { strategy, embedder, llm_config, chunk_size, chunk_overlap, entity_types, max_gleanings },
@@ -714,7 +681,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     async ({ collection_id }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         await knowledge.deleteCollection(collection_id);
         return {
           deleted: { collectionId: collection_id },
@@ -841,7 +808,7 @@ function mergeSurfaceBody(
 interface RagContext {
   knowledge: KnowledgeApi;
   llm: LlmApi;
-  client: EpicStaffClient;
+  client: ApiClient;
   resolveLlmConfig: (ref: number | string) => Promise<number>;
 }
 
@@ -858,7 +825,7 @@ async function attachAndIndexRag(
   },
   ctx: RagContext,
 ): Promise<{ ragId: number; ragType: 'naive' | 'graph' }> {
-  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm, ctx.client);
+  const embedderId = await resolveEmbedderRef(rag.embedder, ctx.llm);
   if (rag.strategy === 'naive') {
     if (rag.entity_types !== undefined || rag.max_gleanings !== undefined) {
       throw new Error('entity_types and max_gleanings apply to graph RAG only — remove them or use strategy "graph".');

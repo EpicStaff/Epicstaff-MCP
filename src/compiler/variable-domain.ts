@@ -16,23 +16,24 @@
  */
 import type { FlowSource } from '../flow-source/schema/index.js';
 import { declarationDefault, declarationPersist } from '../flow-source/schema/variables.js';
+import { nodeWritePaths } from './node-io.js';
 import { isVarPathError, parseVarPath } from './varpath.js';
 
 /**
- * Top-level variable names written by any node's `output_variable_path`
+ * Top-level variable names written by any node (`output_variable_path`, key-value read targets)
  * (e.g. `variables.quote.total` → `quote`). Cross-session `variables.shared[...]`
  * writes and malformed paths carry no top-level name and are skipped — malformed
  * paths are reported separately by the dataflow validator.
  */
 export function producedTopLevelNames(source: FlowSource): string[] {
   const names = new Set<string>();
-  for (const node of Object.values(source.flow.nodes)) {
-    const writePath = (node as { output_variable_path?: unknown }).output_variable_path;
-    if (typeof writePath !== 'string' || writePath.trim() === '') continue;
-    const parsed = parseVarPath(writePath);
-    if (isVarPathError(parsed) || parsed.isShared) continue;
-    const [root] = parsed.segments;
-    if (root !== undefined) names.add(root);
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    for (const write of nodeWritePaths(node, `flow.nodes.${nodeName}`)) {
+      const parsed = parseVarPath(write.path);
+      if (isVarPathError(parsed) || parsed.isShared) continue;
+      const [root] = parsed.segments;
+      if (root !== undefined) names.add(root);
+    }
   }
   return [...names];
 }

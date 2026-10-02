@@ -42,9 +42,10 @@ describe('node reference catalog', () => {
     }
   });
 
-  it('marks crew as deprecated and others as not', () => {
-    expect(introspected.find((node) => node.type === 'crew')?.deprecated).toBe(true);
-    expect(introspected.find((node) => node.type === 'agent')?.deprecated).toBe(false);
+  it('documents the new node types and never lists the removed crew type', () => {
+    expect(introspectedTypes).toContain('knowledge-retriever');
+    expect(introspectedTypes).toContain('key-value');
+    expect(introspectedTypes).not.toContain('crew');
   });
 
   it('keeps the severe classification-decision-table caveat', () => {

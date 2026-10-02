@@ -1,0 +1,15 @@
+meta: { name: reg-triggers-__RUN__, description: "Regression: webhook, telegram and schedule triggers (push only)." }
+flow:
+  nodes:
+    __start__: { type: start }
+    Hook: { type: webhook-trigger, output_variable_path: variables.hook }
+    Tg: { type: telegram-trigger, bot_token_env: REGRESSION_FAKE_TG_TOKEN, output_variable_path: variables.tg }
+    Cron: { type: schedule-trigger, schedule: "0 9 * * MON", output_variable_path: variables.cron }
+    Log: { type: python, code: "def main():\n    return True", output_variable_path: variables.log }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Log }
+    - { from: Hook, to: Log }
+    - { from: Tg, to: Log }
+    - { from: Cron, to: Log }
+    - { from: Log, to: __end__ }

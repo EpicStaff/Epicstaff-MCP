@@ -82,3 +82,14 @@ export function isStorageFileRef(value: unknown): value is StorageFileRef {
     typeof (value as StorageFileRef).$storageFile === 'string'
   );
 }
+
+/** Prefix of every org Secret the MCP creates, so its secrets are recognisable in the UI. */
+export const SECRET_NAME_PREFIX = 'es-mcp:';
+
+/**
+ * Deterministic Secret name for the value of environment variable `envName` — the
+ * key a repush looks the secret up by, so a push never duplicates a secret.
+ */
+export function secretName(envName: string): string {
+  return `${SECRET_NAME_PREFIX}${envName}`;
+}

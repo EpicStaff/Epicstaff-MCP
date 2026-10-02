@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Knowledge / RAG API — ported from features/knowledge-sources/services/
- * {collections-api,documents-api,naive-rag,graph-rag}.service.ts.
+ * {collections-api,documents-api,naive-rag,graph-rag,rag-indexing}.service.ts.
  *
  * The RAG chain is a pipeline, not a single POST:
  * create collection → upload documents → attach strategy → trigger async indexing.
@@ -31,6 +31,22 @@ interface Paginated<T> {
   count: number;
   results: T[];
 }
+
+/** One row of `GET source-collections/{id}/available-rags/`. */
+export interface AvailableRag {
+  rag_id: number;
+  rag_type: RagType;
+  rag_status: string;
+  collection_id: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Every non-terminal-failure RAG status. The endpoint defaults to `completed,new`,
+ * which would hide a RAG that is still indexing right after a push.
+ */
+const SELECTABLE_RAG_STATUSES = 'new,processing,completed,warning,partial,outdated';
 
 /**
  * `POST naive-rag/collections/{id}/naive-rag/` response envelope.
@@ -80,7 +96,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class KnowledgeApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async listCollections(): Promise<SourceCollection[]> {
     return unwrap(
@@ -96,6 +112,13 @@ export class KnowledgeApi {
 
   async createCollection(collectionName: string): Promise<SourceCollection> {
     return this.client.post('source-collections/', { body: { collection_name: collectionName } });
+  }
+
+  /** RAGs attached to a collection that a knowledge-retriever node may search. */
+  async listAvailableRags(collectionId: number): Promise<AvailableRag[]> {
+    return this.client.get(`source-collections/${collectionId}/available-rags/`, {
+      query: { status: SELECTABLE_RAG_STATUSES },
+    });
   }
 
   /** Upload local files as collection documents (multipart `files`, like the frontend). */

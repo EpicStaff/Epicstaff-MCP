@@ -1,0 +1,11 @@
+# Invalid: a flow may not copy the MCP server's own credentials into an org secret.
+meta: { name: secret-leak-example }
+llm_configs:
+  leak: { model: __MODEL__, api_key_env: EPICSTAFF_PASSWORD }
+flow:
+  nodes:
+    __start__: { type: start }
+    Tg: { type: telegram-trigger, bot_token_env: ES_MCP_STATE_DIR }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: __end__ }

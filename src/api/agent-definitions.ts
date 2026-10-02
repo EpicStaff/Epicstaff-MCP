@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * AgentDefinition API — the NEW first-class Agent entity (CrewAI-replacement model).
@@ -56,7 +56,7 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
 }
 
 export class AgentDefinitionsApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   async list(): Promise<AgentDefinition[]> {
     return unwrap(

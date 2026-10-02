@@ -1,10 +1,12 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Session / run API — ported from the frontend's
  * features/flows/services/run-graph-session.service.ts (multipart run-session)
- * and flows-sessions.service.ts (sessions read surface), plus
- * pages/running-graph/services/answer-to-llm.service.ts.
+ * and flows-sessions.service.ts (sessions read surface).
+ *
+ * `answer-to-llm/` (the crew-based human-input reply) was removed upstream with CrewAI
+ * (EST-3849); the `wait_for_user` status still exists but has no reply endpoint.
  */
 export type GraphSessionStatus = 'run' | 'error' | 'end' | 'wait_for_user' | 'pending' | 'expired' | 'stop';
 
@@ -48,16 +50,8 @@ export interface Paginated<T> {
   results: T[];
 }
 
-export interface AnswerToLlmRequest {
-  session_id: number;
-  crew_id: number;
-  execution_order: number;
-  name: string;
-  answer: string;
-}
-
 export class SessionsApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   /**
    * POST run-session/ — multipart.
@@ -118,11 +112,6 @@ export class SessionsApi {
     return this.client.get('graph-session-messages/', {
       query: { session_id: sessionId, limit, offset },
     });
-  }
-
-  /** Respond to a wait_for_user human-input request mid-run. */
-  async answerToLlm(request: AnswerToLlmRequest): Promise<unknown> {
-    return this.client.post('answer-to-llm/', { body: request });
   }
 }
 

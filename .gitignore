@@ -4,3 +4,8 @@ node_modules/
 coverage/
 # dist/ is committed on release builds (the plugin launches dist/index.js),
 # but intermediate local builds shouldn't pollute diffs — commit dist/ deliberately.
+
+# Live-test state: lockfiles carry ids of the instance they were pushed to, and the regression
+# suite writes its scratch flows, dumps and MCP key state per run.
+_stress/flows/*/flow.lock.json
+_stress/regression/out/

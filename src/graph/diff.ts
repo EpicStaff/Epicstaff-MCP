@@ -1,7 +1,7 @@
 /**
  * Node / connection diffing between the persisted (remote) graph state and the
  * desired local state. Faithful port of frontend `visual-programming/utils/save/diff.ts`
- * (minus the excluded legacy `llm` and deprecated `code-agent` node types).
+ * (minus the excluded legacy `llm` node type).
  */
 
 import { hasPersistedWaypoints, waypointsChanged } from './edge-waypoints.js';
@@ -10,7 +10,6 @@ import type {
   AudioToTextGraphNode,
   CdtConditionGroupState,
   ClassificationDecisionTableGraphNode,
-  CrewGraphNode,
   DecisionTableGraphNode,
   EndGraphNode,
   FileExtractorGraphNode,
@@ -18,6 +17,8 @@ import type {
   GraphNode,
   GraphNodeType,
   GraphState,
+  KeyValueGraphNode,
+  KnowledgeRetrieverGraphNode,
   NoteGraphNode,
   PythonGraphNode,
   ScheduleTriggerGraphNode,
@@ -28,6 +29,7 @@ import type {
   WebhookTriggerGraphNode,
 } from './graph-state.js';
 import { toNodeMetadata } from './metadata.js';
+import { canonicalJson } from '../flow-source/lockfile.js';
 
 export interface NodeDiff<T> {
   toCreate: T[];
@@ -37,7 +39,6 @@ export interface NodeDiff<T> {
 
 export interface NodeDiffByType {
   startNodes: NodeDiff<StartGraphNode>;
-  crewNodes: NodeDiff<CrewGraphNode>;
   pythonNodes: NodeDiff<PythonGraphNode>;
   taskNodes: NodeDiff<TaskGraphNode>;
   agentNodes: NodeDiff<AgentGraphNode>;
@@ -51,6 +52,8 @@ export interface NodeDiffByType {
   decisionTableNodes: NodeDiff<DecisionTableGraphNode>;
   noteNodes: NodeDiff<NoteGraphNode>;
   classificationDecisionTableNodes: NodeDiff<ClassificationDecisionTableGraphNode>;
+  knowledgeRetrieverNodes: NodeDiff<KnowledgeRetrieverGraphNode>;
+  keyValueNodes: NodeDiff<KeyValueGraphNode>;
 }
 
 export interface ConnectionDiff {
@@ -59,8 +62,11 @@ export interface ConnectionDiff {
   toUpdate: GraphEdgeState[];
 }
 
+// Divergence: the frontend compares JSON.stringify output because both sides come from the same
+// loaded state. Here `previous` comes from the backend (Postgres jsonb reorders object keys) and
+// `current` from the compiler, so key order is compared canonically (array order still matters).
 function areEqual(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 export function buildUuidToBackendIdMap(nodes: GraphNode[]): Map<string, number> {
@@ -148,24 +154,15 @@ function toStartComparable(node: StartGraphNode): unknown {
   return { variables: node.data.initialState ?? {}, metadata: toNodeMetadata(node) };
 }
 
-function toCrewComparable(node: CrewGraphNode): unknown {
-  return {
-    node_name: node.node_name,
-    crew_id: node.data.id,
-    input_map: node.input_map || {},
-    output_variable_path: node.output_variable_path || null,
-    stream_config: node.stream_config ?? {},
-    metadata: toNodeMetadata(node),
-  };
-}
-
 function toPythonComparable(node: PythonGraphNode): unknown {
   return {
     node_name: node.node_name,
-    python_code: node.data,
+    // secret_ids order is incidental (which secret record happened to resolve first), not a
+    // real difference — sort it so two independent reconstructions of the same set don't
+    // register as a change.
+    python_code: { ...node.data, secret_ids: [...(node.data.secret_ids || [])].sort() },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
-    stream_config: node.stream_config ?? {},
     test_input: node.test_input ?? {},
     metadata: toNodeMetadata(node),
   };
@@ -253,7 +250,10 @@ function toSubgraphComparable(node: SubgraphGraphNode): unknown {
 function toWebhookComparable(node: WebhookTriggerGraphNode): unknown {
   return {
     node_name: node.node_name,
-    python_code: node.data.python_code,
+    python_code: {
+      ...node.data.python_code,
+      secret_ids: [...(node.data.python_code.secret_ids || [])].sort(),
+    },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
     webhook_trigger_path: '',
@@ -265,7 +265,7 @@ function toWebhookComparable(node: WebhookTriggerGraphNode): unknown {
 function toTelegramComparable(node: TelegramTriggerGraphNode): unknown {
   return {
     node_name: node.node_name,
-    telegram_bot_api_key: node.data.telegram_bot_api_key,
+    telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
     webhook_trigger: node.data.webhook_trigger,
     fields: node.data.fields,
     metadata: toNodeMetadata(node),
@@ -295,6 +295,34 @@ function toNoteComparable(node: NoteGraphNode): unknown {
     node_name: node.node_name,
     content: node.data.content,
     metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null },
+  };
+}
+
+function toKnowledgeRetrieverComparable(node: KnowledgeRetrieverGraphNode): unknown {
+  const data = node.data;
+  return {
+    node_name: node.node_name,
+    input_map: node.input_map || {},
+    output_variable_path: node.output_variable_path || null,
+    source_collection: data?.source_collection ?? null,
+    rag_type: data?.rag_type ?? null,
+    rag_id: data?.rag_id ?? null,
+    query: data?.query ?? '',
+    search_method: data?.search_method ?? null,
+    search_configs: data?.search_configs ?? null,
+    metadata: toNodeMetadata(node),
+  };
+}
+
+function toKeyValueComparable(node: KeyValueGraphNode): unknown {
+  return {
+    node_name: node.node_name,
+    input_map: node.input_map || {},
+    output_variable_path: node.output_variable_path || null,
+    key_value_table: node.data?.key_value_table ?? null,
+    mode: node.data?.mode ?? 'read',
+    entries: node.data?.entries ?? [],
+    metadata: toNodeMetadata(node),
   };
 }
 
@@ -350,21 +378,23 @@ function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: G
       tableData?.post_computation?.output_variable_path || tableData?.post_output_variable_path || null,
     pre_libraries: tableData?.pre_computation?.libraries || [],
     post_libraries: tableData?.post_computation?.libraries || [],
+    pre_secret_ids: [...(tableData?.pre_computation?.secret_ids || [])].sort(),
+    post_secret_ids: [...(tableData?.post_computation?.secret_ids || [])].sort(),
     metadata: toNodeMetadata(node),
   };
 }
 
 export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiffByType {
+  // Divergence: the frontend resolves route targets of BOTH sides against current.nodes, since
+  // its previous/current states share node uuids. A backend-derived previous state has its own
+  // uuids (remote-<type>-<id>), so its refs must resolve against its own nodes too; current
+  // comes first, so shared-uuid callers behave exactly as before.
+  const refNodes = [...current.nodes, ...previous.nodes];
   return {
     startNodes: diffNodesByBackendId(
       nodesByType<StartGraphNode>(previous.nodes, 'start'),
       nodesByType<StartGraphNode>(current.nodes, 'start'),
       toStartComparable
-    ),
-    crewNodes: diffNodesByBackendId(
-      nodesByType<CrewGraphNode>(previous.nodes, 'crew'),
-      nodesByType<CrewGraphNode>(current.nodes, 'crew'),
-      toCrewComparable
     ),
     pythonNodes: diffNodesByBackendId(
       nodesByType<PythonGraphNode>(previous.nodes, 'python'),
@@ -419,7 +449,7 @@ export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiff
     decisionTableNodes: diffNodesByBackendId(
       nodesByType<DecisionTableGraphNode>(previous.nodes, 'decision-table'),
       nodesByType<DecisionTableGraphNode>(current.nodes, 'decision-table'),
-      (node) => toDecisionTableComparable(node, current.nodes)
+      (node) => toDecisionTableComparable(node, refNodes)
     ),
     noteNodes: diffNodesByBackendId(
       nodesByType<NoteGraphNode>(previous.nodes, 'note'),
@@ -429,7 +459,17 @@ export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiff
     classificationDecisionTableNodes: diffNodesByBackendId(
       nodesByType<ClassificationDecisionTableGraphNode>(previous.nodes, 'classification-decision-table'),
       nodesByType<ClassificationDecisionTableGraphNode>(current.nodes, 'classification-decision-table'),
-      (node) => toCdtComparable(node, current.nodes)
+      (node) => toCdtComparable(node, refNodes)
+    ),
+    knowledgeRetrieverNodes: diffNodesByBackendId(
+      nodesByType<KnowledgeRetrieverGraphNode>(previous.nodes, 'knowledge-retriever'),
+      nodesByType<KnowledgeRetrieverGraphNode>(current.nodes, 'knowledge-retriever'),
+      toKnowledgeRetrieverComparable
+    ),
+    keyValueNodes: diffNodesByBackendId(
+      nodesByType<KeyValueGraphNode>(previous.nodes, 'key-value'),
+      nodesByType<KeyValueGraphNode>(current.nodes, 'key-value'),
+      toKeyValueComparable
     ),
   };
 }

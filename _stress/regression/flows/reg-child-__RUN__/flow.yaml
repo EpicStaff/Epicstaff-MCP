@@ -1,0 +1,10 @@
+meta: { name: reg-child-__RUN__, description: Regression subgraph child - doubles x. }
+variables: { x: { default: 0 } }
+flow:
+  nodes:
+    __start__: { type: start }
+    Double: { type: python, code: "def main(x):\n    return int(x) * 2", input_map: { x: variables.x }, output_variable_path: variables.doubled }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Double }
+    - { from: Double, to: __end__ }

@@ -28,7 +28,7 @@ import type { GraphDto } from '../models/graph.js';
 import type { AgentNodeDto, AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import type { ClassificationDecisionTableNodeDto } from '../models/nodes/classification-decision-table-node.js';
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
-import type { CustomPythonCode, GetPythonCodeDto } from '../models/nodes/python-node.js';
+import type { CustomPythonCode, DeclaredSecretRef, GetPythonCodeDto } from '../models/nodes/python-node.js';
 import type { ScheduleTriggerNodeDto } from '../models/nodes/schedule-trigger-node.js';
 import type {
   CdtTableState,
@@ -84,7 +84,15 @@ function baseNode(type: GraphNodeType, dto: BaseDtoFields): GraphNodeBase {
   };
 }
 
-/** Rebuild `CustomPythonCode` in canonical key order; `name` is absent from the read shape. */
+/** Frontend `toSecretIds`: the write-side ids of a code block's declared secrets. */
+function toSecretIds(secrets: DeclaredSecretRef[] | undefined): number[] {
+  return (secrets ?? []).map((secret) => secret.id);
+}
+
+/**
+ * Rebuild `CustomPythonCode` in canonical key order; `name` is absent from the read shape.
+ * `secret_ids` goes last — the diff comparable appends it there when a desired state omits it.
+ */
 function toCustomPythonCode(code: GetPythonCodeDto, fallbackName: string): CustomPythonCode {
   const withName = code as GetPythonCodeDto & { name?: string };
   return {
@@ -93,15 +101,8 @@ function toCustomPythonCode(code: GetPythonCodeDto, fallbackName: string): Custo
     libraries: withName.libraries,
     code: withName.code,
     entrypoint: withName.entrypoint,
+    secret_ids: toSecretIds(withName.secrets),
   };
-}
-
-function crewIdOf(crew: unknown): number {
-  if (typeof crew === 'number') return crew;
-  if (typeof crew === 'object' && crew !== null && typeof (crew as { id?: unknown }).id === 'number') {
-    return (crew as { id: number }).id;
-  }
-  return 0;
 }
 
 function toAgentTasks(dto: AgentNodeDto): AgentNodeTaskUi[] {
@@ -176,6 +177,7 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
   const prompts: CdtTableState['prompts'] = {};
   for (const config of dto.prompt_configs ?? []) {
     prompts[config.prompt_key] = {
+      backendId: config.id,
       prompt_text: config.prompt_text,
       llm_config: config.llm_config,
       output_schema: config.output_schema,
@@ -189,7 +191,8 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
       group_name: group.group_name,
       order: group.order,
       expression: group.expression,
-      prompt_id: group.prompt_id,
+      // Mirrors the frontend load mapper: the group's prompt key, looked up by prompt id.
+      prompt_id: (dto.prompt_configs ?? []).find((config) => config.id === group.prompt)?.prompt_key ?? null,
       manipulation: group.manipulation,
       continue_flag: group.continue_flag,
       route_code: group.route_code,
@@ -208,12 +211,14 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
       libraries: dto.pre_python_code?.libraries ?? [],
       input_map: dto.pre_input_map ?? {},
       output_variable_path: dto.pre_output_variable_path ?? null,
+      secret_ids: toSecretIds(dto.pre_python_code?.secrets),
     },
     post_computation: {
       code: dto.post_python_code?.code ?? '',
       libraries: dto.post_python_code?.libraries ?? [],
       input_map: dto.post_input_map ?? {},
       output_variable_path: dto.post_output_variable_path ?? null,
+      secret_ids: toSecretIds(dto.post_python_code?.secrets),
     },
   };
 }
@@ -228,7 +233,6 @@ function buildUuidByBackendId(dto: GraphDto): Map<number, string> {
   };
 
   register('start', dto.start_node_list);
-  register('crew', dto.crew_node_list);
   register('python', dto.python_node_list);
   register('task', dto.task_node_list);
   register('agent', dto.agent_node_list);
@@ -242,6 +246,8 @@ function buildUuidByBackendId(dto: GraphDto): Map<number, string> {
   register('decision-table', dto.decision_table_node_list);
   register('note', dto.graph_note_list);
   register('classification-decision-table', dto.classification_decision_table_node_list);
+  register('knowledge-retriever', dto.knowledge_node_list);
+  register('key-value', dto.key_value_node_list);
 
   return uuidByBackendId;
 }
@@ -286,14 +292,6 @@ export function buildRemoteState(dto: GraphDto): GraphState {
         data: { initialState: node.variables ?? {} },
       })
     ),
-    ...(dto.crew_node_list ?? []).map(
-      (node): GraphNode => ({
-        ...baseNode('crew', node),
-        type: 'crew',
-        data: { id: crewIdOf(node.crew) },
-        ...(node.stream_config !== undefined ? { stream_config: node.stream_config } : {}),
-      })
-    ),
     ...(dto.python_node_list ?? []).map(
       (node): GraphNode => ({
         ...baseNode('python', node),
@@ -302,7 +300,6 @@ export function buildRemoteState(dto: GraphDto): GraphState {
           ...toCustomPythonCode(node.python_code, node.node_name),
           ...(node.use_storage !== undefined ? { use_storage: node.use_storage } : {}),
         },
-        ...(node.stream_config !== undefined ? { stream_config: node.stream_config } : {}),
         test_input: node.test_input ?? {},
       })
     ),
@@ -367,7 +364,7 @@ export function buildRemoteState(dto: GraphDto): GraphState {
         ...baseNode('telegram-trigger', node),
         type: 'telegram-trigger',
         data: {
-          telegram_bot_api_key: node.telegram_bot_api_key,
+          telegram_bot_api_key_secret_id: node.telegram_bot_api_key_secret_id ?? null,
           webhook_trigger: node.webhook_trigger ?? null,
           fields: (node.fields ?? []).map((field) => ({
             ...(field.id !== undefined ? { id: field.id } : {}),
@@ -409,6 +406,35 @@ export function buildRemoteState(dto: GraphDto): GraphState {
         ...baseNode('classification-decision-table', node),
         type: 'classification-decision-table',
         data: { table: toCdtTableState(node, uuidOf) },
+      })
+    ),
+    ...(dto.knowledge_node_list ?? []).map(
+      (node): GraphNode => ({
+        ...baseNode('knowledge-retriever', node),
+        type: 'knowledge-retriever',
+        data: {
+          source_collection: node.source_collection ?? null,
+          rag_type: node.rag_type ?? null,
+          rag_id: node.rag_id ?? null,
+          query: node.query ?? '',
+          // search_method is write-only on the backend; the read-back search_configs
+          // carries the effective graph method, so recover it from there.
+          search_method: node.search_method ?? node.search_configs?.graph?.search_method ?? null,
+          search_configs: node.search_configs ?? null,
+        },
+      })
+    ),
+    ...(dto.key_value_node_list ?? []).map(
+      (node): GraphNode => ({
+        ...baseNode('key-value', node),
+        type: 'key-value',
+        data: {
+          key_value_table: node.key_value_table ?? null,
+          mode: node.mode ?? 'read',
+          entries: node.entries ?? [],
+        },
+        // No key-value mode writes an output; read values go to each entry's own path.
+        output_variable_path: null,
       })
     ),
   ];

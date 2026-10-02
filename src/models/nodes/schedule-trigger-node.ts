@@ -1,4 +1,4 @@
-/** Ported from frontend `models/schedule-trigger.model.ts` + `buildScheduleBlock` in `utils/save/payload.ts`. */
+/** Ported from frontend `visual-programming/core/models/schedule-trigger.model.ts` + `buildScheduleBlock` in `visual-programming/utils/save/payload.ts`. */
 
 import type { NodeDtoMetadata } from '../graph.js';
 
