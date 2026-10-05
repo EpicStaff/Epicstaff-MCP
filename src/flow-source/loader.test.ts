@@ -100,6 +100,20 @@ describe('loadFlowDirectory', () => {
     expect(diagnostic.message).toContain("'task' nodes");
   });
 
+  it("rejects the 'key-value' node type — EpicStaff 1.2.x has no Key-Value tables", async () => {
+    const { source, diagnostics } = await loadFlowDirectory(fixture('invalid-key-value-node'));
+
+    // Parsed loosely so the rest of the file is still validated; never silently dropped.
+    expect(source).not.toBeNull();
+    expect(hasErrors(diagnostics)).toBe(true);
+    expect(diagnostics).toHaveLength(1);
+    const diagnostic = diagnostics[0]!;
+    expect(diagnostic.severity).toBe('error');
+    expect(diagnostic.path).toBe('flow.nodes.remember.type');
+    expect(diagnostic.file).toBe('flow.yaml');
+    expect(diagnostic.message).toContain('key-value nodes need EpicStaff 1.3+; this is MCP 1.2.x for EpicStaff 1.2.x');
+  });
+
   it('reports a duplicate symbolic name across split files', async () => {
     const { source, diagnostics } = await loadFlowDirectory(fixture('invalid-duplicate-name'));
 

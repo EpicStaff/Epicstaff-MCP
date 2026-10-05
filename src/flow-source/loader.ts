@@ -396,6 +396,15 @@ function collectNodeTypeDiagnostics(source: FlowSource, provenance: ProvenanceMa
           file,
         ),
       );
+    } else if (node.type === 'key-value') {
+      diagnostics.push(
+        makeError(
+          `${nodePath}.type`,
+          'key-value nodes need EpicStaff 1.3+; this is MCP 1.2.x for EpicStaff 1.2.x (no Key-Value tables). ' +
+            'To keep a value across runs, declare it under variables: with persist: user | organization instead.',
+          file,
+        ),
+      );
     } else if (node.type === 'python') {
       const hasCode = node.code !== undefined;
       const hasCodeFile = node.code_file !== undefined;

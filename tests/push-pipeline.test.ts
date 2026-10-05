@@ -49,7 +49,6 @@ class MockBackend {
   /** When true, POST agent-definitions/ fails (simulates a failure late in the entity walk). */
   failAgentCreate = false;
   secrets: Array<{ id: number; name: string; tail: string }> = [];
-  keyValueTables: Array<{ id: number; name: string }> = [];
   availableRags = new Map<number, Array<{ rag_id: number; rag_type: string; rag_status: string; created_at: string }>>();
 
   private id(): number {
@@ -88,13 +87,6 @@ class MockBackend {
       this.secrets.push(secret);
       return { status: 201, body: secret };
     }
-    if (key === 'GET /api/key-value-tables/')
-      return { status: 200, body: { count: this.keyValueTables.length, results: this.keyValueTables } };
-    if (key === 'POST /api/key-value-tables/') {
-      const table = { id: this.id(), name: (body as { name: string }).name };
-      this.keyValueTables.push(table);
-      return { status: 201, body: table };
-    }
     if (/^GET \/api\/source-collections\/\d+\/available-rags\/$/.test(key)) {
       return { status: 200, body: this.availableRags.get(Number(path.split('/')[3])) ?? [] };
     }
@@ -118,7 +110,7 @@ class MockBackend {
     if (listed) return { status: 200, body: this.rows.get(listed[1]!) ?? [] };
     if (key === 'GET /api/embedding-configs/')
       return { status: 200, body: [{ id: 71, custom_name: 'default-embedder', model: 20 }] };
-    // Mirrors DefaultModelsSerializer: the org default embedder is memory_embedding_config.
+    // Mirrors DefaultModelsSerializer: the instance default embedder is memory_embedding_config.
     if (key === 'GET /api/default-models/')
       return { status: 200, body: { agent_llm_config: null, memory_embedding_config: 71 } };
 
@@ -293,7 +285,6 @@ class MockBackend {
       'graph_note_list',
       'schedule_trigger_node_list',
       'knowledge_node_list',
-      'key_value_node_list',
     ];
     for (const listKey of listKeys) {
       const kept = ((previous?.[listKey] as Array<Record<string, unknown>> | undefined) ?? []).filter(
@@ -626,7 +617,7 @@ describe('push pipeline (mock backend)', () => {
     expect(backend.savedGraphPayloads.length).toBe(0);
   });
 
-  describe('secrets, key-value tables and knowledge-retriever RAGs', () => {
+  describe('secrets and knowledge-retriever RAGs', () => {
     const OPENAI_ENV = 'PUSH_TEST_OPENAI_KEY';
     const BOT_ENV = 'PUSH_TEST_BOT_TOKEN';
     const OPENAI_VALUE = 'sk-test-0123456789abcd';
@@ -661,12 +652,6 @@ describe('push pipeline (mock backend)', () => {
               '      query: "{topic}"',
               '      input_map: { topic: variables.topic }',
               '      output_variable_path: variables.legacy',
-              '    remember:',
-              '      type: key-value',
-              '      table: Research Memory',
-              '      mode: write',
-              '      entries:',
-              '        - { key: last_summary, value: variables.summary }',
               '',
             ].join('\n'),
           ),
@@ -721,18 +706,12 @@ describe('push pipeline (mock backend)', () => {
       expect(lockText).not.toContain(BOT_VALUE);
     });
 
-    it('creates the key-value table once and addresses both knowledge RAGs by id', async () => {
+    it('addresses both knowledge RAGs by id and never touches Key-Value tables (not in EpicStaff 1.2.x)', async () => {
       await pushOnce();
 
-      expect(backend.keyValueTables.map((table) => table.name)).toStrictEqual(['Research Memory']);
-      const table = backend.keyValueTables[0]!;
       const saved = backend.savedGraphPayloads[0] as Record<string, Array<Record<string, unknown>>>;
-      expect(saved.key_value_node_list![0]).toMatchObject({
-        key_value_table: table.id,
-        mode: 'write',
-        output_variable_path: null,
-        entries: [{ key: 'last_summary', value: 'variables.summary' }],
-      });
+      expect(saved).not.toHaveProperty('key_value_node_list');
+      expect(backend.received.some((r) => r.path.startsWith('/api/key-value-tables/'))).toBe(false);
 
       const lock = (await readLock(flowDir))!;
       const localRagId = lock.entities['knowledge.docs#rag']!.backendId;
@@ -752,17 +731,17 @@ describe('push pipeline (mock backend)', () => {
       });
     });
 
-    it('repush reuses the secrets and table by name — no duplicates, no node changes', async () => {
+    it('repush reuses the secrets by name — no duplicates, no node changes', async () => {
       await pushOnce();
       const { entityResult } = await pushOnce();
 
       expect(backend.secrets).toHaveLength(2);
-      expect(backend.keyValueTables).toHaveLength(1);
       expect(backend.received.filter((r) => r.path === '/api/secrets/' && r.method === 'POST')).toHaveLength(2);
-      const ensured = entityResult.actions.filter((action) => action.kind === 'secret' || action.kind === 'key_value_table');
+      const ensured = entityResult.actions.filter((action) => action.kind === 'secret');
+      expect(ensured).toHaveLength(2);
       expect(ensured.every((action) => action.action === 'reused')).toBe(true);
 
-      // The nodes that reference secrets / tables / RAGs diff clean against the remote:
+      // The nodes that reference secrets / RAGs diff clean against the remote:
       // nothing to save at all.
       expect(backend.savedGraphPayloads).toHaveLength(1);
     });

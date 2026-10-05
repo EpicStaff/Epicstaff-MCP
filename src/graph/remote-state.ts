@@ -247,7 +247,6 @@ function buildUuidByBackendId(dto: GraphDto): Map<number, string> {
   register('note', dto.graph_note_list);
   register('classification-decision-table', dto.classification_decision_table_node_list);
   register('knowledge-retriever', dto.knowledge_node_list);
-  register('key-value', dto.key_value_node_list);
 
   return uuidByBackendId;
 }
@@ -422,19 +421,6 @@ export function buildRemoteState(dto: GraphDto): GraphState {
           search_method: node.search_method ?? node.search_configs?.graph?.search_method ?? null,
           search_configs: node.search_configs ?? null,
         },
-      })
-    ),
-    ...(dto.key_value_node_list ?? []).map(
-      (node): GraphNode => ({
-        ...baseNode('key-value', node),
-        type: 'key-value',
-        data: {
-          key_value_table: node.key_value_table ?? null,
-          mode: node.mode ?? 'read',
-          entries: node.entries ?? [],
-        },
-        // No key-value mode writes an output; read values go to each entry's own path.
-        output_variable_path: null,
       })
     ),
   ];

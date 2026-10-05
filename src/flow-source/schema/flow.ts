@@ -5,6 +5,8 @@
  * Node types `llm`, `code-agent` and `crew` are parsed loosely (so the rest of
  * the file can still be validated) but always rejected with an ERROR diagnostic
  * by the loader — EpicStaff no longer has them (`crew` was removed in EST-3849).
+ * `key-value` is rejected the same way: EpicStaff 1.2.x has no Key-Value tables or
+ * nodes (they arrive in 1.3), and this MCP line targets 1.2.x.
  */
 import { z } from 'zod';
 
@@ -35,14 +37,15 @@ export const FLOW_NODE_TYPES = [
   'classification-decision-table',
   'audio-to-text',
   'knowledge-retriever',
-  'key-value',
 ] as const;
 
 /**
- * Legacy node types that are never accepted — the loader turns them into ERROR
- * diagnostics that name the replacement (see `loader.ts`).
+ * Node types that are never accepted — the loader turns them into ERROR diagnostics
+ * that name the replacement (see `loader.ts`): the legacy `llm` / `code-agent` / `crew`,
+ * and `key-value`, which needs EpicStaff 1.3+ (no `key_value_node_list` at 1.2.x — the
+ * backend would silently drop such nodes on save).
  */
-export const FORBIDDEN_NODE_TYPES = ['llm', 'code-agent', 'crew'] as const;
+export const FORBIDDEN_NODE_TYPES = ['llm', 'code-agent', 'crew', 'key-value'] as const;
 
 export type ForbiddenNodeType = (typeof FORBIDDEN_NODE_TYPES)[number];
 
@@ -299,41 +302,11 @@ export const knowledgeRetrieverNodeSchema = z.strictObject({
   output_variable_path: outputVariablePathField,
 });
 
-export const keyValueEntrySchema = z.strictObject({
-  key: z
-    .string()
-    .min(1)
-    .describe(
-      'Stored key. Letters, digits and _ (not starting with a digit), plus {variables.<path>} placeholders, ' +
-        'e.g. "profile_{variables.user_id}".',
-    ),
-  value: z
-    .string()
-    .optional()
-    .describe(
-      'Flow-state path. read: where the stored value is written (no |default). ' +
-        'write: where the value to store is read from (may end in |default). Omit for delete.',
-    ),
-});
-
-export const keyValueNodeSchema = z.strictObject({
-  type: z.literal('key-value'),
-  position: positionField,
-  table: z
-    .string()
-    .min(1)
-    .describe('Name of the organization Key-Value table. Created on push when no table with this name exists.'),
-  mode: z.enum(['read', 'write', 'delete']).default('read').describe('What the node does with its entries.'),
-  entries: z
-    .array(keyValueEntrySchema)
-    .default([])
-    .describe('Keys to read / write / delete (at most 500).'),
-});
-
-/** Legacy types — parse loosely so the loader can emit a precise ERROR diagnostic. */
+/** Forbidden types — parse loosely so the loader can emit a precise ERROR diagnostic. */
 const forbiddenLlmNodeSchema = z.object({ type: z.literal('llm') }).passthrough();
 const forbiddenCodeAgentNodeSchema = z.object({ type: z.literal('code-agent') }).passthrough();
 const forbiddenCrewNodeSchema = z.object({ type: z.literal('crew') }).passthrough();
+const forbiddenKeyValueNodeSchema = z.object({ type: z.literal('key-value') }).passthrough();
 
 export const nodeSchema = z
   .discriminatedUnion('type', [
@@ -352,10 +325,10 @@ export const nodeSchema = z
     classificationDecisionTableNodeSchema,
     audioToTextNodeSchema,
     knowledgeRetrieverNodeSchema,
-    keyValueNodeSchema,
     forbiddenLlmNodeSchema,
     forbiddenCodeAgentNodeSchema,
     forbiddenCrewNodeSchema,
+    forbiddenKeyValueNodeSchema,
   ])
   .describe('A flow node, discriminated by its "type" field.');
 
@@ -364,7 +337,6 @@ export type AgentNodeSource = z.infer<typeof agentNodeSchema>;
 export type TaskNodeSource = z.infer<typeof taskNodeSchema>;
 export type PythonNodeSource = z.infer<typeof pythonNodeSchema>;
 export type KnowledgeRetrieverNodeSource = z.infer<typeof knowledgeRetrieverNodeSchema>;
-export type KeyValueNodeSource = z.infer<typeof keyValueNodeSchema>;
 /** A node of a writable type — forbidden legacy types excluded. */
 export type WritableNodeSource = Exclude<NodeSource, { type: ForbiddenNodeType }>;
 

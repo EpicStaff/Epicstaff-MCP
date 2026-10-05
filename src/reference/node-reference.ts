@@ -133,16 +133,4 @@ export const NODE_REFERENCE: Record<FlowNodeType, NodeReference> = {
         'such a node is re-sent (unchanged) on every push.',
     ],
   },
-  'key-value': {
-    summary:
-      'Reads, writes or deletes keys of an organization Key-Value table (persistent across sessions and flows).',
-    whenToUse:
-      'Remembering small values between runs (user profiles, counters, cached results) without a python node.',
-    caveats: [
-      'The table is org-wide and shared by every flow that names it; it is created on push when missing.',
-      'read: each entry\'s value is the state path the stored value is written to (None when the key is ' +
-        'missing, no |default). write: value is the state path to store (may end in |default). delete: key only.',
-      'Keys use letters, digits and _ plus {variables.<path>} placeholders; the node writes no output_variable_path.',
-    ],
-  },
 };

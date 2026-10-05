@@ -1,6 +1,6 @@
 /**
  * AgentNode (NEW agent model) — one agent over an ordered list of sub-tasks.
- * Ported from frontend `visual-programming/core/models/agent-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`.
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/agent-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`.
  */
 
 import type { NodeDtoMetadata } from '../graph.js';

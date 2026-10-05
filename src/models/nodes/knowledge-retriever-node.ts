@@ -1,7 +1,7 @@
 /**
  * Knowledge-retriever node — searches one RAG of a source collection and writes the
  * joined results to `output_variable_path`. Wire list is `knowledge_node_list`.
- * Ported from frontend `visual-programming/core/models/knowledge-retriever-node.model.ts`,
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/knowledge-retriever-node.model.ts`,
  * `shared/models/agent-search-config.model.ts`, and the bulk-save emission in
  * `visual-programming/utils/save/payload.ts`.
  */

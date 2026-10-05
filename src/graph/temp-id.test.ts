@@ -64,7 +64,6 @@ function makeGraphDto(partial: Partial<GraphDto>): GraphDto {
     graph_note_list: [],
     schedule_trigger_node_list: [],
     knowledge_node_list: [],
-    key_value_node_list: [],
     ...partial,
   };
 }
@@ -163,16 +162,11 @@ describe('applySaveResponse', () => {
     );
   });
 
-  it('maps created knowledge-retriever and key-value nodes from their own response lists', () => {
+  it('maps created knowledge-retriever nodes from their own response list', () => {
     const retriever: GraphState['nodes'][number] = {
       ...baseNode('kr-a', null, 'Retrieve'),
       type: 'knowledge-retriever',
       data: { source_collection: 1, rag_type: 'naive', rag_id: 2, query: 'q', search_method: null, search_configs: null },
-    };
-    const keyValue: GraphState['nodes'][number] = {
-      ...baseNode('kv-a', null, 'Remember'),
-      type: 'key-value',
-      data: { key_value_table: 3, mode: 'delete', entries: [{ key: 'k' }] },
     };
     const response = makeGraphDto({
       knowledge_node_list: [
@@ -190,28 +184,10 @@ describe('applySaveResponse', () => {
           rag_id: 2,
         },
       ],
-      key_value_node_list: [
-        {
-          id: 61,
-          graph: 42,
-          node_name: 'Remember',
-          input_map: {},
-          output_variable_path: null,
-          metadata: {},
-          key_value_table: 3,
-          mode: 'delete',
-          entries: [{ key: 'k' }],
-        },
-      ],
     });
 
-    const mapping = applySaveResponse({ nodes: [retriever, keyValue], edges: [] }, { nodes: [], edges: [] }, response);
-    expect(mapping).toStrictEqual(
-      new Map([
-        ['kr-a', 60],
-        ['kv-a', 61],
-      ])
-    );
+    const mapping = applySaveResponse({ nodes: [retriever], edges: [] }, { nodes: [], edges: [] }, response);
+    expect(mapping).toStrictEqual(new Map([['kr-a', 60]]));
   });
 
   it('round-trips: applying the mapping makes a re-save produce an empty payload', async () => {

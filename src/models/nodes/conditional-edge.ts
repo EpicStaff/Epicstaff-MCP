@@ -1,7 +1,7 @@
 /**
  * Conditional edge — part of `GraphDto` (`conditional_edge_list`). Not emitted by the
  * bulk-save builder (the frontend persists conditional edges through dedicated endpoints).
- * Ported from frontend `visual-programming/core/models/conditional-edge.model.ts`.
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/conditional-edge.model.ts`.
  */
 
 import type { CustomPythonCode, GetPythonCodeDto } from './python-node.js';

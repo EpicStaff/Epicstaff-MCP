@@ -64,7 +64,6 @@ const mFileExtractor = meta(0, 700);
 const mAudio = meta(0, 800);
 const mEnd = meta(900, 0);
 const mKnowledge = meta(0, 900);
-const mKeyValue = meta(0, 1000);
 
 const uuidTask = remoteNodeUuid('task', 5);
 const uuidAgent = remoteNodeUuid('agent', 6);
@@ -116,19 +115,6 @@ function makeDto(): GraphDto {
         query: '{q}',
         rag_type: 'naive',
         rag_id: 81,
-      },
-    ],
-    key_value_node_list: [
-      {
-        id: 17,
-        node_name: 'Remember',
-        graph: 42,
-        input_map: {},
-        output_variable_path: null,
-        key_value_table: 4,
-        mode: 'read',
-        entries: [{ key: 'last_topic', value: 'variables.previous' }],
-        metadata: mKeyValue,
       },
     ],
     python_node_list: [
@@ -524,11 +510,6 @@ function makeDesired(): GraphState {
           search_method: null,
           search_configs: null,
         },
-      },
-      {
-        ...desiredBase('key-value', 17, 'Remember', mKeyValue),
-        type: 'key-value',
-        data: { key_value_table: 4, mode: 'read', entries: [{ key: 'last_topic', value: 'variables.previous' }] },
       },
     ],
     edges: [

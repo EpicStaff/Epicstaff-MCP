@@ -25,8 +25,8 @@ const EPICSTAFF_INSTRUCTIONS = [
   '',
   'Invariants: agent nodes need at least one task (tasks:); no parallel fan-out — one active path,',
   'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
-  '"crew" (removed from EpicStaff — use agent/task nodes). A key-value node writes its read entries',
-  'to their own state paths, not output_variable_path. Credentials come from env vars',
+  '"crew" (removed from EpicStaff — use agent/task nodes), nor "key-value" (needs EpicStaff 1.3+;',
+  'this MCP 1.2.x targets EpicStaff 1.2.x). Credentials come from env vars',
   '(api_key_env, bot_token_env) and are stored as org secrets on push — never in flow source;',
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
   'llm_configs follow the backend bounds: temperature 0–2, max_tokens >= 500.',
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
   const server = new McpServer(
     {
       name: 'epicstaff',
-      version: '1.3.0-dev.1',
+      version: '1.2.0',
     },
     { instructions: EPICSTAFF_INSTRUCTIONS },
   );

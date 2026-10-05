@@ -4,7 +4,7 @@
  * reference position either resolved or already produced an error.
  *
  * Mirrors the backend `SurfaceValidator`
- * (src/django_app/tables/validators/surface_validator.py) for the checks that
+ * (src/django_app/agents/validators/surface_validator.py) for the checks that
  * are decidable locally:
  *  - no duplicate tool / knowledge-collection references within one surface;
  *  - a knowledge search config must match the collection's RAG strategy
@@ -23,7 +23,6 @@
  */
 import { makeError, makeWarning, type Diagnostic } from '../flow-source/diagnostics.js';
 import type { ResolvedFlow } from '../flow-source/resolver.js';
-import { validateKeyValueEntries } from './key-value-entries.js';
 import type {
   CatalogSurfaceSource,
   EntityRef,
@@ -45,7 +44,6 @@ export function validateFlow(source: FlowSource, resolved: ResolvedFlow): Diagno
   validateOwnerAgentAttachments(source, diagnostics);
   validateTopology(source, diagnostics);
   validateKnowledgeRetrieverNodes(source, diagnostics);
-  validateKeyValueNodes(source, diagnostics);
   validateUnusedEntities(source, resolved, diagnostics);
   return diagnostics;
 }
@@ -108,33 +106,6 @@ function validateKnowledgeRetrieverNodes(source: FlowSource, diagnostics: Diagno
       diagnostics.push(
         makeWarning(nodePath, 'knowledge-retriever node has no output_variable_path — its search results are discarded'),
       );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// key-value: backend KeyValueEntriesValidator mirror
-// ---------------------------------------------------------------------------
-
-const PULL_PLACEHOLDER_NAMES: ReadonlySet<string> = new Set(['UNRESOLVED', 'UNASSIGNED']);
-
-function validateKeyValueNodes(source: FlowSource, diagnostics: Diagnostic[]): void {
-  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
-    if (node.type !== 'key-value') continue;
-    const nodePath = `flow.nodes.${nodeName}`;
-    // pull_flow writes these placeholders for a node without a (resolvable) table; the push
-    // would otherwise CREATE a table by that name.
-    if (PULL_PLACEHOLDER_NAMES.has(node.table)) {
-      diagnostics.push(
-        makeError(`${nodePath}.table`, `'${node.table}' is a pull_flow placeholder — set the Key-Value table name`),
-      );
-    }
-    if (node.entries.length === 0) {
-      diagnostics.push(makeWarning(`${nodePath}.entries`, 'key-value node has no entries — it does nothing at run time'));
-    }
-    for (const issue of validateKeyValueEntries(node.mode, node.entries)) {
-      const at = issue.index === null ? `${nodePath}.entries` : `${nodePath}.entries[${issue.index}]`;
-      diagnostics.push(makeError(at, issue.message));
     }
   }
 }

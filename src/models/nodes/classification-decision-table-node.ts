@@ -1,5 +1,5 @@
 /**
- * Ported from frontend `visual-programming/core/models/classification-decision-table-node.model.ts` +
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/classification-decision-table-node.model.ts` +
  * `buildCdtNodePayload` in `visual-programming/utils/save/payload.ts`.
  */
 

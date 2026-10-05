@@ -7,8 +7,7 @@
  *
  * Strategy — SHALLOW PULL: every referenced entity (agent definition, surface,
  * llm config, python/MCP tool, knowledge collection, subgraph flow) is
- * written as an `{existing: "<remote name>"}` reference; a key-value node names its
- * table directly. Those entities exist
+ * written as an `{existing: "<remote name>"}` reference. Those entities exist
  * remotely by definition, so referencing them is both simpler and safer than
  * re-authoring: the next push resolves them by name, never re-creates them,
  * and no entity content hashes have to be reconstructed — which guarantees an
@@ -49,7 +48,6 @@ import type { ClassificationDecisionTableNodeDto } from '../models/nodes/classif
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
 import type { EndNodeDto } from '../models/nodes/end-node.js';
 import type { FileExtractorNodeDto } from '../models/nodes/file-extractor-node.js';
-import type { KeyValueNodeDto } from '../models/nodes/key-value-node.js';
 import type { KnowledgeRetrieverNodeDto } from '../models/nodes/knowledge-retriever-node.js';
 import type { GraphNoteDto } from '../models/nodes/note-node.js';
 import type { PythonNodeDto } from '../models/nodes/python-node.js';
@@ -60,7 +58,6 @@ import type { InlineSurface, TaskNodeDto } from '../models/nodes/task-node.js';
 import type { TelegramTriggerNodeDto } from '../models/nodes/telegram-trigger-node.js';
 import type { WebhookTriggerNodeDto } from '../models/nodes/webhook-trigger-node.js';
 import type { AgentDefinition } from '../api/agent-definitions.js';
-import type { KeyValueTable } from '../api/key-value-tables.js';
 import type { LlmConfig } from '../api/llm.js';
 import type { SourceCollection } from '../api/knowledge.js';
 import type { Surface } from '../api/surfaces.js';
@@ -99,10 +96,6 @@ export interface DecompilerKnowledgeApi {
   listCollections(): Promise<SourceCollection[]>;
 }
 
-export interface DecompilerKeyValueTablesApi {
-  list(): Promise<KeyValueTable[]>;
-}
-
 export interface DecompilerDeps {
   graphs: DecompilerGraphsApi;
   agentDefinitions: DecompilerAgentDefinitionsApi;
@@ -110,7 +103,6 @@ export interface DecompilerDeps {
   llm: DecompilerLlmApi;
   tools: DecompilerToolsApi;
   knowledge: DecompilerKnowledgeApi;
-  keyValueTables: DecompilerKeyValueTablesApi;
 }
 
 export interface DecompileResult {
@@ -250,7 +242,6 @@ interface ReferencedEntityNames {
   mcpTools: Map<number, string>;
   collections: Map<number, string>;
   subgraphs: Map<number, string>;
-  keyValueTables: Map<number, string>;
 }
 
 async function fetchReferencedEntityNames(
@@ -281,10 +272,9 @@ async function fetchReferencedEntityNames(
     inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0) ||
     (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
   const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
-  const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
 
   const emptyMap = (): Map<number, string> => new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] =
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames] =
     await Promise.all([
       mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
       mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
@@ -316,9 +306,6 @@ async function fetchReferencedEntityNames(
       needsGraphList
         ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name])))
         : Promise.resolve(emptyMap()),
-      needsKeyValueTables
-        ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name])))
-        : Promise.resolve(emptyMap()),
     ]);
 
   // Nested subgraph_detail objects resolve names without the extra list call.
@@ -329,7 +316,7 @@ async function fetchReferencedEntityNames(
     }
   }
 
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs };
 }
 
 async function mapFromFetches<T>(
@@ -360,8 +347,7 @@ type NodeDtoEntry =
   | { type: 'schedule-trigger'; dto: ScheduleTriggerNodeDto }
   | { type: 'decision-table'; dto: DecisionTableNodeDto }
   | { type: 'classification-decision-table'; dto: ClassificationDecisionTableNodeDto }
-  | { type: 'knowledge-retriever'; dto: KnowledgeRetrieverNodeDto }
-  | { type: 'key-value'; dto: KeyValueNodeDto };
+  | { type: 'knowledge-retriever'; dto: KnowledgeRetrieverNodeDto };
 
 interface CollectedNode {
   entry: NodeDtoEntry;
@@ -443,7 +429,6 @@ function collectNodes(dto: GraphDto, warnings: string[]): NodeRegistry {
     ...(dto.knowledge_node_list ?? []).map(
       (node): NodeDtoEntry => ({ type: 'knowledge-retriever', dto: node }),
     ),
-    ...(dto.key_value_node_list ?? []).map((node): NodeDtoEntry => ({ type: 'key-value', dto: node })),
   ];
 
   const sorted = [...entries].sort(
@@ -814,9 +799,6 @@ function buildNodeBody(
 
     case 'knowledge-retriever':
       return buildKnowledgeRetrieverBody(entry.dto, name, position, names, warnings);
-
-    case 'key-value':
-      return buildKeyValueBody(entry.dto, name, position, names, warnings);
   }
 }
 
@@ -860,31 +842,6 @@ function buildKnowledgeRetrieverBody(
     ...(Object.keys(searchConfigs).length > 0 ? { search_configs: searchConfigs } : {}),
     ...inputMapField(dto.input_map, atPath, warnings),
     ...outputVariablePathField(dto.output_variable_path),
-  };
-}
-
-function buildKeyValueBody(
-  dto: KeyValueNodeDto,
-  name: string,
-  position: { x: number; y: number },
-  names: ReferencedEntityNames,
-  warnings: string[],
-): YamlObject {
-  const atPath = `flow.nodes.${name}`;
-  const tableName =
-    dto.key_value_table == null
-      ? missingName('key-value table (none selected on the remote node)', atPath, warnings)
-      : (names.keyValueTables.get(dto.key_value_table) ??
-        missingName(`key-value table #${dto.key_value_table}`, atPath, warnings));
-  const mode = dto.mode ?? 'read';
-  return {
-    type: 'key-value',
-    position,
-    table: tableName,
-    mode,
-    entries: (dto.entries ?? []).map((entry) =>
-      mode === 'delete' || !('value' in entry) ? { key: entry.key } : { key: entry.key, value: entry.value },
-    ),
   };
 }
 

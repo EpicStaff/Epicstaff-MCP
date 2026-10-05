@@ -133,7 +133,6 @@ function buildGraphDto(): GraphDto {
     graph_note_list: [],
     schedule_trigger_node_list: [],
     knowledge_node_list: [],
-    key_value_node_list: [],
   };
 }
 
@@ -189,7 +188,6 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
     llm: { listConfigs: async () => [] },
     tools: { listPythonCodeTools: async () => [], listMcpTools: async () => [] },
     knowledge: { listCollections: async () => [{ collection_id: 8, collection_name: 'Handbook' }] },
-    keyValueTables: { list: async () => [{ id: 4, name: 'User Profiles' }] },
   };
 }
 
@@ -335,7 +333,7 @@ describe('decompileFlow', () => {
     });
   });
 
-  it('pulls knowledge-retriever and key-value nodes and recompiles them with zero errors', async () => {
+  it('pulls knowledge-retriever nodes and recompiles them with zero errors', async () => {
     const dto = buildGraphDto();
     // TO wire shape: no crew_node_list at all (removed upstream).
     expect(dto).not.toHaveProperty('crew_node_list');
@@ -354,21 +352,8 @@ describe('decompileFlow', () => {
         rag_id: 81,
       },
     ];
-    dto.key_value_node_list = [
-      {
-        id: 7,
-        graph: 42,
-        node_name: 'remember',
-        input_map: {},
-        output_variable_path: null,
-        key_value_table: 4,
-        mode: 'write',
-        entries: [{ key: 'last_{variables.topic}', value: 'variables.research' }],
-        metadata: nodeMetadata(900, 600, 7),
-      },
-    ];
     const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
-    expect(result.warnings.filter((warning) => warning.includes('retrieve') || warning.includes('remember'))).toEqual([]);
+    expect(result.warnings.filter((warning) => warning.includes('retrieve'))).toEqual([]);
 
     const { source, diagnostics } = await loadFlowDirectory(targetDir);
     expect(diagnostics).toEqual([]);
@@ -383,14 +368,7 @@ describe('decompileFlow', () => {
       input_map: { question: 'variables.topic' },
       output_variable_path: 'variables.docs',
     });
-    expect(source!.flow.nodes['remember']).toMatchObject({
-      type: 'key-value',
-      table: 'User Profiles',
-      mode: 'write',
-      entries: [{ key: 'last_{variables.topic}', value: 'variables.research' }],
-    });
     expect(result.lock.entities['nodes.retrieve']?.backendId).toBe(6);
-    expect(result.lock.entities['nodes.remember']?.backendId).toBe(7);
 
     const artifact = await compileFlow(targetDir);
     expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);

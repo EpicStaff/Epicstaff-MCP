@@ -40,7 +40,11 @@ export interface CreateLlmConfigRequest {
   is_visible?: boolean;
 }
 
-/** `GET default-models/` — the active org's default model picks (DefaultModelsSerializer). */
+/**
+ * `GET default-models/` — the default model picks (DefaultModelsSerializer). At EpicStaff 1.2.x this is
+ * one instance-wide singleton shared by every organization (writable by superadmins only), so an id
+ * here may belong to another org — callers must check it against the active org's own lists.
+ */
 export interface DefaultModels {
   agent_llm_config: number | null;
   agent_fcm_llm_config: number | null;
@@ -98,9 +102,9 @@ export class LlmApi {
 }
 
 /**
- * Resolve "the org default embedder" to an embedding-config id: the org's default
- * embedding config (`default-models/` → `memory_embedding_config`) when set, else the
- * sole config. Errors when the choice is genuinely undecidable.
+ * Resolve "the default embedder" to an embedding-config id: the instance default embedding
+ * config (`default-models/` → `memory_embedding_config`) when it is one of the active org's
+ * configs, else the org's sole config. Errors when the choice is genuinely undecidable.
  */
 export async function resolveDefaultEmbeddingConfigId(llm: LlmApi): Promise<number> {
   const [configs, defaults] = await Promise.all([llm.listEmbeddingConfigs(), llm.getDefaultModels()]);
@@ -120,7 +124,7 @@ export async function resolveDefaultEmbeddingConfigId(llm: LlmApi): Promise<numb
     .filter(Boolean)
     .join(', ');
   throw new Error(
-    'Cannot pick a default embedding config: the organization has several and no default embedding ' +
-      `config is set (Settings → Default models). Name one explicitly: ${available}.`,
+    'Cannot pick a default embedding config: the organization has several and the instance default ' +
+      `embedding config (Settings → Default models) is unset or not one of them. Name one explicitly: ${available}.`,
   );
 }

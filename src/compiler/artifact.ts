@@ -56,7 +56,6 @@ export function collectRefs(value: unknown, into: Set<string> = new Set()): Set<
 
 export type EntityKind =
   | 'secret'
-  | 'key_value_table'
   | 'llm_config'
   | 'tool_config'
   | 'python_code_tool'
@@ -72,9 +71,9 @@ export type EntityAction =
   /** `existing:` reference — look up by name remotely; never created or modified. */
   | 'resolve-existing'
   /**
-   * Org-level resource identified by name (secrets, key-value tables): look it up by
-   * name on EVERY push and create it only when missing. Never cached in the lockfile —
-   * the remote row may have been deleted or (for secrets) must be re-verified.
+   * Org-level resource identified by name (secrets): look it up by name on EVERY push
+   * and create it only when missing. Never cached in the lockfile — the remote row may
+   * have been deleted and must be re-verified.
    */
   | 'ensure';
 

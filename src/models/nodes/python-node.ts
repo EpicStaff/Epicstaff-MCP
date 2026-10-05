@@ -1,6 +1,6 @@
 /**
- * Ported from frontend `visual-programming/core/models/python-node.model.ts`,
- * `shared/models/tools/python-code.model.ts`, and the bulk-save emission in
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/python-node.model.ts`,
+ * `features/tools/models/python-code.model.ts`, and the bulk-save emission in
  * `visual-programming/utils/save/payload.ts` (which sends `python_code` = node data minus `use_storage`).
  */
 

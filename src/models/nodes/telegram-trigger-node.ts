@@ -1,4 +1,4 @@
-/** Ported from frontend `visual-programming/core/models/telegram-trigger.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
+/** Ported from frontend `pages/flows-page/components/flow-visual-programming/models/telegram-trigger.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
 import type { NodeDtoMetadata } from '../graph.js';
 import type { WebhookTriggerRef } from './webhook-trigger-node.js';

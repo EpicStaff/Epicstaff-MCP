@@ -6,8 +6,8 @@ import type {
   ClassificationDecisionTableGraphNode,
   DecisionTableGraphNode,
   GraphNodeBase,
+  FileExtractorGraphNode,
   GraphState,
-  KeyValueGraphNode,
   NoteGraphNode,
   PythonGraphNode,
   StartGraphNode,
@@ -55,7 +55,6 @@ const emptyDeleted = {
   graph_note_ids: [],
   classification_decision_table_node_ids: [],
   knowledge_node_ids: [],
-  key_value_node_ids: [],
   edge_ids: [],
 };
 
@@ -94,10 +93,9 @@ describe('buildBulkSavePayload', () => {
       ...remoteNote,
       data: { content: 'hello', backgroundColor: '#222222' },
     };
-    const keyValueNode: KeyValueGraphNode = {
-      ...baseNode('kv-1', 4, 'Remember', 800, 0),
-      type: 'key-value',
-      data: { key_value_table: 9, mode: 'read', entries: [{ key: 'k', value: 'variables.v' }] },
+    const fileExtractorNode: FileExtractorGraphNode = {
+      ...baseNode('fe-1', 4, 'Extract', 800, 0),
+      type: 'file-extractor',
     };
     const agentNode: AgentGraphNode = {
       ...baseNode('agent-temp-1', null, 'Agent', 250, 120),
@@ -163,10 +161,10 @@ describe('buildBulkSavePayload', () => {
     };
 
     const remote: GraphState = {
-      nodes: [startNode, pythonNode, taskNode, remoteNote, keyValueNode],
+      nodes: [startNode, pythonNode, taskNode, remoteNote, fileExtractorNode],
       edges: [
         { sourceNodeId: 'start-1', targetNodeId: 'py-1', backendId: 100, metadata: {} },
-        { sourceNodeId: 'py-1', targetNodeId: 'kv-1', backendId: 101, metadata: {} },
+        { sourceNodeId: 'py-1', targetNodeId: 'fe-1', backendId: 101, metadata: {} },
       ],
     };
     const desired: GraphState = {
@@ -274,12 +272,11 @@ describe('buildBulkSavePayload', () => {
       ],
       classification_decision_table_node_list: [],
       knowledge_node_list: [],
-      key_value_node_list: [],
       edge_list: [
         { graph: 42, start_node_id: 2, end_temp_id: 'agent-temp-1' },
         { graph: 42, start_temp_id: 'agent-temp-1', end_node_id: 5, metadata: { waypoints: [{ x: 10, y: 20 }] } },
       ],
-      deleted: { ...emptyDeleted, key_value_node_ids: [4], edge_ids: [101] },
+      deleted: { ...emptyDeleted, file_extractor_node_ids: [4], edge_ids: [101] },
     });
   });
 
@@ -453,11 +450,6 @@ describe('buildBulkSavePayload', () => {
           search_configs: { graph: { search_method: 'local', local: { top_k_entities: 5 } } },
         },
       },
-      keyValue: {
-        ...baseNode('kv-new', null, 'Store', 0, 7),
-        type: 'key-value',
-        data: { key_value_table: 4, mode: 'write', entries: [{ key: 'profile_{variables.id}', value: 'variables.p' }] },
-      },
       scheduleDraft: {
         ...baseNode('sched-draft', null, 'Draft schedule', 0, 8),
         type: 'schedule-trigger',
@@ -617,22 +609,11 @@ describe('buildBulkSavePayload', () => {
         metadata: metadataOf(nodes.knowledge),
       },
     ]);
-    expect(payload.key_value_node_list).toStrictEqual([
-      {
-        id: null,
-        temp_id: 'kv-new',
-        node_name: 'Store',
-        graph: 42,
-        input_map: {},
-        output_variable_path: null,
-        key_value_table: 4,
-        mode: 'write',
-        entries: [{ key: 'profile_{variables.id}', value: 'variables.p' }],
-        metadata: metadataOf(nodes.keyValue),
-      },
-    ]);
     // Removed upstream: never on the wire any more.
     expect(payload).not.toHaveProperty('crew_node_list');
+    // Not in EpicStaff 1.2.x (no key_value_node_list in NODE_TYPE_REGISTRY): never on the wire.
+    expect(payload).not.toHaveProperty('key_value_node_list');
+    expect(payload.deleted).not.toHaveProperty('key_value_node_ids');
     expect(payload.deleted).not.toHaveProperty('crew_node_ids');
     expect(payload.deleted).not.toHaveProperty('code_agent_node_ids');
     expect(payload.schedule_trigger_node_list).toStrictEqual([

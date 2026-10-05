@@ -1,6 +1,6 @@
 /**
- * Ported from frontend `visual-programming/core/models/webhook-trigger.ts`,
- * `shared/models/webhook-trigger/webhook-trigger.model.ts`, and the bulk-save
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/webhook-trigger.ts`,
+ * `visual-programming/core/models/webhook-trigger.model.ts`, and the bulk-save
  * emission in `visual-programming/utils/save/payload.ts` (which always sends `webhook_trigger_path: ''`).
  */
 
@@ -42,9 +42,9 @@ export interface WebhookTriggerModel {
 }
 
 /**
- * `webhook_trigger` on a trigger node. The frontend types it `number | WebhookTriggerModel`,
- * but both the node serializers (bulk-save) and `GET graphs/{id}/` use a primary-key field
- * at TO — the nested form is only returned by the per-node read endpoints. MCP only ever
+ * `webhook_trigger` on a trigger node. The v1.2.1 frontend node models type it
+ * `WebhookTriggerModel | null`, but both the node serializers (bulk-save) and `GET graphs/{id}/`
+ * use a primary-key field — the nested form is only returned by the per-node read endpoints. MCP only ever
  * reads the graph and writes via bulk-save, so the id is the whole contract.
  */
 export type WebhookTriggerRef = number;

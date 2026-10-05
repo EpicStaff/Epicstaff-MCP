@@ -272,7 +272,8 @@ export class AuthService implements UserSession {
       tokens = await this.client.post<LoginResponse>('auth/login/', {
         skipAuth: true,
         // remember_me: the refresh cookie lives for REFRESH_TOKEN_LIFETIME instead of 30 minutes,
-        // so later processes refresh instead of logging in again.
+        // so later processes refresh instead of logging in again. EpicStaff 1.2.x ignores the field
+        // (its cookie always lives REFRESH_TOKEN_LIFETIME) — harmless; kept for 1.3+ backends.
         body: { email, password, remember_me: true },
         onResponseHeaders: (headers) => {
           refreshCookie = refreshTokenFromCookies(headers);

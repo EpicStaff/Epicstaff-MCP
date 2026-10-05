@@ -10,7 +10,6 @@
  */
 
 import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
-import type { KeyValueNodeData } from '../models/nodes/key-value-node.js';
 import type { KnowledgeRetrieverNodeData } from '../models/nodes/knowledge-retriever-node.js';
 import type { CustomPythonCode } from '../models/nodes/python-node.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
@@ -128,12 +127,6 @@ export interface TelegramTriggerGraphNode extends GraphNodeBase {
 export interface KnowledgeRetrieverGraphNode extends GraphNodeBase {
   type: 'knowledge-retriever';
   data: KnowledgeRetrieverNodeData;
-}
-
-/** Mirrors the frontend's `KeyValueNodeModel` data. */
-export interface KeyValueGraphNode extends GraphNodeBase {
-  type: 'key-value';
-  data: KeyValueNodeData;
 }
 
 /** Mirrors the frontend's `ScheduleTriggerNodeData` draft state. */
@@ -264,8 +257,7 @@ export type GraphNode =
   | ScheduleTriggerGraphNode
   | DecisionTableGraphNode
   | ClassificationDecisionTableGraphNode
-  | KnowledgeRetrieverGraphNode
-  | KeyValueGraphNode;
+  | KnowledgeRetrieverGraphNode;
 
 export type GraphNodeType = GraphNode['type'];
 
