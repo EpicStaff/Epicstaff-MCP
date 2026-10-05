@@ -28898,7 +28898,8 @@ var AuthService = class {
       tokens = await this.client.post("auth/login/", {
         skipAuth: true,
         // remember_me: the refresh cookie lives for REFRESH_TOKEN_LIFETIME instead of 30 minutes,
-        // so later processes refresh instead of logging in again.
+        // so later processes refresh instead of logging in again. EpicStaff 1.2.x ignores the field
+        // (its cookie always lives REFRESH_TOKEN_LIFETIME) — harmless; kept for 1.3+ backends.
         body: { email: email2, password, remember_me: true },
         onResponseHeaders: (headers) => {
           refreshCookie = refreshTokenFromCookies(headers);
@@ -29576,7 +29577,7 @@ async function resolveDefaultEmbeddingConfigId(llm) {
   if (configs.length === 1) return configs[0].id;
   const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
   throw new Error(
-    `Cannot pick a default embedding config: the organization has several and no default embedding config is set (Settings \u2192 Default models). Name one explicitly: ${available}.`
+    `Cannot pick a default embedding config: the organization has several and the instance default embedding config (Settings \u2192 Default models) is unset or not one of them. Name one explicitly: ${available}.`
   );
 }
 
@@ -29832,7 +29833,7 @@ var catalogSurfaceSchema = external_exports.strictObject({
 var surfacesSectionSchema = external_exports.record(symbolicNameSchema, catalogSurfaceSchema).default({}).describe("Catalog surfaces, keyed by symbolic name.");
 
 // src/flow-source/schema/flow.ts
-var FORBIDDEN_NODE_TYPES = ["llm", "code-agent", "crew"];
+var FORBIDDEN_NODE_TYPES = ["llm", "code-agent", "crew", "key-value"];
 var FORBIDDEN_NODE_TYPE_SET = new Set(FORBIDDEN_NODE_TYPES);
 function isForbiddenNodeType(type) {
   return FORBIDDEN_NODE_TYPE_SET.has(type);
@@ -29981,24 +29982,10 @@ var knowledgeRetrieverNodeSchema = external_exports.strictObject({
   input_map: inputMapField,
   output_variable_path: outputVariablePathField
 });
-var keyValueEntrySchema = external_exports.strictObject({
-  key: external_exports.string().min(1).describe(
-    'Stored key. Letters, digits and _ (not starting with a digit), plus {variables.<path>} placeholders, e.g. "profile_{variables.user_id}".'
-  ),
-  value: external_exports.string().optional().describe(
-    "Flow-state path. read: where the stored value is written (no |default). write: where the value to store is read from (may end in |default). Omit for delete."
-  )
-});
-var keyValueNodeSchema = external_exports.strictObject({
-  type: external_exports.literal("key-value"),
-  position: positionField,
-  table: external_exports.string().min(1).describe("Name of the organization Key-Value table. Created on push when no table with this name exists."),
-  mode: external_exports.enum(["read", "write", "delete"]).default("read").describe("What the node does with its entries."),
-  entries: external_exports.array(keyValueEntrySchema).default([]).describe("Keys to read / write / delete (at most 500).")
-});
 var forbiddenLlmNodeSchema = external_exports.object({ type: external_exports.literal("llm") }).passthrough();
 var forbiddenCodeAgentNodeSchema = external_exports.object({ type: external_exports.literal("code-agent") }).passthrough();
 var forbiddenCrewNodeSchema = external_exports.object({ type: external_exports.literal("crew") }).passthrough();
+var forbiddenKeyValueNodeSchema = external_exports.object({ type: external_exports.literal("key-value") }).passthrough();
 var nodeSchema = external_exports.discriminatedUnion("type", [
   startNodeSchema,
   agentNodeSchema,
@@ -30015,10 +30002,10 @@ var nodeSchema = external_exports.discriminatedUnion("type", [
   classificationDecisionTableNodeSchema,
   audioToTextNodeSchema,
   knowledgeRetrieverNodeSchema,
-  keyValueNodeSchema,
   forbiddenLlmNodeSchema,
   forbiddenCodeAgentNodeSchema,
-  forbiddenCrewNodeSchema
+  forbiddenCrewNodeSchema,
+  forbiddenKeyValueNodeSchema
 ]).describe('A flow node, discriminated by its "type" field.');
 function isWritableNode(node) {
   return !isForbiddenNodeType(node.type);
@@ -30073,7 +30060,7 @@ var naiveRagConfigSchema = external_exports.strictObject({
 var graphRagConfigSchema = external_exports.strictObject({
   strategy: external_exports.literal("graph").describe("Graph RAG: entity/community graph built over the documents."),
   llm_config: entityRef("LLM config used to build and query the knowledge graph.").optional(),
-  embedder: external_exports.string().optional().describe("Embedding config name on the backend. Org default when omitted."),
+  embedder: external_exports.string().optional().describe("Embedding config name on the backend. Instance default (or the org's only config) when omitted."),
   chunk_size: external_exports.number().int().min(100).max(1e4).optional().describe("Chunk size in tokens fed to graph extraction. Backend default (1200) when omitted."),
   chunk_overlap: external_exports.number().int().min(0).max(5e3).optional().describe("Overlap in tokens between consecutive chunks. Backend default (100) when omitted."),
   entity_types: external_exports.array(external_exports.string().min(1)).nonempty().optional().describe(
@@ -30485,6 +30472,14 @@ function collectNodeTypeDiagnostics(source, provenance) {
           file
         )
       );
+    } else if (node.type === "key-value") {
+      diagnostics.push(
+        makeError(
+          `${nodePath}.type`,
+          "key-value nodes need EpicStaff 1.3+; this is MCP 1.2.x for EpicStaff 1.2.x (no Key-Value tables). To keep a value across runs, declare it under variables: with persist: user | organization instead.",
+          file
+        )
+      );
     } else if (node.type === "python") {
       const hasCode = node.code !== void 0;
       const hasCodeFile = node.code_file !== void 0;
@@ -30737,154 +30732,13 @@ function knownNamesHint(section, known) {
   return `known ${SECTION_LABELS[section]}s: ${shown.join(", ")}${suffix}`;
 }
 
-// src/compiler/key-value-entries.ts
-var KEY_VALUE_MAX_ENTRIES = 500;
-var KEY_VALUE_MAX_KEY_LENGTH = 512;
-var KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-var STATE_PATH = /^variables\.\w+(?:\.\w+|\[(?:0|[1-9]\d*)\])*$/;
-var PATH_NAME = /\w+/g;
-var PATH_SEGMENT = /\w+|\[(?:0|[1-9]\d*)\]/g;
-var PLACEHOLDER = /\{([^{}]+)\}/g;
-var DOTDICT_METHOD_NAMES = /* @__PURE__ */ new Set([
-  "add_property",
-  "add_setter",
-  "clear",
-  "copy",
-  "deep_dump",
-  "fromkeys",
-  "get",
-  "items",
-  "keys",
-  "model_dump",
-  "pop",
-  "popitem",
-  "setdefault",
-  "update",
-  "values"
-]);
-function validateKeyValueEntries(mode, entries) {
-  const issues = [];
-  if (entries.length > KEY_VALUE_MAX_ENTRIES) {
-    issues.push({ index: null, message: `A Key-Value node can have at most ${KEY_VALUE_MAX_ENTRIES} keys.` });
-  }
-  const writtenKeys = /* @__PURE__ */ new Map();
-  const readTargets = [];
-  entries.forEach((entry, index) => {
-    let error2 = entryError(mode, entry);
-    if (error2 === null && mode === "write") {
-      error2 = duplicateKeyError(entry.key, index, writtenKeys);
-    } else if (error2 === null && mode === "read") {
-      error2 = targetConflictError((entry.value ?? "").trim(), index, readTargets);
-    }
-    if (error2 !== null) {
-      issues.push({ index, message: error2 });
-    }
-  });
-  return issues;
-}
-function entryError(mode, entry) {
-  if (mode === "delete" && entry.value !== void 0) {
-    return "unknown fields ['value'] for mode 'delete'.";
-  }
-  if (entry.key.trim() === "") {
-    return "'key' must be a non-empty string.";
-  }
-  if (mode !== "delete" && (entry.value === void 0 || entry.value.trim() === "")) {
-    return "'value' must be a non-empty string.";
-  }
-  if (entry.key.length > KEY_VALUE_MAX_KEY_LENGTH) {
-    return `'key' must be at most ${KEY_VALUE_MAX_KEY_LENGTH} characters.`;
-  }
-  const keyError = keyTemplateError(entry.key);
-  if (keyError !== null || mode === "delete") {
-    return keyError;
-  }
-  const path6 = (entry.value ?? "").trim();
-  if (mode === "read" && path6.includes("|")) {
-    return "'value' is where the stored value goes: use a plain state path like 'variables.user.name', without '|default'.";
-  }
-  return statePathError(path6.split("|", 1)[0] ?? "", "'value'");
-}
-function keyTemplateError(key) {
-  const leftover = key.replace(PLACEHOLDER, "");
-  if (leftover.includes("{") || leftover.includes("}")) {
-    return "'key' has an empty or unbalanced placeholder; use '{variables.<path>}', e.g. 'profile_{variables.user.id}'.";
-  }
-  for (const match of key.matchAll(PLACEHOLDER)) {
-    const path6 = (match[1] ?? "").trim();
-    const error2 = statePathError(path6, `'key' placeholder '${path6}'`);
-    if (error2 !== null) {
-      return error2;
-    }
-  }
-  if (!KEY_PATTERN.test(key.replace(PLACEHOLDER, "_"))) {
-    return "'key' must use only letters, digits and _ outside {placeholders}, and must not start with a digit, e.g. 'profile_{variables.user.id}'.";
-  }
-  return null;
-}
-function duplicateKeyError(key, index, writtenKeys) {
-  const first = writtenKeys.get(key);
-  if (first === void 0) {
-    writtenKeys.set(key, index);
-    return null;
-  }
-  return `key '${key}' is already written by entry ${first}; use a different key.`;
-}
-function targetConflictError(target, index, readTargets) {
-  const segments = target.match(PATH_SEGMENT) ?? [];
-  for (const earlier of readTargets) {
-    const shared = Math.min(segments.length, earlier.segments.length);
-    if (segments.slice(0, shared).join("\0") !== earlier.segments.slice(0, shared).join("\0")) {
-      continue;
-    }
-    if (segments.length === earlier.segments.length) {
-      return `'${target}' is already filled by entry ${earlier.index}; use a different variable.`;
-    }
-    if (segments.length > shared) {
-      return `'${target}' is inside '${earlier.target}' (entry ${earlier.index}); use a different variable.`;
-    }
-    return `'${target}' contains '${earlier.target}' (entry ${earlier.index}); use a different variable.`;
-  }
-  readTargets.push({ segments, target, index });
-  return null;
-}
-function statePathError(statePath, label) {
-  if (!STATE_PATH.test(statePath)) {
-    return `${label} must be a state path like 'variables.user.name'.`;
-  }
-  for (const name of statePath.match(PATH_NAME) ?? []) {
-    if (name.startsWith("_")) {
-      return `${label} names '${name}'; use a variable name without the leading '_'.`;
-    }
-    if (DOTDICT_METHOD_NAMES.has(name)) {
-      return `${label} names '${name}', a built-in method; use a different variable name.`;
-    }
-  }
-  return null;
-}
-function keyPlaceholderPaths(key) {
-  return [...key.matchAll(PLACEHOLDER)].map((match) => (match[1] ?? "").trim());
-}
-
 // src/compiler/node-io.ts
 function nodeWritePaths(node, nodePath) {
-  if (node.type === "key-value") {
-    if (node.mode !== "read") return [];
-    return node.entries.flatMap(
-      (entry, index) => entry.value !== void 0 ? [{ at: `${nodePath}.entries[${index}].value`, path: entry.value }] : []
-    );
-  }
   const writePath = node.output_variable_path;
   if (typeof writePath !== "string" || writePath.trim() === "") return [];
   return [{ at: `${nodePath}.output_variable_path`, path: writePath }];
 }
 function nodeReadPaths(node, nodePath) {
-  if (node.type === "key-value") {
-    return node.entries.flatMap((entry, index) => [
-      ...keyPlaceholderPaths(entry.key).map((path6) => ({ at: `${nodePath}.entries[${index}].key`, path: path6 })),
-      ...node.mode === "write" && entry.value !== void 0 ? [{ at: `${nodePath}.entries[${index}].value`, path: entry.value }] : []
-    ]);
-  }
   const inputMap = node.input_map ?? {};
   return Object.entries(inputMap).map(([key, path6]) => ({ at: `${nodePath}.input_map.${key}`, path: path6 }));
 }
@@ -31463,17 +31317,6 @@ function toKnowledgeRetrieverComparable(node) {
     metadata: toNodeMetadata(node)
   };
 }
-function toKeyValueComparable(node) {
-  return {
-    node_name: node.node_name,
-    input_map: node.input_map || {},
-    output_variable_path: node.output_variable_path || null,
-    key_value_table: node.data?.key_value_table ?? null,
-    mode: node.data?.mode ?? "read",
-    entries: node.data?.entries ?? [],
-    metadata: toNodeMetadata(node)
-  };
-}
 function toCdtComparable(node, allNodes) {
   const tableData = node.data?.table;
   const resolveRef = (uuid2) => {
@@ -31600,11 +31443,6 @@ function getNodeDiff(previous, current) {
       nodesByType(previous.nodes, "knowledge-retriever"),
       nodesByType(current.nodes, "knowledge-retriever"),
       toKnowledgeRetrieverComparable
-    ),
-    keyValueNodes: diffNodesByBackendId(
-      nodesByType(previous.nodes, "key-value"),
-      nodesByType(current.nodes, "key-value"),
-      toKeyValueComparable
     )
   };
 }
@@ -31740,7 +31578,6 @@ function applySaveResponse(desired, remote, response) {
     response.knowledge_node_list ?? [],
     existingIdsByType("knowledge-retriever")
   );
-  mapByNewIds(nodeDiff.keyValueNodes.toCreate, response.key_value_node_list ?? [], existingIdsByType("key-value"));
   return mapping;
 }
 
@@ -31803,8 +31640,7 @@ var LAYOUT_NODE_TYPES = {
   SUBGRAPH: "subgraph",
   AUDIO_TO_TEXT: "audio-to-text-node",
   SCHEDULE_TRIGGER: "schedule-trigger",
-  KNOWLEDGE_RETRIEVER: "knowledge-retriever",
-  KEY_VALUE: "key-value"
+  KNOWLEDGE_RETRIEVER: "knowledge-retriever"
 };
 var GRID_CELL_SIZE = 20;
 var HORIZONTAL_GAP = 360;
@@ -32137,8 +31973,7 @@ var NODE_COLORS = {
   "decision-table": "#00aaff",
   // frontend NodeType.TABLE
   "classification-decision-table": "#2a5bd7",
-  "knowledge-retriever": "#D9D9DE",
-  "key-value": "#14B8A6"
+  "knowledge-retriever": "#D9D9DE"
 };
 var NODE_ICONS = {
   start: "ti ti-player-play-filled",
@@ -32155,8 +31990,7 @@ var NODE_ICONS = {
   "schedule-trigger": "ti ti-calendar",
   "decision-table": "ti ti-table",
   "classification-decision-table": "ti ti-table-options",
-  "knowledge-retriever": "ti ti-books",
-  "key-value": "ti ti-database"
+  "knowledge-retriever": "ti ti-books"
 };
 var DEFAULT_NODE_SIZE = { width: 320, height: 80 };
 var NODE_SIZES = {
@@ -32179,23 +32013,16 @@ var LAYOUT_TYPE_BY_NODE_TYPE = {
   "decision-table": LAYOUT_NODE_TYPES.TABLE,
   // 'table' — enum value differs
   "classification-decision-table": LAYOUT_NODE_TYPES.CLASSIFICATION_TABLE,
-  "knowledge-retriever": LAYOUT_NODE_TYPES.KNOWLEDGE_RETRIEVER,
-  "key-value": LAYOUT_NODE_TYPES.KEY_VALUE
+  "knowledge-retriever": LAYOUT_NODE_TYPES.KNOWLEDGE_RETRIEVER
 };
 var RefRegistry = class {
   existingBySection = /* @__PURE__ */ new Map();
   /** Environment variable names a credential is read from — one Secret each. */
   secretEnvNames = /* @__PURE__ */ new Set();
-  keyValueTableNames = /* @__PURE__ */ new Set();
   /** `{$ref}` to the org Secret holding the value of environment variable `envName`. */
   secret(envName) {
     this.secretEnvNames.add(envName);
     return { $ref: entityKey("secrets", envName) };
-  }
-  /** `{$ref}` to the org Key-Value table named `tableName`. */
-  keyValueTable(tableName) {
-    this.keyValueTableNames.add(tableName);
-    return { $ref: entityKey("key_value_tables", tableName) };
   }
   secretPlans() {
     return [...this.secretEnvNames].sort().map((envName) => ({
@@ -32206,17 +32033,6 @@ var RefRegistry = class {
       action: "ensure",
       remoteName: secretName(envName),
       payload: { name: secretName(envName), value: { $env: envName } }
-    }));
-  }
-  keyValueTablePlans() {
-    return [...this.keyValueTableNames].sort().map((tableName) => ({
-      key: entityKey("key_value_tables", tableName),
-      section: "key_value_tables",
-      name: tableName,
-      kind: "key_value_table",
-      action: "ensure",
-      remoteName: tableName,
-      payload: { name: tableName }
     }));
   }
   ref(section, entityRef2) {
@@ -32802,21 +32618,6 @@ Expected output: ${node.expected_output}` : node.task;
         });
         break;
       }
-      case "key-value":
-        nodes.push({
-          ...base,
-          type: "key-value",
-          // The backend always stores null — no key-value mode writes a node output.
-          output_variable_path: null,
-          data: {
-            key_value_table: registry2.keyValueTable(node.table),
-            mode: node.mode,
-            entries: node.entries.map(
-              (entry) => node.mode === "delete" ? { key: entry.key } : { key: entry.key, value: (entry.value ?? "").trim() }
-            )
-          }
-        });
-        break;
       default: {
         invariant(false, `unhandled node type '${node.type}'`);
       }
@@ -32910,9 +32711,8 @@ async function emitFlow(source, flowDir) {
   );
   applyLayout(source, nodes, layoutConnections);
   const entities = [
-    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    // Secrets are leaves: nothing they hold references another entity.
     ...registry2.secretPlans(),
-    ...registry2.keyValueTablePlans(),
     ...registry2.existingPlans("llm_configs", "llm_config"),
     ...llmPlans,
     ...registry2.existingPlans("tools.tool_configs", "tool_config"),
@@ -32967,7 +32767,6 @@ function validateFlow(source, resolved) {
   validateOwnerAgentAttachments(source, diagnostics);
   validateTopology(source, diagnostics);
   validateKnowledgeRetrieverNodes(source, diagnostics);
-  validateKeyValueNodes(source, diagnostics);
   validateUnusedEntities(source, resolved, diagnostics);
   return diagnostics;
 }
@@ -33020,25 +32819,6 @@ function validateKnowledgeRetrieverNodes(source, diagnostics) {
       diagnostics.push(
         makeWarning(nodePath, "knowledge-retriever node has no output_variable_path \u2014 its search results are discarded")
       );
-    }
-  }
-}
-var PULL_PLACEHOLDER_NAMES = /* @__PURE__ */ new Set(["UNRESOLVED", "UNASSIGNED"]);
-function validateKeyValueNodes(source, diagnostics) {
-  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
-    if (node.type !== "key-value") continue;
-    const nodePath = `flow.nodes.${nodeName}`;
-    if (PULL_PLACEHOLDER_NAMES.has(node.table)) {
-      diagnostics.push(
-        makeError(`${nodePath}.table`, `'${node.table}' is a pull_flow placeholder \u2014 set the Key-Value table name`)
-      );
-    }
-    if (node.entries.length === 0) {
-      diagnostics.push(makeWarning(`${nodePath}.entries`, "key-value node has no entries \u2014 it does nothing at run time"));
-    }
-    for (const issue2 of validateKeyValueEntries(node.mode, node.entries)) {
-      const at = issue2.index === null ? `${nodePath}.entries` : `${nodePath}.entries[${issue2.index}]`;
-      diagnostics.push(makeError(at, issue2.message));
     }
   }
 }
@@ -33502,9 +33282,8 @@ async function fetchReferencedEntityNames(deps, dto) {
   const needsMcpTools = inlineSurfaces.some((surface) => (surface.mcp_tools ?? []).length > 0);
   const needsCollections = inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0) || (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
   const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
-  const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
   const emptyMap = () => /* @__PURE__ */ new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] = await Promise.all([
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames] = await Promise.all([
     mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
     mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
     needsLlmConfigs ? deps.llm.listConfigs().then((configs) => new Map(configs.map((config2) => [config2.id, config2.custom_name]))) : Promise.resolve(emptyMap()),
@@ -33515,8 +33294,7 @@ async function fetchReferencedEntityNames(deps, dto) {
         list.map((collection) => [collection.collection_id ?? collection.id, collection.collection_name]).filter((pair) => typeof pair[0] === "number")
       )
     ) : Promise.resolve(emptyMap()),
-    needsGraphList ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name]))) : Promise.resolve(emptyMap()),
-    needsKeyValueTables ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name]))) : Promise.resolve(emptyMap())
+    needsGraphList ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name]))) : Promise.resolve(emptyMap())
   ]);
   const subgraphs = new Map(graphNames);
   for (const node of dto.subgraph_node_list) {
@@ -33524,7 +33302,7 @@ async function fetchReferencedEntityNames(deps, dto) {
       subgraphs.set(node.subgraph, node.subgraph_detail.name);
     }
   }
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs };
 }
 async function mapFromFetches(ids, fetchOne, nameOf) {
   const pairs = await Promise.all(ids.map(async (id) => [id, nameOf(await fetchOne(id))]));
@@ -33586,8 +33364,7 @@ function collectNodes(dto, warnings) {
     ),
     ...(dto.knowledge_node_list ?? []).map(
       (node) => ({ type: "knowledge-retriever", dto: node })
-    ),
-    ...(dto.key_value_node_list ?? []).map((node) => ({ type: "key-value", dto: node }))
+    )
   ];
   const sorted = [...entries].sort(
     (a, b) => nodeNumberOf(metadataOf(a.dto)) - nodeNumberOf(metadataOf(b.dto))
@@ -33876,8 +33653,6 @@ function buildNodeBody(collected, registry2, names, warnings) {
       return buildClassificationBody(entry.dto, name, position, registry2, names, warnings);
     case "knowledge-retriever":
       return buildKnowledgeRetrieverBody(entry.dto, name, position, names, warnings);
-    case "key-value":
-      return buildKeyValueBody(entry.dto, name, position, names, warnings);
   }
 }
 function buildKnowledgeRetrieverBody(dto, name, position, names, warnings) {
@@ -33907,20 +33682,6 @@ function buildKnowledgeRetrieverBody(dto, name, position, names, warnings) {
     ...Object.keys(searchConfigs).length > 0 ? { search_configs: searchConfigs } : {},
     ...inputMapField2(dto.input_map, atPath, warnings),
     ...outputVariablePathField2(dto.output_variable_path)
-  };
-}
-function buildKeyValueBody(dto, name, position, names, warnings) {
-  const atPath = `flow.nodes.${name}`;
-  const tableName = dto.key_value_table == null ? missingName("key-value table (none selected on the remote node)", atPath, warnings) : names.keyValueTables.get(dto.key_value_table) ?? missingName(`key-value table #${dto.key_value_table}`, atPath, warnings);
-  const mode = dto.mode ?? "read";
-  return {
-    type: "key-value",
-    position,
-    table: tableName,
-    mode,
-    entries: (dto.entries ?? []).map(
-      (entry) => mode === "delete" || !("value" in entry) ? { key: entry.key } : { key: entry.key, value: entry.value }
-    )
   };
 }
 function buildDecisionTableBody(dto, name, position, registry2, warnings) {
@@ -34367,7 +34128,6 @@ function buildBulkSavePayload(options) {
     graph_note_ids: nodeDiff.noteNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     classification_decision_table_node_ids: nodeDiff.classificationDecisionTableNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     knowledge_node_ids: nodeDiff.knowledgeRetrieverNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
-    key_value_node_ids: nodeDiff.keyValueNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     edge_ids: connectionDiff.toDelete.map((edge) => edge.backendId).filter((id) => id != null)
   };
   return {
@@ -34491,16 +34251,6 @@ function buildBulkSavePayload(options) {
       query: node.data?.query ?? "",
       search_method: node.data?.search_method ?? null,
       search_configs: node.data?.search_configs ?? null,
-      metadata: toNodeMetadata(node)
-    })),
-    key_value_node_list: nodeItems(nodeDiff.keyValueNodes, (node) => ({
-      node_name: node.node_name,
-      graph: graphId,
-      input_map: node.input_map || {},
-      output_variable_path: null,
-      key_value_table: node.data?.key_value_table ?? null,
-      mode: node.data?.mode ?? "read",
-      entries: node.data?.entries ?? [],
       metadata: toNodeMetadata(node)
     })),
     edge_list: [...edgeList, ...edgeUpdateList],
@@ -34676,7 +34426,6 @@ function buildUuidByBackendId(dto) {
   register("note", dto.graph_note_list);
   register("classification-decision-table", dto.classification_decision_table_node_list);
   register("knowledge-retriever", dto.knowledge_node_list);
-  register("key-value", dto.key_value_node_list);
   return uuidByBackendId;
 }
 function collectOrphanEdgeIds(dto) {
@@ -34832,19 +34581,6 @@ function buildRemoteState(dto) {
           search_configs: node.search_configs ?? null
         }
       })
-    ),
-    ...(dto.key_value_node_list ?? []).map(
-      (node) => ({
-        ...baseNode("key-value", node),
-        type: "key-value",
-        data: {
-          key_value_table: node.key_value_table ?? null,
-          mode: node.mode ?? "read",
-          entries: node.entries ?? []
-        },
-        // No key-value mode writes an output; read values go to each entry's own path.
-        output_variable_path: null
-      })
     )
   ];
   const edges = [];
@@ -34865,28 +34601,6 @@ function buildRemoteState(dto) {
   }
   return { nodes, edges };
 }
-
-// src/api/key-value-tables.ts
-var KeyValueTablesApi = class {
-  constructor(client) {
-    this.client = client;
-  }
-  client;
-  async list() {
-    const response = await this.client.get("key-value-tables/", {
-      query: { limit: 1e3 }
-    });
-    return Array.isArray(response) ? response : response.results;
-  }
-  /** Table names are unique per org, case-insensitively (KeyValueTableSerializer). */
-  async findByName(name) {
-    const wanted = name.toLowerCase();
-    return (await this.list()).find((table) => table.name.toLowerCase() === wanted);
-  }
-  async create(request) {
-    return this.client.post("key-value-tables/", { body: request });
-  }
-};
 
 // src/api/storage.ts
 var StorageApi = class {
@@ -34982,7 +34696,6 @@ var EntityPusher = class {
     this.agentDefinitions = new AgentDefinitionsApi(context.client);
     this.storage = new StorageApi(context.client);
     this.secrets = new SecretsApi(context.client, context.auth);
-    this.keyValueTables = new KeyValueTablesApi(context.client);
   }
   context;
   llm;
@@ -34992,7 +34705,6 @@ var EntityPusher = class {
   agentDefinitions;
   storage;
   secrets;
-  keyValueTables;
   modelIdByName = null;
   builtinToolIdByName = null;
   /**
@@ -35127,12 +34839,6 @@ var EntityPusher = class {
     switch (plan.kind) {
       case "secret":
         return this.ensureSecret(plan, name);
-      case "key_value_table": {
-        const existing = await this.keyValueTables.findByName(name);
-        if (existing) return { backendId: existing.id, created: false };
-        logger.info(`Creating key-value table "${name}"`);
-        return { backendId: (await this.keyValueTables.create({ name })).id, created: true };
-      }
       default:
         throw new Error(`Entity kind ${plan.kind} has no ensure path \u2014 compiler bug.`);
     }
@@ -35395,7 +35101,7 @@ var EntityPusher = class {
       if (named) return named.id;
       const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
       throw new Error(
-        `Embedding config "${embedderName}" not found in the organization. Available embedding configs: ${available || "(none)"}. Fix knowledge.<name>.rag.embedder, or omit it to use the org default.`
+        `Embedding config "${embedderName}" not found in the organization. Available embedding configs: ${available || "(none)"}. Fix knowledge.<name>.rag.embedder, or omit it to use the instance default.`
       );
     }
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
@@ -36374,7 +36080,7 @@ function registerFlowTools(server, context) {
     "push_flow",
     {
       title: "Push flow to EpicStaff",
-      description: "Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order (secrets + key-value tables \u2192 llm-configs \u2192 tools \u2192 knowledge+documents+RAG \u2192 surfaces \u2192 agent-definitions), then create/update the graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) \u2014 never duplicates. Fails on remote save_version conflict unless force is set.",
+      description: "Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order (secrets \u2192 llm-configs \u2192 tools \u2192 knowledge+documents+RAG \u2192 surfaces \u2192 agent-definitions), then create/update the graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) \u2014 never duplicates. Fails on remote save_version conflict unless force is set.",
       inputSchema: {
         flow_dir: external_exports.string().describe("Absolute path of the flow directory"),
         force: external_exports.boolean().optional().describe("Overwrite remote graph changes on save_version conflict (default false)"),
@@ -36504,8 +36210,7 @@ function registerFlowTools(server, context) {
           surfaces: new SurfacesApi(context.client),
           llm: new LlmApi(context.client),
           tools: new ToolsApi(context.client),
-          knowledge: new KnowledgeApi(context.client),
-          keyValueTables: new KeyValueTablesApi(context.client)
+          knowledge: new KnowledgeApi(context.client)
         },
         graph_id,
         target_dir
@@ -36888,15 +36593,6 @@ var NODE_REFERENCE = {
       'No matches is not an error: the output is the text "No relevant results were found in the knowledge collection."',
       "search_method without graph search_configs cannot be read back from EpicStaff (write-only field), so such a node is re-sent (unchanged) on every push."
     ]
-  },
-  "key-value": {
-    summary: "Reads, writes or deletes keys of an organization Key-Value table (persistent across sessions and flows).",
-    whenToUse: "Remembering small values between runs (user profiles, counters, cached results) without a python node.",
-    caveats: [
-      "The table is org-wide and shared by every flow that names it; it is created on push when missing.",
-      "read: each entry's value is the state path the stored value is written to (None when the key is missing, no |default). write: value is the state path to store (may end in |default). delete: key only.",
-      "Keys use letters, digits and _ plus {variables.<path>} placeholders; the node writes no output_variable_path."
-    ]
   }
 };
 
@@ -36944,8 +36640,7 @@ var NODE_LIST_KEYS = [
   "decision_table_node_list",
   "classification_decision_table_node_list",
   "audio_transcription_node_list",
-  "knowledge_node_list",
-  "key_value_node_list"
+  "knowledge_node_list"
 ];
 function summarizeGraph(graph) {
   const raw = graph;
@@ -36958,8 +36653,7 @@ function summarizeGraph(graph) {
         node_name: node.node_name,
         ...node.agent_definition !== void 0 && { agent_definition: node.agent_definition },
         ...node.surface_list !== void 0 && { surface_list: node.surface_list },
-        ...node.source_collection !== void 0 && { source_collection: node.source_collection },
-        ...node.key_value_table !== void 0 && { key_value_table: node.key_value_table }
+        ...node.source_collection !== void 0 && { source_collection: node.source_collection }
       }));
     }
   }
@@ -37056,7 +36750,7 @@ function registerReferenceTools(server, context) {
     "list_llm_configs",
     {
       title: "List LLM configs",
-      description: "List LLM configs (what agents reference as llm_config). Includes the org default agent LLM when one is set.",
+      description: "List LLM configs (what agents reference as llm_config). Includes the EpicStaff instance default agent LLM when one is set and it is one of the active organization's configs.",
       inputSchema: {}
     },
     async () => runTool(async () => {
@@ -37064,7 +36758,8 @@ function registerReferenceTools(server, context) {
       const [configs, defaults] = await Promise.all([llm.listConfigs(), llm.getDefaultModels()]);
       const defaultConfig = configs.find((config2) => config2.id === defaults.agent_llm_config);
       return {
-        // The org's default agent LLM (default-models/ → agent_llm_config).
+        // The instance-wide default agent LLM (default-models/ → agent_llm_config — a global singleton at
+        // EpicStaff 1.2.x, not per org); reported only when it is among the active org's configs.
         default: defaultConfig ? { id: defaultConfig.id, custom_name: defaultConfig.custom_name } : null,
         configs: configs.map((config2) => ({
           id: config2.id,
@@ -37651,7 +37346,7 @@ var surfaceBodyShape2 = {
 };
 var ragInputSchema = external_exports.strictObject({
   strategy: external_exports.enum(["naive", "graph"]).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
-  embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
+  embedder: idOrName.optional().describe("Embedding config: id or name. Instance default (or the org's only config) when omitted."),
   llm_config: idOrName.optional().describe('LLM config (id or name) used to build/query the graph. REQUIRED for strategy "graph".'),
   chunk_size: external_exports.number().int().positive().optional().describe("Chunk size in tokens. Backend default when omitted (naive: 1000, graph: 1200)."),
   chunk_overlap: external_exports.number().int().nonnegative().optional().describe("Chunk overlap in tokens. Backend default when omitted (naive: 150, graph: 100)."),
@@ -38014,7 +37709,7 @@ function registerCatalogTools(server, context) {
       inputSchema: {
         collection_id: external_exports.number().int().describe("Backend id of the source collection (see list_source_collections)."),
         strategy: external_exports.enum(["naive", "graph"]).describe("RAG strategy to attach."),
-        embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
+        embedder: idOrName.optional().describe("Embedding config: id or name. Instance default (or the org's only config) when omitted."),
         llm_config: idOrName.optional().describe('LLM config (id or name). REQUIRED for strategy "graph".'),
         chunk_size: ragInputSchema.shape.chunk_size,
         chunk_overlap: ragInputSchema.shape.chunk_overlap,
@@ -38179,8 +37874,8 @@ var EPICSTAFF_INSTRUCTIONS = [
   "",
   "Invariants: agent nodes need at least one task (tasks:); no parallel fan-out \u2014 one active path,",
   'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
-  '"crew" (removed from EpicStaff \u2014 use agent/task nodes). A key-value node writes its read entries',
-  "to their own state paths, not output_variable_path. Credentials come from env vars",
+  '"crew" (removed from EpicStaff \u2014 use agent/task nodes), nor "key-value" (needs EpicStaff 1.3+;',
+  "this MCP 1.2.x targets EpicStaff 1.2.x). Credentials come from env vars",
   "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source;",
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
   "llm_configs follow the backend bounds: temperature 0\u20132, max_tokens >= 500.",
@@ -38206,7 +37901,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.3.0-dev.1"
+      version: "1.2.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
