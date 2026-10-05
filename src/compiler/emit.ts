@@ -19,7 +19,7 @@
  *    `{$ref: "embedders.default"}`. There is NO EntityPlan for embedders (no
  *    `EntityKind` exists) and no local/remote distinction (embedders are always
  *    org-level), so there is no `existing:` prefix — the pusher resolves the name
- *    directly against the `embedding-configs/` list (default = the org default).
+ *    directly against the `embedding-configs/` list (default = the instance default).
  *  - subgraph flows:      `{$ref: "flows.<siblingFlowName>"}` or
  *    `{$ref: "flows.existing:<remoteName>"}`. Also no EntityPlan (no kind) —
  *    a subgraph always targets an already-pushed graph, so there is nothing to
@@ -32,15 +32,13 @@
  *    telegram `bot_token_env`). The pusher stores the value as an org Secret named
  *    `es-mcp:<ENV_NAME>` and substitutes its id; the value never enters a payload
  *    that is diffed, logged or written to the lockfile.
- *  - key-value tables:   `{$ref: "key_value_tables.<table name>"}` — one `ensure`
- *    plan per table name a key-value node uses (found by name, created if missing).
  *  - collection RAGs:    `{$ref: "<collection ref>#rag:<naive|graph>"}` (see
  *    `ragRefKey` in artifact.ts) — the RAG a knowledge-retriever node searches.
  *
  * Numeric GraphState fields that carry refs (`agent_definition`, `surface_list`
  * entries, subgraph `data.id`, `default_llm_config`, inline-surface tool /
  * collection / storage ids, `telegram_bot_api_key_secret_id`, knowledge-retriever
- * `source_collection` / `rag_id`, key-value `key_value_table`) are populated via
+ * `source_collection` / `rag_id`) are populated via
  * `as unknown as <T>` casts: the artifact contract (artifact.ts) requires the pusher
  * to substitute every placeholder before the state is diffed or pushed, so the lie
  * never reaches the wire.
@@ -123,7 +121,7 @@ export interface EmitResult {
 }
 
 // ---------------------------------------------------------------------------
-// Canvas metadata tables (mirrors frontend shared/models/node/node-config.ts)
+// Canvas metadata tables (mirrors frontend visual-programming/core/enums/node-config.ts)
 // ---------------------------------------------------------------------------
 
 const NODE_COLORS: Record<GraphNodeType, string> = {
@@ -142,7 +140,6 @@ const NODE_COLORS: Record<GraphNodeType, string> = {
   'decision-table': '#00aaff', // frontend NodeType.TABLE
   'classification-decision-table': '#2a5bd7',
   'knowledge-retriever': '#D9D9DE',
-  'key-value': '#14B8A6',
 };
 
 const NODE_ICONS: Record<GraphNodeType, string> = {
@@ -161,7 +158,6 @@ const NODE_ICONS: Record<GraphNodeType, string> = {
   'decision-table': 'ti ti-table',
   'classification-decision-table': 'ti ti-table-options',
   'knowledge-retriever': 'ti ti-books',
-  'key-value': 'ti ti-database',
 };
 
 /**
@@ -191,7 +187,6 @@ const LAYOUT_TYPE_BY_NODE_TYPE: Record<GraphNodeType, string> = {
   'decision-table': LAYOUT_NODE_TYPES.TABLE, // 'table' — enum value differs
   'classification-decision-table': LAYOUT_NODE_TYPES.CLASSIFICATION_TABLE,
   'knowledge-retriever': LAYOUT_NODE_TYPES.KNOWLEDGE_RETRIEVER,
-  'key-value': LAYOUT_NODE_TYPES.KEY_VALUE,
 };
 
 // ---------------------------------------------------------------------------
@@ -206,18 +201,11 @@ class RefRegistry {
   private readonly existingBySection = new Map<string, Set<string>>();
   /** Environment variable names a credential is read from — one Secret each. */
   private readonly secretEnvNames = new Set<string>();
-  private readonly keyValueTableNames = new Set<string>();
 
   /** `{$ref}` to the org Secret holding the value of environment variable `envName`. */
   secret(envName: string): SymbolicRef {
     this.secretEnvNames.add(envName);
     return { $ref: entityKey('secrets', envName) };
-  }
-
-  /** `{$ref}` to the org Key-Value table named `tableName`. */
-  keyValueTable(tableName: string): SymbolicRef {
-    this.keyValueTableNames.add(tableName);
-    return { $ref: entityKey('key_value_tables', tableName) };
   }
 
   secretPlans(): EntityPlan[] {
@@ -232,17 +220,6 @@ class RefRegistry {
     }));
   }
 
-  keyValueTablePlans(): EntityPlan[] {
-    return [...this.keyValueTableNames].sort().map((tableName) => ({
-      key: entityKey('key_value_tables', tableName),
-      section: 'key_value_tables',
-      name: tableName,
-      kind: 'key_value_table',
-      action: 'ensure',
-      remoteName: tableName,
-      payload: { name: tableName },
-    }));
-  }
 
   ref(section: string, entityRef: EntityRef): SymbolicRef {
     if (typeof entityRef === 'string') {
@@ -967,22 +944,6 @@ async function buildGraph(
         break;
       }
 
-      case 'key-value':
-        nodes.push({
-          ...base,
-          type: 'key-value',
-          // The backend always stores null — no key-value mode writes a node output.
-          output_variable_path: null,
-          data: {
-            key_value_table: registry.keyValueTable(node.table) as unknown as number,
-            mode: node.mode,
-            entries: node.entries.map((entry) =>
-              node.mode === 'delete' ? { key: entry.key } : { key: entry.key, value: (entry.value ?? '').trim() },
-            ),
-          },
-        });
-        break;
-
       default: {
         invariant(false, `unhandled node type '${(node as { type: string }).type}'`);
       }
@@ -1109,9 +1070,8 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
   // Dependency order per the artifact contract; every section's
   // resolve-existing plans precede its local upserts.
   const entities: EntityPlan[] = [
-    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    // Secrets are leaves: nothing they hold references another entity.
     ...registry.secretPlans(),
-    ...registry.keyValueTablePlans(),
     ...registry.existingPlans('llm_configs', 'llm_config'),
     ...llmPlans,
     ...registry.existingPlans('tools.tool_configs', 'tool_config'),

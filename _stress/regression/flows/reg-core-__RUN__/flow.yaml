@@ -1,7 +1,7 @@
 # Regression core flow. __RUN__ / __MODEL__ / __PROVIDER__ / __KEY_ENV__ are substituted per run.
 meta:
   name: reg-core-__RUN__
-  description: Regression - python, decision-table, conditional edge, key-value, agent+task, note.
+  description: Regression - python, decision-table, conditional edge, state hand-off, agent+task, note.
 variables:
   amount: { default: 0 }
   customer: { default: "anon" }
@@ -48,18 +48,13 @@ flow:
             return {"tier": "basic", "amount": s["amount"]}
       input_map: { s: variables.score }
       output_variable_path: variables.tier
-    Save:
-      type: key-value
-      table: Regression KV
-      mode: write
-      entries:
-        - { key: last_tier, value: variables.tier }
-    Load:
-      type: key-value
-      table: Regression KV
-      mode: read
-      entries:
-        - { key: last_tier, value: variables.loaded }
+    Carry:
+      type: python
+      code: |-
+        def main(t):
+            return t
+      input_map: { t: variables.tier }
+      output_variable_path: variables.loaded
     Verdict:
       type: agent
       agent: reg_writer___RUN__
@@ -74,10 +69,9 @@ flow:
   edges:
     - { from: __start__, to: Score }
     - { from: Score, to: Route }
-    - { from: High, to: Save }
-    - { from: Low, to: Save }
-    - { from: Save, to: Load }
-    - { from: Load, to: Verdict }
+    - { from: High, to: Carry }
+    - { from: Low, to: Carry }
+    - { from: Carry, to: Verdict }
     - from: Verdict
       condition:
         code: |-

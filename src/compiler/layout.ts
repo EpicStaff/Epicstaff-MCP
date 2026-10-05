@@ -4,7 +4,7 @@
  * Source of truth:
  *   frontend/src/app/visual-programming/core/helpers/auto-arrange.util.ts
  *   frontend/src/app/visual-programming/core/helpers/node-placement.utils.ts (snapToGrid)
- *   frontend/src/app/shared/models/node/node-type.ts (NodeType enum values)
+ *   frontend/src/app/visual-programming/core/enums/node-type.ts (NodeType enum values)
  *
  * The logic — tie-breaking, sort orders, rounding, and grid snapping — is a
  * faithful copy of the frontend implementation, with Angular/foblex types
@@ -63,7 +63,6 @@ export const LAYOUT_NODE_TYPES = {
     AUDIO_TO_TEXT: 'audio-to-text-node',
     SCHEDULE_TRIGGER: 'schedule-trigger',
     KNOWLEDGE_RETRIEVER: 'knowledge-retriever',
-    KEY_VALUE: 'key-value',
 } as const;
 
 // ── Spacing constants (identical to the frontend values) ───────────────────

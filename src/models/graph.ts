@@ -26,7 +26,6 @@ import type { BulkEdgeCreate, BulkEdgeUpdate, EdgeDto } from './nodes/edge.js';
 import type { EndNodeDto, EndNodeWrite } from './nodes/end-node.js';
 import type { FileExtractorNodeDto, FileExtractorNodeWrite } from './nodes/file-extractor-node.js';
 import type { GraphNoteDto, GraphNoteWrite } from './nodes/note-node.js';
-import type { KeyValueNodeDto, KeyValueNodeWrite } from './nodes/key-value-node.js';
 import type {
   KnowledgeRetrieverNodeDto,
   KnowledgeRetrieverNodeWrite,
@@ -99,7 +98,6 @@ export interface GraphDto extends GetGraphLightRequest {
   graph_note_list: GraphNoteDto[];
   schedule_trigger_node_list: ScheduleTriggerNodeDto[];
   knowledge_node_list: KnowledgeRetrieverNodeDto[];
-  key_value_node_list: KeyValueNodeDto[];
 }
 
 export interface CreateGraphDtoRequest {
@@ -119,7 +117,6 @@ export interface CreateGraphDtoRequest {
   decision_table_node_list?: DecisionTableNodeDto[];
   schedule_trigger_node_list?: ScheduleTriggerNodeWrite[];
   knowledge_node_list?: KnowledgeRetrieverNodeDto[];
-  key_value_node_list?: KeyValueNodeDto[];
 }
 
 export interface UpdateGraphDtoRequest {
@@ -163,7 +160,6 @@ export interface BulkDeletedBlock {
   graph_note_ids: number[];
   classification_decision_table_node_ids: number[];
   knowledge_node_ids: number[];
-  key_value_node_ids: number[];
   edge_ids: number[];
 }
 
@@ -189,7 +185,6 @@ export interface BulkSavePayload {
   graph_note_list: BulkItem<GraphNoteWrite>[];
   classification_decision_table_node_list: BulkItem<ClassificationDecisionTableNodeWrite>[];
   knowledge_node_list: BulkItem<KnowledgeRetrieverNodeWrite>[];
-  key_value_node_list: BulkItem<KeyValueNodeWrite>[];
   edge_list: (BulkEdgeCreate | BulkEdgeUpdate)[];
   deleted: BulkDeletedBlock;
 }

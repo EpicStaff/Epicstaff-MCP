@@ -20,7 +20,7 @@ import { nodeWritePaths } from './node-io.js';
 import { isVarPathError, parseVarPath } from './varpath.js';
 
 /**
- * Top-level variable names written by any node (`output_variable_path`, key-value read targets)
+ * Top-level variable names written by any node (`output_variable_path`)
  * (e.g. `variables.quote.total` → `quote`). Cross-session `variables.shared[...]`
  * writes and malformed paths carry no top-level name and are skipped — malformed
  * paths are reported separately by the dataflow validator.

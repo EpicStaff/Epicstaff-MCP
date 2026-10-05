@@ -44,7 +44,7 @@ export const graphRagConfigSchema = z
     embedder: z
       .string()
       .optional()
-      .describe('Embedding config name on the backend. Org default when omitted.'),
+      .describe('Embedding config name on the backend. Instance default (or the org\'s only config) when omitted.'),
     chunk_size: z
       .number()
       .int()

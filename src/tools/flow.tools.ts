@@ -17,7 +17,6 @@ import { buildBulkSavePayload } from '../graph/bulk-save.js';
 import type { GraphState } from '../graph/graph-state.js';
 import { buildRemoteState } from '../graph/remote-state.js';
 import type { GraphDto } from '../models/graph.js';
-import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { EntityPusher } from '../pusher/entities.js';
 import { resolveRagRefs } from '../pusher/rag-refs.js';
 import { resolveFlowRefs } from '../pusher/flow-refs.js';
@@ -455,7 +454,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
             return { key: plan.key, kind: plan.kind, wouldDo: 'resolve-existing', remoteName: plan.remoteName };
           }
           if (plan.action === 'ensure') {
-            // Secrets / key-value tables: found by name at push time, created only when missing.
+            // Secrets: found by name at push time, created only when missing.
             return { key: plan.key, kind: plan.kind, wouldDo: 'reuse-or-create-by-name', remoteName: plan.remoteName };
           }
           const entry = getEntity(lock, plan.section, plan.name);
@@ -511,7 +510,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       title: 'Push flow to EpicStaff',
       description:
         'Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order ' +
-        '(secrets + key-value tables → llm-configs → tools → knowledge+documents+RAG → surfaces → agent-definitions), then create/update the ' +
+        '(secrets → llm-configs → tools → knowledge+documents+RAG → surfaces → agent-definitions), then create/update the ' +
         'graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) — ' +
         'never duplicates. Fails on remote save_version conflict unless force is set.',
       inputSchema: {
@@ -691,7 +690,6 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
             llm: new LlmApi(context.client),
             tools: new ToolsApi(context.client),
             knowledge: new KnowledgeApi(context.client),
-            keyValueTables: new KeyValueTablesApi(context.client),
           },
           graph_id,
           target_dir,

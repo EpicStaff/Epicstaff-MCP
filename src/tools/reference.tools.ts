@@ -33,7 +33,6 @@ const NODE_LIST_KEYS = [
   'classification_decision_table_node_list',
   'audio_transcription_node_list',
   'knowledge_node_list',
-  'key_value_node_list',
 ] as const;
 
 function summarizeGraph(graph: GraphDto): Record<string, unknown> {
@@ -48,7 +47,6 @@ function summarizeGraph(graph: GraphDto): Record<string, unknown> {
         ...(node.agent_definition !== undefined && { agent_definition: node.agent_definition }),
         ...(node.surface_list !== undefined && { surface_list: node.surface_list }),
         ...(node.source_collection !== undefined && { source_collection: node.source_collection }),
-        ...(node.key_value_table !== undefined && { key_value_table: node.key_value_table }),
       }));
     }
   }
@@ -169,7 +167,8 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
     {
       title: 'List LLM configs',
       description:
-        'List LLM configs (what agents reference as llm_config). Includes the org default agent LLM when one is set.',
+        'List LLM configs (what agents reference as llm_config). Includes the EpicStaff instance default agent LLM ' +
+        'when one is set and it is one of the active organization\'s configs.',
       inputSchema: {},
     },
     async () =>
@@ -178,7 +177,8 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
         const [configs, defaults] = await Promise.all([llm.listConfigs(), llm.getDefaultModels()]);
         const defaultConfig = configs.find((config) => config.id === defaults.agent_llm_config);
         return {
-          // The org's default agent LLM (default-models/ → agent_llm_config).
+          // The instance-wide default agent LLM (default-models/ → agent_llm_config — a global singleton at
+          // EpicStaff 1.2.x, not per org); reported only when it is among the active org's configs.
           default: defaultConfig ? { id: defaultConfig.id, custom_name: defaultConfig.custom_name } : null,
           configs: configs.map((config) => ({
             id: config.id,

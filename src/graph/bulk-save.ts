@@ -383,7 +383,6 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
     knowledge_node_ids: nodeDiff.knowledgeRetrieverNodes.toDelete
       .map((node) => node.backendId!)
       .filter((id) => id != null),
-    key_value_node_ids: nodeDiff.keyValueNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     edge_ids: connectionDiff.toDelete.map((edge) => edge.backendId).filter((id): id is number => id != null),
   };
 
@@ -506,16 +505,6 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       query: node.data?.query ?? '',
       search_method: node.data?.search_method ?? null,
       search_configs: node.data?.search_configs ?? null,
-      metadata: toNodeMetadata(node),
-    })),
-    key_value_node_list: nodeItems(nodeDiff.keyValueNodes, (node) => ({
-      node_name: node.node_name,
-      graph: graphId,
-      input_map: node.input_map || {},
-      output_variable_path: null,
-      key_value_table: node.data?.key_value_table ?? null,
-      mode: node.data?.mode ?? 'read',
-      entries: node.data?.entries ?? [],
       metadata: toNodeMetadata(node),
     })),
     edge_list: [...edgeList, ...edgeUpdateList],

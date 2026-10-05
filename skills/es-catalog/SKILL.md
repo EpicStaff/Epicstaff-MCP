@@ -95,8 +95,8 @@ the collection will not retrieve anything until indexing **completes**:
 2. Poll `wait_for_collections({ collection_ids: [<collectionId>] })` until it reports complete.
 3. Only then push/run a flow whose surface exposes the collection.
 
-Graph RAG requires an `llm_config`; naive RAG needs only an `embedder` (org default when
-omitted). To add documents to an existing collection later, use `upload_documents` (which
+Graph RAG requires an `llm_config`; naive RAG needs only an `embedder` (EpicStaff's
+instance default, or the org's only config, when omitted). To add documents to an existing collection later, use `upload_documents` (which
 re-indexes), not a new collection.
 
 ## Tools

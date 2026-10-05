@@ -1,5 +1,5 @@
 /**
- * Ported from frontend `visual-programming/core/models/decision-table-node.model.ts` + `buildDecisionTableNodePayload`
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/decision-table-node.model.ts` + `buildDecisionTableNodePayload`
  * in `visual-programming/utils/save/payload.ts` (which adds the `*_temp_id` cross-node reference variants).
  */
 

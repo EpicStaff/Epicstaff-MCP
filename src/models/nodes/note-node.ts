@@ -1,4 +1,4 @@
-/** GraphNote. Ported from frontend `visual-programming/core/models/graph-note.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
+/** GraphNote. Ported from frontend `pages/flows-page/components/flow-visual-programming/models/graph-note.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
 import type { NodeDtoMetadata } from '../graph.js';
 

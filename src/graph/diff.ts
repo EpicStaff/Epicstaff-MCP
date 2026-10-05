@@ -17,7 +17,6 @@ import type {
   GraphNode,
   GraphNodeType,
   GraphState,
-  KeyValueGraphNode,
   KnowledgeRetrieverGraphNode,
   NoteGraphNode,
   PythonGraphNode,
@@ -53,7 +52,6 @@ export interface NodeDiffByType {
   noteNodes: NodeDiff<NoteGraphNode>;
   classificationDecisionTableNodes: NodeDiff<ClassificationDecisionTableGraphNode>;
   knowledgeRetrieverNodes: NodeDiff<KnowledgeRetrieverGraphNode>;
-  keyValueNodes: NodeDiff<KeyValueGraphNode>;
 }
 
 export interface ConnectionDiff {
@@ -314,18 +312,6 @@ function toKnowledgeRetrieverComparable(node: KnowledgeRetrieverGraphNode): unkn
   };
 }
 
-function toKeyValueComparable(node: KeyValueGraphNode): unknown {
-  return {
-    node_name: node.node_name,
-    input_map: node.input_map || {},
-    output_variable_path: node.output_variable_path || null,
-    key_value_table: node.data?.key_value_table ?? null,
-    mode: node.data?.mode ?? 'read',
-    entries: node.data?.entries ?? [],
-    metadata: toNodeMetadata(node),
-  };
-}
-
 function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: GraphNode[]): unknown {
   const tableData = node.data?.table;
   const resolveRef = (uuid: string | null): number | `temp:${string}` | null => {
@@ -465,11 +451,6 @@ export function getNodeDiff(previous: GraphState, current: GraphState): NodeDiff
       nodesByType<KnowledgeRetrieverGraphNode>(previous.nodes, 'knowledge-retriever'),
       nodesByType<KnowledgeRetrieverGraphNode>(current.nodes, 'knowledge-retriever'),
       toKnowledgeRetrieverComparable
-    ),
-    keyValueNodes: diffNodesByBackendId(
-      nodesByType<KeyValueGraphNode>(previous.nodes, 'key-value'),
-      nodesByType<KeyValueGraphNode>(current.nodes, 'key-value'),
-      toKeyValueComparable
     ),
   };
 }

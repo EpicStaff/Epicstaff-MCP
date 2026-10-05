@@ -1,0 +1,22 @@
+# Invalid for MCP 1.2.x: EpicStaff 1.2.x has no Key-Value tables or nodes — 'key-value' is rejected with an error diagnostic.
+meta:
+  name: key-value-node-example
+
+flow:
+  nodes:
+    start:
+      type: start
+    remember:
+      type: key-value
+      table: User Profiles
+      mode: write
+      entries:
+        - key: last_topic
+          value: variables.topic
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: remember
+    - from: remember
+      to: finish

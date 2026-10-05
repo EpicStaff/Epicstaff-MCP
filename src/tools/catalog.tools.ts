@@ -104,7 +104,7 @@ type SurfaceBodyInput = {
 
 const ragInputSchema = z.strictObject({
   strategy: z.enum(['naive', 'graph']).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
-  embedder: idOrName.optional().describe('Embedding config: id or name. Org default when omitted.'),
+  embedder: idOrName.optional().describe('Embedding config: id or name. Instance default (or the org\'s only config) when omitted.'),
   llm_config: idOrName
     .optional()
     .describe('LLM config (id or name) used to build/query the graph. REQUIRED for strategy "graph".'),
@@ -170,7 +170,7 @@ async function resolveNamedRef<T>(
 
 /**
  * Resolve the embedder for a RAG strategy. Number → used as-is; name → matched
- * against embedding-configs; omitted → the org default (ported from EntityPusher).
+ * against embedding-configs; omitted → the instance default (ported from EntityPusher).
  */
 async function resolveEmbedderRef(ref: number | string | undefined, llm: LlmApi): Promise<number> {
   if (typeof ref === 'number') return ref;
@@ -638,7 +638,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
       inputSchema: {
         collection_id: z.number().int().describe('Backend id of the source collection (see list_source_collections).'),
         strategy: z.enum(['naive', 'graph']).describe('RAG strategy to attach.'),
-        embedder: idOrName.optional().describe('Embedding config: id or name. Org default when omitted.'),
+        embedder: idOrName.optional().describe('Embedding config: id or name. Instance default (or the org\'s only config) when omitted.'),
         llm_config: idOrName.optional().describe('LLM config (id or name). REQUIRED for strategy "graph".'),
         chunk_size: ragInputSchema.shape.chunk_size,
         chunk_overlap: ragInputSchema.shape.chunk_overlap,

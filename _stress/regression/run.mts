@@ -298,8 +298,12 @@ await step(server, 'set active organization', 'set_active_organization', { organ
 const nodeTypes = await step(server, 'all node types', 'describe_node_types', {}, (response) =>
   (response.ok && Array.isArray(response.data.node_types) && response.data.node_types.length > 0) || failure(response),
 );
-await step(server, 'one node type (key-value)', 'describe_node_types', { type: 'key-value' }, (response) =>
-  (response.ok && json(response.data).includes('key-value')) || failure(response),
+await step(server, 'one node type (knowledge-retriever)', 'describe_node_types', { type: 'knowledge-retriever' }, (response) =>
+  (response.ok && json(response.data).includes('knowledge-retriever')) || failure(response),
+);
+// EpicStaff 1.2.x has no Key-Value tables: the 1.2.x MCP must not offer the node type.
+await step(server, 'key-value is not a node type on 1.2.x', 'describe_node_types', { type: 'key-value' }, (response) =>
+  (!response.ok && response.text.includes('unknown node type')) || `expected unknown node type, got: ${response.text.slice(0, 200)}`,
 );
 await step(server, `models search ${MODEL}`, 'list_llm_models', { search: MODEL }, (response) =>
   (response.ok && json(response.data).includes(MODEL)) || failure(response),

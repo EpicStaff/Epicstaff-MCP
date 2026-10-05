@@ -1,4 +1,4 @@
-/** Ported from frontend `visual-programming/core/models/end-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
+/** Ported from frontend `pages/flows-page/components/flow-visual-programming/models/end-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
 import type { NodeDtoMetadata } from '../graph.js';
 

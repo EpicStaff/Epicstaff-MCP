@@ -34,7 +34,7 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
     ...startInitialStateKeys(source).map((name) => [name]),
   ];
 
-  // --- producers (output_variable_path, key-value read targets) + write-path validation ---
+  // --- producers (output_variable_path) + write-path validation ---
   const producedByNode = new Map<string, string[][]>();
   const producedAll: ProducedPath[] = [];
   for (const [nodeName, node] of Object.entries(nodes)) {

@@ -42,10 +42,11 @@ describe('node reference catalog', () => {
     }
   });
 
-  it('documents the new node types and never lists the removed crew type', () => {
+  it('documents knowledge-retriever and never lists crew or key-value (not in EpicStaff 1.2.x)', () => {
     expect(introspectedTypes).toContain('knowledge-retriever');
-    expect(introspectedTypes).toContain('key-value');
     expect(introspectedTypes).not.toContain('crew');
+    expect(introspectedTypes).not.toContain('key-value');
+    expect(Object.keys(NODE_REFERENCE)).not.toContain('key-value');
   });
 
   it('keeps the severe classification-decision-table caveat', () => {

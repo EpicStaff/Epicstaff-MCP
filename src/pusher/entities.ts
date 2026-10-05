@@ -4,7 +4,6 @@ import { ragRefKey, substituteRefs } from '../compiler/artifact.js';
 import { isBuiltinToolRef, isEnvRef, isModelRef, isStorageFileRef } from '../compiler/template-refs.js';
 import { StorageApi } from '../api/storage.js';
 import { AgentDefinitionsApi } from '../api/agent-definitions.js';
-import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { KnowledgeApi } from '../api/knowledge.js';
 import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SecretsApi, secretTail } from '../api/secrets.js';
@@ -27,7 +26,7 @@ import { ApiError } from '../http/errors.js';
 
 /**
  * Entity pusher — materializes the dependency tree of a BuildArtifact in order
- * (secrets + key-value tables → llm-configs → tools → knowledge → surfaces →
+ * (secrets → llm-configs → tools → knowledge → surfaces →
  * agent-definitions), following the reuse-first policy:
  *   lockfile hit + clean hash → reuse id;
  *   lockfile hit + dirty hash → update in place;
@@ -60,7 +59,6 @@ export class EntityPusher {
   private readonly agentDefinitions;
   private readonly storage;
   private readonly secrets;
-  private readonly keyValueTables;
   private modelIdByName: Map<string, number> | null = null;
   private builtinToolIdByName: Map<string, number> | null = null;
 
@@ -72,7 +70,6 @@ export class EntityPusher {
     this.agentDefinitions = new AgentDefinitionsApi(context.client);
     this.storage = new StorageApi(context.client);
     this.secrets = new SecretsApi(context.client, context.auth);
-    this.keyValueTables = new KeyValueTablesApi(context.client);
   }
 
   /**
@@ -249,12 +246,6 @@ export class EntityPusher {
     switch (plan.kind) {
       case 'secret':
         return this.ensureSecret(plan, name);
-      case 'key_value_table': {
-        const existing = await this.keyValueTables.findByName(name);
-        if (existing) return { backendId: existing.id, created: false };
-        logger.info(`Creating key-value table "${name}"`);
-        return { backendId: (await this.keyValueTables.create({ name })).id, created: true };
-      }
       default:
         throw new Error(`Entity kind ${plan.kind} has no ensure path — compiler bug.`);
     }
@@ -564,7 +555,7 @@ export class EntityPusher {
     if (resolved !== undefined) return resolved;
 
     // `embedders.*` is a virtual section: embedding configs are org-level, not flow-source
-    // entities. `embedders.default` = the org default; any other name = lookup by name.
+    // entities. `embedders.default` = the instance default; any other name = lookup by name.
     if (ref.$ref.startsWith('embedders.')) {
       // Tolerate a stray `existing:` prefix from older emitted artifacts — embedders
       // have no local/remote distinction, so the prefix is never part of the real name.
@@ -584,7 +575,7 @@ export class EntityPusher {
       throw new Error(
         `Embedding config "${embedderName}" not found in the organization. ` +
           `Available embedding configs: ${available || '(none)'}. ` +
-          'Fix knowledge.<name>.rag.embedder, or omit it to use the org default.',
+          'Fix knowledge.<name>.rag.embedder, or omit it to use the instance default.',
       );
     }
 

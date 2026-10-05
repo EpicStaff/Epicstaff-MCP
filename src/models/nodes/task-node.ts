@@ -1,6 +1,6 @@
 /**
  * TaskNode (NEW agent model) — single-task agent runner.
- * Ported from frontend `visual-programming/core/models/task-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`.
+ * Ported from frontend `pages/flows-page/components/flow-visual-programming/models/task-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`.
  */
 
 import type { NodeDtoMetadata } from '../graph.js';

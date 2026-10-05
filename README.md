@@ -13,8 +13,11 @@ write (flow.yaml) → build (validate + layout) → push (entities + graph) → 
 
 The plugin bundles the MCP server as built JS — no npm install needed at use time.
 
-1. Add this repo as a Claude Code plugin (marketplace manifest included):
-   `claude plugin marketplace add EpicStaff/Epicstaff-MCP` then install `epicstaff-mcp`.
+1. Add this repo as a Claude Code plugin (marketplace manifest included). **This is the 1.2.x
+   line (EpicStaff 1.2.x)** — add the marketplace from the `release/v1.2.x` branch, not the default
+   branch (see [Versioning & compatibility](#versioning--compatibility)):
+   `claude plugin marketplace add https://github.com/EpicStaff/Epicstaff-MCP.git#release/v1.2.x`
+   then `claude plugin install epicstaff-mcp@epicstaff`.
 2. Configure the environment for the MCP server (e.g. in your shell or the plugin's env):
    - `EPICSTAFF_BASE_URL` — EpicStaff base URL (e.g. `http://127.0.0.1`)
    - `EPICSTAFF_API_TOKEN` — a pre-issued API key, **or**
@@ -47,10 +50,31 @@ prerelease suffix) is the plugin's own. EpicStaff `1.2.x` pairs with plugin `1.2
 latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tracks EpicStaff
 `developer`, published as a prerelease of the *next* EpicStaff minor.
 
-| EpicStaff | Plugin |
-|---|---|
-| 1.3 (`developer`, unreleased) | `1.3.0-dev.N` (`main`) |
-| 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
+**This branch (`release/v1.2.x`) is the 1.2.x line** — verified against EpicStaff `v1.2.1`.
+
+| EpicStaff | Plugin | Install from |
+|---|---|---|
+| 1.3 (`developer`, unreleased) | `1.3.0-dev.N` | `main` |
+| 1.2.x | `1.2.y` | `release/v1.2.x` (this branch) |
+
+**Installing the 1.2.x line:** `1.3.0-dev.N` on `main` sorts *higher* than `1.2.y`, so a marketplace
+added from the default branch offers the 1.3 prerelease, which speaks APIs EpicStaff 1.2.x does
+not have (e.g. Key-Value tables). Add the marketplace from the `release/v1.2.x` ref instead:
+
+```
+claude plugin marketplace add https://github.com/EpicStaff/Epicstaff-MCP.git#release/v1.2.x
+claude plugin install epicstaff-mcp@epicstaff
+```
+
+Both lines publish the marketplace as `epicstaff`, so use one at a time. Switching from an
+installed `1.3.0-dev.N` (or `3.x`) to `1.2.y` is a downgrade — uninstall first
+(`claude plugin uninstall epicstaff-mcp@epicstaff`), remove the old marketplace
+(`claude plugin marketplace remove epicstaff`), then add and install as above.
+
+What 1.2.x does not have, compared with the 1.3 prerelease: the `key-value` node type and
+Key-Value tables (EpicStaff 1.2.x has no such API; the loader rejects `type: key-value`). The
+`default-models/` picks are one instance-wide singleton on EpicStaff 1.2.x (not per organization);
+the plugin uses a default only when it is one of the active organization's configs.
 
 **How to pick:** check your EpicStaff version (release tag, or `developer`) and install the newest
 plugin version with the same MAJOR.MINOR. The plugin cannot check this for you — EpicStaff has no
@@ -63,12 +87,13 @@ Each plugin release records the exact EpicStaff commit it was verified against i
 |---|---|
 | `repo` | EpicStaff repository the tree was synced against |
 | `branch` | EpicStaff branch (`developer`, or a `release/vX.Y.x` branch) |
+| `tag` | EpicStaff release tag the commit carries (release lines only, e.g. `v1.2.1`) |
 | `commit` | full sha of the EpicStaff commit the tree was analysed and tested against |
 | `synced_at` | date of that sync (ISO-8601) |
 | `release_line` | EpicStaff MAJOR.MINOR this version targets (equals the plugin's MAJOR.MINOR) |
 | `status` | `dev` — tracks an unreleased branch; `release` — verified against a release tag |
 
-**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. `1.3.0-dev.1` is numerically
+**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. `1.2.0` is numerically
 *lower* than `3.1.0`, so uninstall and reinstall instead of updating:
 `claude plugin uninstall epicstaff-mcp@epicstaff` then `claude plugin install epicstaff-mcp@epicstaff`.
 
@@ -164,9 +189,11 @@ flow:
 
 Node types: `start`, `agent`, `task`, `python`, `end`, `note`, `file-extractor`, `subgraph`,
 `webhook-trigger`, `telegram-trigger`, `schedule-trigger`, `decision-table`,
-`classification-decision-table`, `audio-to-text`, `knowledge-retriever`, `key-value`.
+`classification-decision-table`, `audio-to-text`, `knowledge-retriever`.
 `llm`, `code-agent` and `crew` node types are rejected with an error (removed from EpicStaff —
-rewrite a `crew` node as an `agent` node or `task` nodes).
+rewrite a `crew` node as an `agent` node or `task` nodes). `key-value` is rejected too: EpicStaff
+1.2.x has no Key-Value tables (they arrive in 1.3) — to keep a value across runs, declare it under
+`variables:` with `persist: user | organization`.
 
 ```yaml
     lookup:                               # search one RAG of a collection; results → output path
@@ -175,12 +202,6 @@ rewrite a `crew` node as an `agent` node or `task` nodes).
       query: "{question}"                 # {name} filled from input_map
       input_map: { question: variables.question }
       output_variable_path: variables.handbook
-    remember:                             # org Key-Value table (created on push if missing)
-      type: key-value
-      table: User Profiles
-      mode: read                          # read | write | delete
-      entries:
-        - { key: "profile_{variables.user_id}", value: variables.profile }   # read → writes variables.profile
 ```
 
 Webhook and Telegram trigger nodes are pushed without a webhook trigger (path / provider); attach
@@ -194,9 +215,7 @@ Data moves between nodes through a shared **`variables`** state, not along edges
 
 The `variables:` section declares state variables — names + initial values (the runtime state is
 untyped, so declarations carry no types). Declaring is **optional**: any node's
-`output_variable_path` also counts as producing a variable, and so does the `value` of a
-`key-value` read entry (a `key-value` write entry's `value` and every `{variables.…}` key
-placeholder are reads).
+`output_variable_path` also counts as producing a variable.
 
 `build_flow` validates the wiring (**may-reach** policy):
 

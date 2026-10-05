@@ -108,9 +108,8 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
      - Explicit retrieval step → `knowledge-retriever` (`collection`, `query` template with
        `{name}` placeholders filled from `input_map`, results to `output_variable_path`). For an
        `{ existing: ... }` collection also set `rag: naive|graph`.
-     - Values remembered across runs → `key-value` (`table` by name — created on push if missing —
-       `mode: read|write|delete`, `entries: [{ key, value }]`). Read entries write each stored value
-       to their own `value` path (that is the node's output; it has no `output_variable_path`).
+     - Values remembered across runs → a `persist:`ed variable (see "Persisting a variable"
+       above). There is no `key-value` node on EpicStaff 1.2.x — the loader rejects it.
      - Webhook / telegram triggers are pushed without a webhook trigger (path/provider); the user
        attaches one in the EpicStaff editor, and repushes keep it.
 3. Call `describe_node_types` for the catalog of node types — each type's fields plus runtime

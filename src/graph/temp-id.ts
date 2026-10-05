@@ -134,7 +134,6 @@ export function applySaveResponse(
     response.knowledge_node_list ?? [],
     existingIdsByType('knowledge-retriever')
   );
-  mapByNewIds(nodeDiff.keyValueNodes.toCreate, response.key_value_node_list ?? [], existingIdsByType('key-value'));
 
   return mapping;
 }
