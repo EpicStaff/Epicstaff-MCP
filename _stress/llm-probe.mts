@@ -1,14 +1,22 @@
+/** Show the field shape of an LLM config (secrets masked) and the matching model ids. */
 import { connect } from './lib.mjs';
+import { LlmApi } from '../src/api/llm.js';
+
+const configName = process.argv[2] ?? process.env.STRESS_LLM_CONFIG ?? 'stress-4o-mini';
+const modelPattern = new RegExp(process.env.STRESS_LLM_MODEL ?? 'gpt-4o-mini', 'i');
 const context = await connect();
-// Field shape of an existing config (mask any secret-looking value).
-const cfg = await context.client.get<any>('llm-configs/5/');
-const masked: Record<string, unknown> = {};
-for (const [k, v] of Object.entries(cfg)) {
-  masked[k] = typeof v === 'string' && (k.toLowerCase().includes('key') || v.startsWith('sk-')) ? `<${v ? 'set:' + v.length : 'empty'}>` : v;
+const llm = new LlmApi(context.client);
+const config = (await llm.listConfigs()).find((candidate) => candidate.custom_name === configName);
+if (!config) {
+  console.log(`no llm-config named "${configName}" — run _stress/provision-llm.mts first`);
+} else {
+  const fields = await context.client.get<Record<string, unknown>>(`llm-configs/${config.id}/`);
+  const masked: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(fields)) {
+    masked[field] =
+      typeof value === 'string' && (field.toLowerCase().includes('key') || value.startsWith('sk-')) ? '<masked>' : value;
+  }
+  console.log(`LLM_CONFIG "${configName}" (#${config.id}):`, JSON.stringify(masked, null, 2));
 }
-console.log('LLM_CONFIG#5 fields:', JSON.stringify(masked, null, 2));
-// Find gpt-4o-mini model id.
-const models = await context.client.get<any>('llm-models/?limit=1000');
-const items = Array.isArray(models) ? models : (models.results ?? []);
-const mini = items.filter((m: any) => /gpt-4o-mini/i.test(m.name ?? ''));
-console.log('gpt-4o-mini models:', JSON.stringify(mini.map((m: any) => ({ id: m.id, name: m.name, provider: m.provider }))));
+const models = (await llm.listModels()).filter((model) => modelPattern.test(model.name));
+console.log('matching models:', JSON.stringify(models.map((model) => ({ id: model.id, name: model.name, provider: model.llm_provider }))));

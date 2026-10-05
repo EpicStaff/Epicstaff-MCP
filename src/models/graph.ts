@@ -6,11 +6,12 @@
  * - visual-programming/core/models/node-metadata.model.ts (NodeDtoMetadata)
  * - visual-programming/utils/save/payload.ts            (bulk-save body shape)
  *
- * Intentionally excluded node types (never emitted by this module):
- * - llm_node_list        — legacy
- * - code_agent_node_list — deprecated
- * Their `deleted` id-list keys are kept (always empty) so the wire body shape
- * matches what the backend receives from the frontend byte-for-byte.
+ * Intentionally excluded node type (never emitted by this module):
+ * - llm_node_list — legacy; the frontend still emits it but the backend no longer has it
+ *   in NODE_TYPE_REGISTRY. Its `deleted.llm_node_ids` key is kept (always empty) so the
+ *   wire body shape matches what the frontend sends.
+ * Removed upstream (EST-3849 / EST-3813) and gone from the wire entirely:
+ * `crew_node_list` / `crew_node_ids`, `code_agent_node_list` / `code_agent_node_ids`.
  */
 
 import type { AgentNodeDto, AgentNodeWrite } from './nodes/agent-node.js';
@@ -20,12 +21,16 @@ import type {
   ClassificationDecisionTableNodeWrite,
 } from './nodes/classification-decision-table-node.js';
 import type { ConditionalEdgeDto } from './nodes/conditional-edge.js';
-import type { CrewNodeDto, CrewNodeWrite } from './nodes/crew-node.js';
 import type { DecisionTableNodeDto, DecisionTableNodeWrite } from './nodes/decision-table-node.js';
 import type { BulkEdgeCreate, BulkEdgeUpdate, EdgeDto } from './nodes/edge.js';
 import type { EndNodeDto, EndNodeWrite } from './nodes/end-node.js';
 import type { FileExtractorNodeDto, FileExtractorNodeWrite } from './nodes/file-extractor-node.js';
 import type { GraphNoteDto, GraphNoteWrite } from './nodes/note-node.js';
+import type { KeyValueNodeDto, KeyValueNodeWrite } from './nodes/key-value-node.js';
+import type {
+  KnowledgeRetrieverNodeDto,
+  KnowledgeRetrieverNodeWrite,
+} from './nodes/knowledge-retriever-node.js';
 import type { PythonNodeDto, PythonNodeWrite } from './nodes/python-node.js';
 import type { ScheduleTriggerNodeDto, ScheduleTriggerNodeWrite } from './nodes/schedule-trigger-node.js';
 import type { StartNodeDto, StartNodeWrite } from './nodes/start-node.js';
@@ -77,7 +82,6 @@ export interface GetGraphLightRequest {
 export interface GraphDto extends GetGraphLightRequest {
   save_version: number;
   start_node_list: StartNodeDto[];
-  crew_node_list: CrewNodeDto[];
   python_node_list: PythonNodeDto[];
   task_node_list: TaskNodeDto[];
   agent_node_list?: AgentNodeDto[];
@@ -94,6 +98,8 @@ export interface GraphDto extends GetGraphLightRequest {
   audio_transcription_node_list: AudioToTextNodeDto[];
   graph_note_list: GraphNoteDto[];
   schedule_trigger_node_list: ScheduleTriggerNodeDto[];
+  knowledge_node_list: KnowledgeRetrieverNodeDto[];
+  key_value_node_list: KeyValueNodeDto[];
 }
 
 export interface CreateGraphDtoRequest {
@@ -102,7 +108,6 @@ export interface CreateGraphDtoRequest {
   metadata?: Record<string, unknown>;
   tags?: string[];
   start_node_list?: StartNodeDto[];
-  crew_node_list?: CrewNodeDto[];
   python_node_list?: PythonNodeDto[];
   edge_list?: EdgeDto[];
   conditional_edge_list?: ConditionalEdgeDto[];
@@ -113,6 +118,8 @@ export interface CreateGraphDtoRequest {
   subgraph_node_list?: SubGraphNodeDto[];
   decision_table_node_list?: DecisionTableNodeDto[];
   schedule_trigger_node_list?: ScheduleTriggerNodeWrite[];
+  knowledge_node_list?: KnowledgeRetrieverNodeDto[];
+  key_value_node_list?: KeyValueNodeDto[];
 }
 
 export interface UpdateGraphDtoRequest {
@@ -136,12 +143,11 @@ export type BulkItem<TWrite> = BulkCreateItem<TWrite> | BulkUpdateItem<TWrite>;
 
 /**
  * The `deleted` block of the bulk-save body — backend ids to remove, keyed by type.
- * `llm_node_ids` / `code_agent_node_ids` are always empty (types not modelled here)
- * but kept so the body shape matches the frontend's exactly.
+ * `llm_node_ids` is always empty (type not modelled here) but kept so the body shape
+ * matches the frontend's exactly.
  */
 export interface BulkDeletedBlock {
   start_node_ids: number[];
-  crew_node_ids: number[];
   python_node_ids: number[];
   task_node_ids: number[];
   agent_node_ids: number[];
@@ -155,20 +161,20 @@ export interface BulkDeletedBlock {
   schedule_trigger_node_ids: number[];
   decision_table_node_ids: number[];
   graph_note_ids: number[];
-  code_agent_node_ids: number[];
   classification_decision_table_node_ids: number[];
+  knowledge_node_ids: number[];
+  key_value_node_ids: number[];
   edge_ids: number[];
 }
 
 /**
  * Body of `POST /graphs/:id/bulk-save/` — exactly what
  * `visual-programming/utils/save/payload.ts#buildBulkSavePayload` emits,
- * minus the excluded `llm_node_list` / `code_agent_node_list`.
+ * minus the excluded legacy `llm_node_list`.
  */
 export interface BulkSavePayload {
   save_version: number;
   start_node_list: BulkItem<StartNodeWrite>[];
-  crew_node_list: BulkItem<CrewNodeWrite>[];
   python_node_list: BulkItem<PythonNodeWrite>[];
   task_node_list: BulkItem<TaskNodeWrite>[];
   agent_node_list: BulkItem<AgentNodeWrite>[];
@@ -182,6 +188,8 @@ export interface BulkSavePayload {
   decision_table_node_list: BulkItem<DecisionTableNodeWrite>[];
   graph_note_list: BulkItem<GraphNoteWrite>[];
   classification_decision_table_node_list: BulkItem<ClassificationDecisionTableNodeWrite>[];
+  knowledge_node_list: BulkItem<KnowledgeRetrieverNodeWrite>[];
+  key_value_node_list: BulkItem<KeyValueNodeWrite>[];
   edge_list: (BulkEdgeCreate | BulkEdgeUpdate)[];
   deleted: BulkDeletedBlock;
 }

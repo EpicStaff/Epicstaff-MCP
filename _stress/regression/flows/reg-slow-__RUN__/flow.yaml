@@ -1,0 +1,9 @@
+meta: { name: reg-slow-__RUN__, description: Regression - long python step for stop_session. }
+flow:
+  nodes:
+    __start__: { type: start }
+    Sleep: { type: python, code: "def main():\n    import time\n    time.sleep(120)\n    return 'woke'", output_variable_path: variables.slept }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Sleep }
+    - { from: Sleep, to: __end__ }

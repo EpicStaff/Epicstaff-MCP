@@ -76,6 +76,12 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
      `output_variable_path`. Declare a variable to give it an initial default, a description, an
      early-read anchor, or a `persist:` scope.
    - `llm_configs` — model by name (e.g. `model: gpt-4o`); reuse `{ existing: ... }` when possible.
+     Numeric bounds follow the backend: `temperature` 0–2, `max_tokens` ≥ 500, `context_window`
+     (in `params`) ≥ 1000 — `build_flow` reports violations.
+     A provider key goes in `api_key_env: <ENV_NAME>` (never the value): push stores it as the org
+     secret `es-mcp:<ENV_NAME>`. Same for a telegram trigger's `bot_token_env`. Never name
+     `EPICSTAFF_*` / `ES_MCP_*` variables there — they are the MCP server's own credentials and
+     are rejected.
    - `tools` — `python_code_tools` / `mcp_tools` / `tool_configs` the agents need.
    - `knowledge` — collections with `documents:` (paths relative to the flow dir; put the
      files there) and a `rag:` strategy (`naive` or `graph`). **Author the knowledge section
@@ -99,11 +105,20 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
    - `agents` — AgentDefinitions: `instructions`, `llm_config`, `default_surfaces`.
    - `flow.nodes` / `flow.edges` — the graph. Never write coordinates; layout is computed.
      Conditional routing = edge with `condition:` (python code) instead of `to:`.
+     - Explicit retrieval step → `knowledge-retriever` (`collection`, `query` template with
+       `{name}` placeholders filled from `input_map`, results to `output_variable_path`). For an
+       `{ existing: ... }` collection also set `rag: naive|graph`.
+     - Values remembered across runs → `key-value` (`table` by name — created on push if missing —
+       `mode: read|write|delete`, `entries: [{ key, value }]`). Read entries write each stored value
+       to their own `value` path (that is the node's output; it has no `output_variable_path`).
+     - Webhook / telegram triggers are pushed without a webhook trigger (path/provider); the user
+       attaches one in the EpicStaff editor, and repushes keep it.
 3. Call `describe_node_types` for the catalog of node types — each type's fields plus runtime
    caveats the compiler can't catch (e.g. classification-decision-table does not reliably classify;
    decision-table conditions use `variables['x']['y']` dict access). It's offline, so consult it
-   whenever a node type is unfamiliar. Never use node types `llm` (legacy) or `code-agent`
-   (deprecated); avoid `crew` unless the user explicitly wants the deprecated crew path.
+   whenever a node type is unfamiliar. Never use node types `llm`, `code-agent` or `crew` — EpicStaff
+   removed them and the loader rejects them; model crew-style work as an `agent` node with ordered
+   `tasks:` (or `task` nodes).
 4. Call `validate_flow` and fix every error (path-located). Repeat until clean.
 
 Done when: `validate_flow` returns valid (warnings reviewed, not ignored silently).

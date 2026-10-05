@@ -61,9 +61,9 @@ class MockBackend {
     }
 
     // auth + org bootstrap
-    if (key === 'POST /api/auth/login/') return { status: 200, body: { access: 'jwt', refresh: 'r' } };
-    if (key === 'POST /api/auth/api-key/')
-      return { status: 201, body: { api_key: 'mock-key', prefix: 'mock-key', name: 'es-mcp' } };
+    if (key === 'POST /api/auth/login/') return { status: 200, body: { access: 'jwt' } };
+    if (key === 'POST /api/profile/api-keys/')
+      return { status: 201, body: { id: 1, api_key: 'mock-key', prefix: 'mock-key', name: 'es-mcp', expires_at: null } };
     if (key === 'GET /api/auth/api-key/validate/') return { status: 200, body: { active: true } };
     if (key === 'GET /api/profile/')
       return { status: 200, body: { memberships: [{ organization: { id: 1, name: 'Mock Org', is_active: true } }] } };
@@ -76,7 +76,7 @@ class MockBackend {
     if (key === 'GET /api/mcp-tools/') return { status: 200, body: this.mcpTools };
     if (key === 'GET /api/source-collections/') return { status: 200, body: this.collections };
     if (key === 'GET /api/embedding-configs/') return { status: 200, body: this.embeddingConfigs };
-    if (key === 'GET /api/default-embedding-config/') return { status: 200, body: { model: 20 } };
+    if (key === 'GET /api/default-models/') return { status: 200, body: { memory_embedding_config: 71 } };
 
     // surface CRUD
     if (key === 'POST /api/surfaces/') {

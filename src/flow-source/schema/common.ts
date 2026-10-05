@@ -5,6 +5,8 @@
  */
 import { z } from 'zod';
 
+import { isReservedEnvName } from '../../config.js';
+
 /** Symbolic names key every entity in a flow source and are used for cross-references. */
 export const SYMBOLIC_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 
@@ -69,3 +71,20 @@ export const inputMapSchema = z
   .describe(
     'Maps this node\'s named inputs to flow-state variable paths, e.g. { "query": "variables.user_query" }.',
   );
+
+/**
+ * Name of the environment variable a credential is read from (`api_key_env`, `bot_token_env`).
+ * The MCP server's own settings (EPICSTAFF_*, ES_MCP_*) are rejected: pushing would copy them
+ * into an org Secret that every flow in the organization can read.
+ */
+export function credentialEnvName(description: string) {
+  return z
+    .string()
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be an environment variable name (letters, digits, underscores)')
+    .refine((name) => !isReservedEnvName(name), {
+      message:
+        'EPICSTAFF_* and ES_MCP_* variables are the MCP server\'s own credentials and settings and cannot be ' +
+        'used as a flow credential — export the provider key under its own name (e.g. OPENAI_API_KEY)',
+    })
+    .describe(description);
+}

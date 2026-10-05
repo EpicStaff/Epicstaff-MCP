@@ -74,6 +74,42 @@ flow:
     expect(warnings.filter((w) => w.path.includes('input_map'))).toEqual([]);
   });
 
+  it("a condition reading its own source node's output → OK (it runs after the node's write)", async () => {
+    const { errors, warnings } = await compile(`
+meta: { name: condition-reads-source }
+flow:
+  nodes:
+    start: { type: start }
+    Score: { type: python, code: "def main():\\n    return {'band': 'high'}", output_variable_path: variables.score }
+    High:  { type: python, code: "def main():\\n    return 1", output_variable_path: variables.out }
+    Low:   { type: python, code: "def main():\\n    return 0", output_variable_path: variables.out }
+    finish: { type: end }
+  edges:
+    - { from: start, to: Score }
+    - from: Score
+      condition: { code: "def main(b):\\n    return 'High' if b == 'high' else 'Low'", input_map: { b: variables.score.band } }
+    - { from: High, to: finish }
+    - { from: Low, to: finish }
+`);
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a node's own input_map still does not count its own output", async () => {
+    const { warnings } = await compile(`
+meta: { name: self-read }
+flow:
+  nodes:
+    start: { type: start }
+    Loop: { type: python, code: "def main(x):\\n    return x", input_map: { x: variables.loop }, output_variable_path: variables.loop }
+    finish: { type: end }
+  edges:
+    - { from: start, to: Loop }
+    - { from: Loop, to: finish }
+`);
+    expect(warnings.map((warning) => warning.path)).toEqual(['flow.nodes.Loop.input_map.x']);
+  });
+
   it('read produced by NO node and not declared → ERROR', async () => {
     const { errors } = await compile(`
 meta: { name: typo }${AGENTS}

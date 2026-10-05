@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
@@ -17,12 +17,17 @@ import { buildBulkSavePayload } from '../graph/bulk-save.js';
 import type { GraphState } from '../graph/graph-state.js';
 import { buildRemoteState } from '../graph/remote-state.js';
 import type { GraphDto } from '../models/graph.js';
+import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { EntityPusher } from '../pusher/entities.js';
+import { resolveRagRefs } from '../pusher/rag-refs.js';
 import { resolveFlowRefs } from '../pusher/flow-refs.js';
-import { GraphPusher } from '../pusher/graph.js';
-import { prepareRestoreState } from '../pusher/restore.js';
+import { GraphPusher, lockedGraphMismatch, reconcileLockedGraph } from '../pusher/graph.js';
+import { prepareRestoreState, restoreConditionalEdges } from '../pusher/restore.js';
+import { applySaveResponse } from '../graph/temp-id.js';
 import { err, ok, toContent } from '../util/result.js';
 import { runTool } from './auth-org.tools.js';
+import { KeyedMutex } from '../util/keyed-mutex.js';
+import { ApiError } from '../http/errors.js';
 
 /**
  * Flow lifecycle tools — the write → build → test loop:
@@ -39,12 +44,17 @@ meta:
 
 llm_configs:
   default:
-    model: gpt-4o
+    model: gpt-4o-mini
+    provider: openai
+    # api_key_env: OPENAI_API_KEY   # env var holding the provider key (stored as an org secret)
 
 agents:
   assistant:
     instructions: You are a helpful assistant.
     llm_config: default
+
+variables:
+  question: { default: "" }
 
 flow:
   nodes:
@@ -53,12 +63,28 @@ flow:
     work:
       type: agent
       agent: assistant
+      # An agent node needs at least one task.
+      tasks:
+        - name: answer
+          instructions: Answer the question in one short paragraph — {question}
+      input_map: { question: variables.question }
+      output_variable_path: variables.answer
     finish:
       type: end
   edges:
     - { from: start, to: work }
     - { from: work, to: finish }
 `;
+
+/** Pushes of one flow directory never overlap within this process (see KeyedMutex). */
+const flowDirPushes = new KeyedMutex();
+const flowDirKey = (flowDir: string): string => {
+  try {
+    return realpathSync(flowDir);
+  } catch {
+    return resolve(flowDir);
+  }
+};
 
 export function registerFlowTools(server: McpServer, context: AppContext): void {
   server.registerTool(
@@ -161,7 +187,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         "Write a graph's ENTIRE backend representation to a local .json file, verbatim. Unlike pull_flow — " +
         'which projects the graph through the flow-source compiler and silently discards every field flow ' +
         'source cannot express (end-node output_map, classification-decision-table prompt_configs and route ' +
-        'codes, python stream_config/test_input, task output_schema, error routes) — this filters nothing. ' +
+        'codes, python test_input and secrets, task output_schema, error routes) — this filters nothing. ' +
         'That makes it the only faithful snapshot of a graph, and the right thing to take before editing a ' +
         'production flow. Read-only against the backend: it never writes to EpicStaff. The output is an ' +
         'archival record for diffing and manual restore, not a pushable flow source.',
@@ -205,7 +231,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           if (value === null || typeof value !== 'object') return;
           for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
             if (
-              ['output_map', 'prompt_configs', 'stream_config', 'output_schema', 'test_input'].includes(key) &&
+              ['output_map', 'prompt_configs', 'secrets', 'output_schema', 'test_input'].includes(key) &&
               child != null &&
               !(Array.isArray(child) && child.length === 0) &&
               !(typeof child === 'object' && !Array.isArray(child) && Object.keys(child).length === 0)
@@ -244,7 +270,8 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       description:
         'Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source ' +
         'cannot express — end-node output_map, classification prompt_configs and route codes, python ' +
-        'stream_config/test_input, task output_schema, and error routes. Use it to make a restorable ' +
+        'test_input and secrets, task output_schema, error routes and conditional edges (recreated through ' +
+        'their dedicated endpoint, so the copy routes identically). Use it to make a restorable ' +
         'backup, or to clone a flow when the backend copy/export endpoints mishandle classification and ' +
         'agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot ' +
         'damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, ' +
@@ -267,7 +294,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
     async ({ dump_path, name, description, target_graph_id }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
 
         if (!isAbsolute(dump_path)) throw new Error('dump_path must be an absolute path.');
         if (!existsSync(dump_path)) throw new Error(`No dump file at ${dump_path} — run dump_graph first.`);
@@ -282,7 +309,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           throw new Error(`${dump_path} does not look like a dump_graph snapshot (no edge_list).`);
         }
 
-        const { state, detached, remappedUuids, warnings } = prepareRestoreState(dto);
+        const { state, conditionalEdges, detached, remappedUuids, warnings } = prepareRestoreState(dto);
 
         const source = dto as unknown as { metadata?: Record<string, unknown>; tags?: string[]; label_ids?: number[] };
         const graphs = new GraphsApi(context.client);
@@ -296,10 +323,13 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         let remote: { nodes: GraphState['nodes']; edges: GraphState['edges'] };
         let createdGraph = false;
         let replaced = 0;
+        let staleConditionalEdgeIds: number[] = [];
 
         if (target_graph_id != null) {
           const targetDto = await graphs.get(target_graph_id);
           remote = buildRemoteState(targetDto);
+          // The target's conditional edges hang off nodes the overwrite deletes.
+          staleConditionalEdgeIds = (targetDto.conditional_edge_list ?? []).map((edge) => edge.id);
           targetId = target_graph_id;
           targetName = targetDto.name;
           baseSaveVersion = targetDto.save_version;
@@ -341,6 +371,25 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           );
         }
 
+        // Conditional edges are not part of bulk-save — recreate them through conditionaledges/,
+        // addressed by the new ids of their source nodes, so the copy routes like the original.
+        let conditionalEdgesRestored = 0;
+        try {
+          for (const edgeId of staleConditionalEdgeIds) await graphs.deleteConditionalEdge(edgeId);
+          conditionalEdgesRestored = await restoreConditionalEdges(
+            graphs,
+            targetId,
+            conditionalEdges,
+            applySaveResponse(state, { nodes: remote.nodes, edges: remote.edges }, saved),
+          );
+        } catch (error) {
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `Graph #${targetId} ("${targetName}") was saved, but restoring its conditional edges failed after ` +
+              `${conditionalEdgesRestored} of ${conditionalEdges.length} — it will not route like the dump. Cause: ${cause}`,
+          );
+        }
+
         // Labels are not part of the create body, so they need a follow-up PATCH.
         // Non-fatal: the graph content is already correct without them.
         const labelIds = source.label_ids ?? [];
@@ -370,6 +419,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           restoredFrom: { graph_id: dto.id, graph_name: dto.name, save_version: dto.save_version, dump_path },
           nodes: state.nodes.length,
           edges: state.edges.length,
+          conditionalEdges: conditionalEdgesRestored,
           detached,
           remappedUuids,
           warnings,
@@ -393,7 +443,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
     async ({ flow_dir }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         const artifact = await compileFlow(flow_dir);
         if (hasErrors(artifact.diagnostics)) {
           throw new Error('Flow source has errors — run validate_flow first.');
@@ -403,6 +453,10 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         const entityPlan = artifact.entities.map((plan) => {
           if (plan.action === 'resolve-existing') {
             return { key: plan.key, kind: plan.kind, wouldDo: 'resolve-existing', remoteName: plan.remoteName };
+          }
+          if (plan.action === 'ensure') {
+            // Secrets / key-value tables: found by name at push time, created only when missing.
+            return { key: plan.key, kind: plan.kind, wouldDo: 'reuse-or-create-by-name', remoteName: plan.remoteName };
           }
           const entry = getEntity(lock, plan.section, plan.name);
           if (!entry) return { key: plan.key, kind: plan.kind, wouldDo: 'create' };
@@ -416,8 +470,26 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         if (lock.graphId === null) {
           graphStatus = { wouldDo: 'create graph + all nodes/edges' };
         } else {
-          const { GraphsApi } = await import('../api/graphs.js');
-          const remoteDto = await new GraphsApi(context.client).get(lock.graphId);
+          let remoteDto: GraphDto;
+          try {
+            remoteDto = await new GraphsApi(context.client).get(lock.graphId);
+          } catch (error) {
+            if (!(error instanceof ApiError && error.status === 404)) throw error;
+            return {
+              entities: entityPlan,
+              graph: {
+                graphId: lock.graphId,
+                wouldDo: 'recreate graph + all nodes/edges',
+                warning:
+                  `Graph #${lock.graphId} recorded in flow.lock.json no longer exists (deleted, or the lockfile comes ` +
+                  'from another EpicStaff instance) — push_flow will create a new graph and re-verify the locked entity ids.',
+              },
+            };
+          }
+          const mismatch = lockedGraphMismatch(remoteDto, artifact.flowName);
+          if (mismatch !== null) {
+            return { entities: entityPlan, graph: { graphId: lock.graphId, wouldDo: 'refuse (not this flow\'s graph)', conflict: mismatch } };
+          }
           graphStatus = {
             graphId: lock.graphId,
             remoteSaveVersion: remoteDto.save_version,
@@ -439,7 +511,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       title: 'Push flow to EpicStaff',
       description:
         'Build the flow and materialize it on EpicStaff: upsert the entity dependency tree in order ' +
-        '(llm-configs → tools → knowledge+documents+RAG → surfaces → agent-definitions), then create/update the ' +
+        '(secrets + key-value tables → llm-configs → tools → knowledge+documents+RAG → surfaces → agent-definitions), then create/update the ' +
         'graph via bulk-save with the computed layout. Repush updates in place (lockfile identity mapping) — ' +
         'never duplicates. Fails on remote save_version conflict unless force is set.',
       inputSchema: {
@@ -448,12 +520,19 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           .boolean()
           .optional()
           .describe('Overwrite remote graph changes on save_version conflict (default false)'),
+        rename: z
+          .boolean()
+          .optional()
+          .describe(
+            'The flow was renamed (meta.name changed): rename the locked remote graph to meta.name instead of ' +
+              'refusing (default false). Only use when this directory really is that flow, not a copy of it.',
+          ),
       },
     },
-    async ({ flow_dir, force }) =>
-      runTool(async () => {
+    async ({ flow_dir, force, rename }) =>
+      runTool(() => flowDirPushes.runExclusive(flowDirKey(flow_dir), async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
 
         const artifact = await compileFlow(flow_dir);
         if (hasErrors(artifact.diagnostics)) {
@@ -465,9 +544,22 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
 
         let lock = (await readLock(flow_dir)) ?? createLock(artifact.flowName);
 
+        // A lockfile whose graph is gone is stale (deleted in the UI, or copied from another
+        // instance): recreate the graph and stop trusting its entity ids.
+        const reconciled = await reconcileLockedGraph(new GraphsApi(context.client), lock, artifact.flowName, {
+          rename,
+          force,
+        });
+        lock = reconciled.lock;
+        const warnings: string[] = reconciled.warning ? [reconciled.warning] : [];
+
         const entityPusher = new EntityPusher(context);
-        const entityResult = await entityPusher.push(artifact, lock);
+        const entityResult = await entityPusher.push(artifact, lock, {
+          verifyLockedIds: reconciled.graphMissing,
+          persistLock: (partial) => writeLock(flow_dir, partial),
+        });
         lock = entityResult.lock;
+        warnings.push(...entityResult.warnings);
         // Persist entity progress immediately — a later graph failure must not orphan created entities.
         await writeLock(flow_dir, lock);
 
@@ -477,6 +569,11 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         for (const [refKey, graphId] of flowRefs) {
           entityResult.idMap.set(refKey, graphId);
         }
+        // Knowledge-retriever RAGs of `existing:` collections — looked up, never created.
+        const ragRefs = await resolveRagRefs(artifact, entityResult.idMap, context);
+        for (const [refKey, ragId] of ragRefs) {
+          entityResult.idMap.set(refKey, ragId);
+        }
 
         const graphPusher = new GraphPusher(context);
         const graphResult = await graphPusher.push(artifact, lock, entityResult.idMap, {
@@ -485,17 +582,26 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         });
         lock = graphResult.lock;
         await writeLock(flow_dir, lock);
+        warnings.push(...graphResult.warnings);
 
+        const entitiesChanged = entityResult.actions.some(
+          (action) => action.action === 'created' || action.action === 'updated',
+        );
         return {
           graphId: graphResult.graphId,
           saveVersion: graphResult.saveVersion,
           createdGraph: graphResult.createdGraph,
+          changed: graphResult.changed || entitiesChanged,
+          ...(graphResult.changed || entitiesChanged
+            ? {}
+            : { status: 'no changes — the remote graph and entities already match the flow source' }),
           entities: entityResult.actions,
           nodes: graphResult.nodeActions,
+          ...(warnings.length > 0 ? { warnings } : {}),
           openInEditor: `${context.config.apiUrl.replace(/\/api\/$/, '')}/flows/${graphResult.graphId}`,
           next: 'Open the flow in the EpicStaff editor to inspect it, or run_flow to execute it.',
         };
-      }),
+      })),
   );
 
   server.registerTool(
@@ -513,9 +619,9 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       },
     },
     async ({ flow_dir }) =>
-      runTool(async () => {
+      runTool(() => flowDirPushes.runExclusive(flowDirKey(flow_dir), async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
 
         const artifact = await compileFlow(flow_dir);
         if (hasErrors(artifact.diagnostics)) {
@@ -529,6 +635,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
 
         const entityResult = await new EntityPusher(context).push(artifact, lock, {
           sections: ['llm_configs', 'knowledge'],
+          persistLock: (partial) => writeLock(flow_dir, partial),
         });
         lock = entityResult.lock;
         await writeLock(flow_dir, lock);
@@ -551,7 +658,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           indexingStarted: true,
           next: 'Author/build the rest of the flow, then push_flow (these collections will be reused, not re-indexed), then wait_for_collections before running.',
         };
-      }),
+      })),
   );
 
   server.registerTool(
@@ -574,7 +681,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
     async ({ graph_id, target_dir }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
 
         const { files, warnings } = await decompileFlow(
           {
@@ -584,6 +691,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
             llm: new LlmApi(context.client),
             tools: new ToolsApi(context.client),
             knowledge: new KnowledgeApi(context.client),
+            keyValueTables: new KeyValueTablesApi(context.client),
           },
           graph_id,
           target_dir,

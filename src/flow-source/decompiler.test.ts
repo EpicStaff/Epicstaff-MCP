@@ -123,7 +123,6 @@ function buildGraphDto(): GraphDto {
         metadata: {},
       },
     ],
-    crew_node_list: [],
     file_extractor_node_list: [],
     webhook_trigger_node_list: [],
     telegram_trigger_node_list: [],
@@ -133,6 +132,8 @@ function buildGraphDto(): GraphDto {
     audio_transcription_node_list: [],
     graph_note_list: [],
     schedule_trigger_node_list: [],
+    knowledge_node_list: [],
+    key_value_node_list: [],
   };
 }
 
@@ -187,7 +188,8 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
     },
     llm: { listConfigs: async () => [] },
     tools: { listPythonCodeTools: async () => [], listMcpTools: async () => [] },
-    knowledge: { listCollections: async () => [] },
+    knowledge: { listCollections: async () => [{ collection_id: 8, collection_name: 'Handbook' }] },
+    keyValueTables: { list: async () => [{ id: 4, name: 'User Profiles' }] },
   };
 }
 
@@ -331,6 +333,88 @@ describe('decompileFlow', () => {
       entrypoint: 'main',
       libraries: [],
     });
+  });
+
+  it('pulls knowledge-retriever and key-value nodes and recompiles them with zero errors', async () => {
+    const dto = buildGraphDto();
+    // TO wire shape: no crew_node_list at all (removed upstream).
+    expect(dto).not.toHaveProperty('crew_node_list');
+    dto.knowledge_node_list = [
+      {
+        id: 6,
+        graph: 42,
+        node_name: 'retrieve',
+        source_collection: 8,
+        search_configs: { graph: { search_method: 'local', basic: null, local: { top_k_entities: 5 } } },
+        metadata: nodeMetadata(500, 600, 6),
+        input_map: { question: 'variables.topic' },
+        output_variable_path: 'variables.docs',
+        query: '{question}',
+        rag_type: 'graph',
+        rag_id: 81,
+      },
+    ];
+    dto.key_value_node_list = [
+      {
+        id: 7,
+        graph: 42,
+        node_name: 'remember',
+        input_map: {},
+        output_variable_path: null,
+        key_value_table: 4,
+        mode: 'write',
+        entries: [{ key: 'last_{variables.topic}', value: 'variables.research' }],
+        metadata: nodeMetadata(900, 600, 7),
+      },
+    ];
+    const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
+    expect(result.warnings.filter((warning) => warning.includes('retrieve') || warning.includes('remember'))).toEqual([]);
+
+    const { source, diagnostics } = await loadFlowDirectory(targetDir);
+    expect(diagnostics).toEqual([]);
+    expect(source!.flow.nodes['retrieve']).toMatchObject({
+      type: 'knowledge-retriever',
+      collection: { existing: 'Handbook' },
+      rag: 'graph',
+      query: '{question}',
+      // Write-only on the backend: recovered from the read-back graph config.
+      search_method: 'local',
+      search_configs: { graph: { basic: null, local: { top_k_entities: 5 } } },
+      input_map: { question: 'variables.topic' },
+      output_variable_path: 'variables.docs',
+    });
+    expect(source!.flow.nodes['remember']).toMatchObject({
+      type: 'key-value',
+      table: 'User Profiles',
+      mode: 'write',
+      entries: [{ key: 'last_{variables.topic}', value: 'variables.research' }],
+    });
+    expect(result.lock.entities['nodes.retrieve']?.backendId).toBe(6);
+    expect(result.lock.entities['nodes.remember']?.backendId).toBe(7);
+
+    const artifact = await compileFlow(targetDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+  });
+
+  it('writes a placeholder (with a warning) for a subgraph whose target flow was deleted', async () => {
+    const dto = buildGraphDto();
+    dto.subgraph_node_list = [
+      {
+        id: 9,
+        node_name: 'orphan',
+        graph: 42,
+        subgraph: null,
+        input_map: {},
+        output_variable_path: null,
+        metadata: nodeMetadata(100, 900, 9),
+      },
+    ];
+    const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
+    expect(result.warnings.some((warning) => warning.includes('flow.nodes.orphan') && warning.includes('deleted'))).toBe(
+      true,
+    );
+    const { source } = await loadFlowDirectory(targetDir);
+    expect(source!.flow.nodes['orphan']).toMatchObject({ type: 'subgraph', graph: { existing: 'UNRESOLVED' } });
   });
 
   it('refuses to overwrite an existing local flow source', async () => {

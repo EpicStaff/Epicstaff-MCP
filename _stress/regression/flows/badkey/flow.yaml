@@ -1,0 +1,18 @@
+# Invalid: 'instrutions' is a typo of 'instructions' on the agent.
+meta:
+  name: unknown-key-example
+
+agents:
+  researcher:
+    instrutions: You are a researcher.
+    llm_config: { existing: "org-default" }
+
+flow:
+  nodes:
+    start:
+      type: start
+    finish:
+      type: end
+  edges:
+    - from: start
+      to: finish

@@ -73,12 +73,20 @@ export const NODE_REFERENCE: Record<FlowNodeType, NodeReference> = {
   'webhook-trigger': {
     summary: 'Starts the flow on an incoming webhook; its payload seeds flow state.',
     whenToUse: 'Event-driven flows started by an external HTTP call. The trigger is the interface.',
-    caveats: [],
+    caveats: [
+      'The node is pushed without a webhook trigger (path / provider); attach one in the EpicStaff UI — ' +
+        'a repush keeps the attached trigger.',
+    ],
   },
   'telegram-trigger': {
     summary: 'Starts the flow on a Telegram message.',
     whenToUse: 'Telegram-bot-driven flows. Supply the bot token via env, never in flow source.',
-    caveats: [],
+    caveats: [
+      'bot_token_env is stored as the org Secret "es-mcp:<ENV>" on push, which needs a user session ' +
+        '(EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD) — EpicStaff does not let API keys manage secrets.',
+      'The node is pushed without a webhook trigger; attach one (ngrok provider) in the EpicStaff UI so ' +
+        'Telegram can reach it.',
+    ],
   },
   'schedule-trigger': {
     summary: 'Starts the flow on a cron schedule.',
@@ -108,11 +116,33 @@ export const NODE_REFERENCE: Record<FlowNodeType, NodeReference> = {
     whenToUse: 'Speech-to-text steps inside a flow.',
     caveats: [],
   },
-  crew: {
-    summary: 'DEPRECATED — runs a legacy remote crew (project). Prefer agent/task nodes.',
-    whenToUse: 'Only when the user explicitly needs the legacy crew path. Emits a deprecation warning.',
+  'knowledge-retriever': {
+    summary:
+      'Searches one RAG (naive or graph) of a knowledge collection with a query template and writes the ' +
+      'joined results to output_variable_path.',
+    whenToUse:
+      'Explicit retrieval as a flow step (RAG results as data), instead of giving an agent the collection ' +
+      'through a surface.',
     caveats: [
-      'Deprecated. Crews cannot be defined in flow source — only referenced via {existing: "<name>"}.',
+      'The query is a template: {name} placeholders are filled from the node\'s input_map keys; an empty ' +
+        'resulting query fails the run.',
+      'The collection must have an indexed RAG of the chosen type before the flow runs — push_flow picks the ' +
+        'RAG, wait_for_collections waits for indexing. For an {existing: …} collection set rag: naive | graph.',
+      'No matches is not an error: the output is the text "No relevant results were found in the knowledge collection."',
+      'search_method without graph search_configs cannot be read back from EpicStaff (write-only field), so ' +
+        'such a node is re-sent (unchanged) on every push.',
+    ],
+  },
+  'key-value': {
+    summary:
+      'Reads, writes or deletes keys of an organization Key-Value table (persistent across sessions and flows).',
+    whenToUse:
+      'Remembering small values between runs (user profiles, counters, cached results) without a python node.',
+    caveats: [
+      'The table is org-wide and shared by every flow that names it; it is created on push when missing.',
+      'read: each entry\'s value is the state path the stored value is written to (None when the key is ' +
+        'missing, no |default). write: value is the state path to store (may end in |default). delete: key only.',
+      'Keys use letters, digits and _ plus {variables.<path>} placeholders; the node writes no output_variable_path.',
     ],
   },
 };

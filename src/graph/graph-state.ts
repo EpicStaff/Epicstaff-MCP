@@ -10,6 +10,8 @@
  */
 
 import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
+import type { KeyValueNodeData } from '../models/nodes/key-value-node.js';
+import type { KnowledgeRetrieverNodeData } from '../models/nodes/knowledge-retriever-node.js';
 import type { CustomPythonCode } from '../models/nodes/python-node.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
 import type { TelegramTriggerFieldWrite } from '../models/nodes/telegram-trigger-node.js';
@@ -19,7 +21,7 @@ import type {
   ScheduleRunMode,
   WeekdayCode,
 } from '../models/nodes/schedule-trigger-node.js';
-import type { WebhookTriggerModel } from '../models/nodes/webhook-trigger-node.js';
+import type { WebhookTriggerRef } from '../models/nodes/webhook-trigger-node.js';
 
 export interface GraphPoint {
   x: number;
@@ -47,17 +49,9 @@ export interface StartGraphNode extends GraphNodeBase {
   data: { initialState: Record<string, unknown> };
 }
 
-/** Crew (project) node — deprecated but supported. `data.id` is the crew/project id. */
-export interface CrewGraphNode extends GraphNodeBase {
-  type: 'crew';
-  data: { id: number };
-  stream_config?: Record<string, boolean>;
-}
-
 export interface PythonGraphNode extends GraphNodeBase {
   type: 'python';
   data: CustomPythonCode;
-  stream_config?: Record<string, boolean>;
   test_input: Record<string, string | number | boolean>;
 }
 
@@ -107,16 +101,16 @@ export interface AudioToTextGraphNode extends GraphNodeBase {
   type: 'audio-to-text';
 }
 
-/** `data.id` is the referenced subgraph's id. */
+/** `data.id` is the referenced subgraph's id — null when that flow was deleted (SET_NULL). */
 export interface SubgraphGraphNode extends GraphNodeBase {
   type: 'subgraph';
-  data: { id: number };
+  data: { id: number | null };
 }
 
 export interface WebhookTriggerGraphNode extends GraphNodeBase {
   type: 'webhook-trigger';
   data: {
-    webhook_trigger: WebhookTriggerModel | null;
+    webhook_trigger: WebhookTriggerRef | null;
     python_code: CustomPythonCode;
   };
 }
@@ -124,10 +118,22 @@ export interface WebhookTriggerGraphNode extends GraphNodeBase {
 export interface TelegramTriggerGraphNode extends GraphNodeBase {
   type: 'telegram-trigger';
   data: {
-    telegram_bot_api_key: string;
-    webhook_trigger: WebhookTriggerModel | null;
+    telegram_bot_api_key_secret_id: number | null;
+    webhook_trigger: WebhookTriggerRef | null;
     fields: TelegramTriggerFieldWrite[];
   };
+}
+
+/** Mirrors the frontend's `KnowledgeRetrieverNodeModel` data. */
+export interface KnowledgeRetrieverGraphNode extends GraphNodeBase {
+  type: 'knowledge-retriever';
+  data: KnowledgeRetrieverNodeData;
+}
+
+/** Mirrors the frontend's `KeyValueNodeModel` data. */
+export interface KeyValueGraphNode extends GraphNodeBase {
+  type: 'key-value';
+  data: KeyValueNodeData;
 }
 
 /** Mirrors the frontend's `ScheduleTriggerNodeData` draft state. */
@@ -188,9 +194,13 @@ export interface CdtComputationState {
   libraries?: string[];
   input_map?: Record<string, string>;
   output_variable_path?: string | null;
+  /** Secrets the computation may read. */
+  secret_ids?: number[];
 }
 
 export interface CdtPromptConfigState {
+  /** Backend id of the persisted prompt config (set on load). */
+  backendId?: number | null;
   prompt_text?: string;
   llm_config?: number | null;
   output_schema?: Record<string, unknown> | string | null;
@@ -241,7 +251,6 @@ export interface ClassificationDecisionTableGraphNode extends GraphNodeBase {
 
 export type GraphNode =
   | StartGraphNode
-  | CrewGraphNode
   | PythonGraphNode
   | TaskGraphNode
   | AgentGraphNode
@@ -254,7 +263,9 @@ export type GraphNode =
   | TelegramTriggerGraphNode
   | ScheduleTriggerGraphNode
   | DecisionTableGraphNode
-  | ClassificationDecisionTableGraphNode;
+  | ClassificationDecisionTableGraphNode
+  | KnowledgeRetrieverGraphNode
+  | KeyValueGraphNode;
 
 export type GraphNodeType = GraphNode['type'];
 

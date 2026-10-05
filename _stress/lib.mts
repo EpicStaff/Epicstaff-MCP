@@ -1,7 +1,8 @@
 /**
  * Stress-test harness — drives the plugin's own compile → push → run → verify
  * pipeline against a live backend, reusing the exact code paths the MCP tools use
- * (compileFlow, EntityPusher, GraphPusher, SessionsApi). Temporary; delete when done.
+ * (compileFlow, EntityPusher, GraphPusher, SessionsApi). Configured only via the
+ * EPICSTAFF_* environment (see run-all.mts).
  */
 import { loadConfig } from '../src/config.js';
 import { createContext, type AppContext } from '../src/context.js';
@@ -9,7 +10,8 @@ import { compileFlow } from '../src/compiler/index.js';
 import { hasErrors } from '../src/flow-source/diagnostics.js';
 import { createLock, readLock, writeLock } from '../src/flow-source/lockfile.js';
 import { EntityPusher } from '../src/pusher/entities.js';
-import { GraphPusher } from '../src/pusher/graph.js';
+import { GraphPusher, reconcileLockedGraph } from '../src/pusher/graph.js';
+import { GraphsApi } from '../src/api/graphs.js';
 import { SessionsApi, TERMINAL_SESSION_STATUSES, summarizeMessages } from '../src/api/sessions.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -66,9 +68,25 @@ export async function compile(dir: string): Promise<CompileResult> {
 export async function push(context: AppContext, dir: string): Promise<{ graphId: number; saveVersion: number }> {
   const artifact = await compileFlow(dir);
   if (hasErrors(artifact.diagnostics)) throw new Error(`compile errors in ${dir}`);
-  let lock = (await readLock(dir)) ?? createLock(artifact.flowName);
+  // Same sequence as the push_flow tool: a lockfile whose graph is gone (fresh instance,
+  // deleted in the UI) is reconciled first, and its entity ids are re-verified.
+  const graphs = new GraphsApi(context.client);
+  const reconciled = await reconcileLockedGraph(graphs, (await readLock(dir)) ?? createLock(artifact.flowName), artifact.flowName);
+  let lock = reconciled.lock;
+  if (reconciled.warning) console.log(`  (${reconciled.warning})`);
+  // Harness-only: lockfiles are local state, so on an instance that already ran the suite the
+  // graph and entities exist without a lock entry — adopt them by name instead of colliding on
+  // the backend's unique names (push_flow deliberately does not do this).
+  if (lock.graphId === null) {
+    const existing = (await graphs.listLight()).find((graph) => graph.name === artifact.flowName);
+    if (existing) lock = { ...lock, graphId: existing.id, saveVersion: 0 };
+  }
   const entityPusher = new EntityPusher(context);
-  const entityResult = await entityPusher.push(artifact, lock);
+  const entityResult = await entityPusher.push(artifact, lock, {
+    verifyLockedIds: true,
+    adoptByName: true,
+    persistLock: (partial) => writeLock(dir, partial),
+  });
   lock = entityResult.lock;
   await writeLock(dir, lock);
   const graphPusher = new GraphPusher(context);

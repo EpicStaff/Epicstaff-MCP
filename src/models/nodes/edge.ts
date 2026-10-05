@@ -1,4 +1,4 @@
-/** Ported from frontend `models/edge.model.ts` + the edge emission in `utils/save/payload.ts`. */
+/** Ported from frontend `visual-programming/core/models/edge.model.ts` + the edge emission in `visual-programming/utils/save/payload.ts`. */
 
 export interface EdgeDto {
   id: number;

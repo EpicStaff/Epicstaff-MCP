@@ -41,13 +41,48 @@ function normalizeApiUrl(raw: string): string {
 }
 
 /**
- * The plugin's .mcp.json passes every variable through `${VAR}` interpolation,
- * which turns unset variables into empty strings — treat those as absent.
- * Names are tried in order; the first non-empty value wins.
+ * Raised when the MCP server environment is missing or malformed. The server still starts
+ * (see index.ts) and every tool that needs the backend returns this message, so the user sees
+ * what to fix instead of Claude Code's bare "Connection closed".
  */
-function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigurationError';
+  }
+}
+
+/**
+ * A literal, unexpanded `${VAR}` / `${VAR:-default}` placeholder. Claude Code passes the
+ * placeholder through verbatim when the variable is unset in the user's shell, so the server
+ * would otherwise try to log in as the user "${EPICSTAFF_USERNAME}".
+ */
+const UNEXPANDED_PLACEHOLDER = /^\$\{[A-Za-z_][A-Za-z0-9_]*(:?[-=+?][^}]*)?\}$/;
+
+/**
+ * Read one environment variable, treating every "not really set" form as absent: undefined,
+ * an empty or whitespace-only string (the plugin's .mcp.json `${VAR}` interpolation turns unset
+ * variables into empty strings) and an unexpanded `${VAR}` placeholder.
+ */
+export function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = env[name];
-  return value ? value : undefined;
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '' || UNEXPANDED_PLACEHOLDER.test(trimmed)) return undefined;
+  return value;
+}
+
+/**
+ * Environment variables a flow source may NOT name as a credential source (`api_key_env`,
+ * `bot_token_env`): the MCP server's own login and state settings. Without this, a flow could
+ * copy `EPICSTAFF_PASSWORD` into an org secret readable by every flow in the organization.
+ */
+// Case-insensitive: on Windows process.env lookups ignore case, so `epicstaff_password` reads
+// EPICSTAFF_PASSWORD.
+export const RESERVED_ENV_NAME = /^(EPICSTAFF_|ES_MCP_)/i;
+
+export function isReservedEnvName(name: string): boolean {
+  return RESERVED_ENV_NAME.test(name);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -90,7 +125,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   if (problems.length > 0 || apiUrl === undefined) {
-    throw new Error(
+    throw new ConfigurationError(
       `Invalid EpicStaff MCP configuration — ${problems.join('; ')}. ` +
         'Set EPICSTAFF_BASE_URL plus either EPICSTAFF_API_TOKEN or ' +
         'EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD in the MCP server environment.',

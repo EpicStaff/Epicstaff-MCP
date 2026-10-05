@@ -1,4 +1,4 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Org storage lookup — minimal port of features/files/services/storage-api.service.ts,
@@ -12,7 +12,7 @@ interface StorageItem {
 }
 
 export class StorageApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
   /** Resolve an org-storage file path (e.g. "reports/summary.md") to its backend id. */
   async resolveFileId(filePath: string): Promise<number> {

@@ -1,0 +1,12 @@
+meta: { name: reg-io-__RUN__, description: Regression - file-extractor and audio-to-text (push only). }
+variables: { file: { default: "" }, audio: { default: "" } }
+flow:
+  nodes:
+    __start__: { type: start }
+    Extract: { type: file-extractor, input_map: { file: variables.file }, output_variable_path: variables.text }
+    Transcribe: { type: audio-to-text, input_map: { audio: variables.audio }, output_variable_path: variables.transcript }
+    __end__: { type: end }
+  edges:
+    - { from: __start__, to: Extract }
+    - { from: Extract, to: Transcribe }
+    - { from: Transcribe, to: __end__ }

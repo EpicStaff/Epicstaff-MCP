@@ -1,13 +1,18 @@
-import type { EpicStaffClient } from '../http/client.js';
+import type { ApiClient } from '../http/client.js';
 
 /**
  * Tools API — ported from features/tools/services/
- * {tool-config,custom-tools/custom-tools-api,mcp-tools/mcp-tools}.service.ts.
- * Three kinds: configured built-in tools, python-code tools, MCP tools.
+ * {custom-tools/custom-tools,mcp-tools/mcp-tools}.service.ts, plus the backend-only
+ * `python-code-tool-configs/` route (tables/views: PythonCodeToolConfigViewSet), which
+ * the frontend does not call.
+ *
+ * Three kinds: python-code tools (custom, or `built_in: true` catalog tools), configured
+ * tools (a named configuration of a python-code tool), MCP tools.
  */
 export interface ToolConfig {
   id: number;
   name: string;
+  /** The configured python-code tool (built-in or custom). */
   tool: number;
   configuration: Record<string, unknown>;
 }
@@ -18,6 +23,13 @@ export interface PythonCodeTool {
   description: string;
   variables?: unknown[];
   python_code?: { code: string; entrypoint: string; libraries: string[]; global_kwargs?: Record<string, unknown> };
+  /** Catalog tool shipped with EpicStaff (visible to every org, not editable). */
+  built_in?: boolean;
+  is_favorite?: boolean;
+  labels?: number[];
+  use_storage?: boolean;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface McpTool {
@@ -27,6 +39,10 @@ export interface McpTool {
   tool_name: string;
   timeout?: number;
   init_timeout?: number;
+  /** Org Secret with the server auth credential. */
+  auth_secret_id?: number | null;
+  is_favorite?: boolean;
+  labels?: number[];
 }
 
 export interface CreatePythonCodeToolRequest {
@@ -40,6 +56,7 @@ export interface CreatePythonCodeToolRequest {
     global_kwargs?: Record<string, unknown>;
   };
   use_storage?: boolean;
+  labels?: number[];
 }
 
 export interface CreateMcpToolRequest {
@@ -47,8 +64,15 @@ export interface CreateMcpToolRequest {
   transport: string;
   tool_name: string;
   timeout?: number;
-  auth?: unknown;
+  auth_secret_id?: number | null;
   init_timeout?: number;
+  labels?: number[];
+}
+
+export interface CreateToolConfigRequest {
+  name: string;
+  tool: number;
+  configuration: Record<string, unknown>;
 }
 
 interface Paginated<T> {
@@ -60,27 +84,28 @@ function unwrap<T>(response: Paginated<T> | T[]): T[] {
   return Array.isArray(response) ? response : response.results;
 }
 
-/** Built-in catalog tool (read-only route `tools/` — not user-creatable). */
-export interface BuiltinTool {
-  id: number;
-  name: string;
-  name_alias?: string;
-}
-
 export class ToolsApi {
-  constructor(private readonly client: EpicStaffClient) {}
+  constructor(private readonly client: ApiClient) {}
 
-  async listBuiltinTools(): Promise<BuiltinTool[]> {
-    return unwrap(await this.client.get<Paginated<BuiltinTool> | BuiltinTool[]>('tools/', { query: { limit: 1000 } }));
+  /** Built-in catalog tools: the `built_in` rows of `python-code-tool/`. */
+  async listBuiltinTools(): Promise<PythonCodeTool[]> {
+    return (await this.listPythonCodeTools()).filter((tool) => tool.built_in === true);
   }
 
   async listToolConfigs(): Promise<ToolConfig[]> {
-    return unwrap(await this.client.get<Paginated<ToolConfig> | ToolConfig[]>('tool-configs/', { query: { limit: 1000 } }));
+    return unwrap(
+      await this.client.get<Paginated<ToolConfig> | ToolConfig[]>('python-code-tool-configs/', {
+        query: { limit: 1000 },
+      }),
+    );
   }
 
+  /** Every python-code tool visible to the org: its custom tools plus the built-in catalog. */
   async listPythonCodeTools(): Promise<PythonCodeTool[]> {
     return unwrap(
-      await this.client.get<Paginated<PythonCodeTool> | PythonCodeTool[]>('python-code-tool/', { query: { limit: 1000 } }),
+      await this.client.get<Paginated<PythonCodeTool> | PythonCodeTool[]>('python-code-tool/', {
+        query: { limit: 1000 },
+      }),
     );
   }
 
@@ -88,8 +113,12 @@ export class ToolsApi {
     return unwrap(await this.client.get<Paginated<McpTool> | McpTool[]>('mcp-tools/', { query: { limit: 1000 } }));
   }
 
-  async createToolConfig(request: { name: string; configuration: Record<string, unknown>; tool: number }): Promise<ToolConfig> {
-    return this.client.post('tool-configs/', { body: request });
+  async createToolConfig(request: CreateToolConfigRequest): Promise<ToolConfig> {
+    return this.client.post('python-code-tool-configs/', { body: request });
+  }
+
+  async updateToolConfig(id: number, request: Partial<CreateToolConfigRequest>): Promise<ToolConfig> {
+    return this.client.patch(`python-code-tool-configs/${id}/`, { body: request });
   }
 
   async createPythonCodeTool(request: CreatePythonCodeToolRequest): Promise<PythonCodeTool> {

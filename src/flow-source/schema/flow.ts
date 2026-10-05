@@ -2,23 +2,23 @@
  * `flow` section — the graph itself: type-discriminated nodes keyed by symbolic
  * name, plus edges referencing nodes by name.
  *
- * Node types `llm` and `code-agent` are parsed (so the rest of the file can
- * still be validated) but always rejected with an ERROR diagnostic by the
- * loader; `crew` parses fully but produces a deprecation WARNING.
+ * Node types `llm`, `code-agent` and `crew` are parsed loosely (so the rest of
+ * the file can still be validated) but always rejected with an ERROR diagnostic
+ * by the loader — EpicStaff no longer has them (`crew` was removed in EST-3849).
  */
 import { z } from 'zod';
 
 import {
   entityRef,
+  credentialEnvName,
   entityRefSchema,
-  existingRefSchema,
   inputMapSchema,
   positionSchema,
   symbolicNameSchema,
 } from './common.js';
 import { inlineSurfaceSchema } from './surfaces.js';
 
-/** Node types that may be written in flow source. `crew` is deprecated (warning). */
+/** Node types that may be written in flow source. */
 export const FLOW_NODE_TYPES = [
   'start',
   'agent',
@@ -34,14 +34,27 @@ export const FLOW_NODE_TYPES = [
   'decision-table',
   'classification-decision-table',
   'audio-to-text',
-  'crew',
+  'knowledge-retriever',
+  'key-value',
 ] as const;
 
-/** Legacy node types that are never accepted — the loader turns them into ERROR diagnostics. */
-export const FORBIDDEN_NODE_TYPES = ['llm', 'code-agent'] as const;
+/**
+ * Legacy node types that are never accepted — the loader turns them into ERROR
+ * diagnostics that name the replacement (see `loader.ts`).
+ */
+export const FORBIDDEN_NODE_TYPES = ['llm', 'code-agent', 'crew'] as const;
 
-/** A node type that may appear in flow source (`crew` deprecated). Excludes the forbidden types. */
+export type ForbiddenNodeType = (typeof FORBIDDEN_NODE_TYPES)[number];
+
+/** A node type that may appear in flow source. Excludes the forbidden types. */
 export type FlowNodeType = (typeof FLOW_NODE_TYPES)[number];
+
+const FORBIDDEN_NODE_TYPE_SET: ReadonlySet<string> = new Set(FORBIDDEN_NODE_TYPES);
+
+/** Narrow a parsed node to the writable node types (forbidden ones are load-time errors). */
+export function isForbiddenNodeType(type: string): type is ForbiddenNodeType {
+  return FORBIDDEN_NODE_TYPE_SET.has(type);
+}
 
 const outputVariablePathField = z
   .string()
@@ -178,10 +191,11 @@ export const webhookTriggerNodeSchema = z.strictObject({
 export const telegramTriggerNodeSchema = z.strictObject({
   type: z.literal('telegram-trigger'),
   position: positionField,
-  bot_token_env: z
-    .string()
-    .optional()
-    .describe('Environment variable holding the Telegram bot token. The token never lives in flow source.'),
+  bot_token_env: credentialEnvName(
+    'Environment variable holding the Telegram bot token. The token never lives in flow source: ' +
+      'on push it is stored as an org Secret (named "es-mcp:<ENV>") and the node references that secret. ' +
+      'EPICSTAFF_* / ES_MCP_* names are rejected.',
+  ).optional(),
   output_variable_path: outputVariablePathField,
 });
 
@@ -249,20 +263,77 @@ export const audioToTextNodeSchema = z.strictObject({
   output_variable_path: outputVariablePathField,
 });
 
-/** Deprecated — accepted with a WARNING diagnostic; prefer agent/task nodes. */
-export const crewNodeSchema = z.strictObject({
-  type: z.literal('crew'),
+export const knowledgeRetrieverNodeSchema = z.strictObject({
+  type: z.literal('knowledge-retriever'),
   position: positionField,
-  crew: existingRefSchema
+  collection: entityRef('The knowledge collection this node searches.'),
+  rag: z
+    .enum(['naive', 'graph'])
     .optional()
-    .describe('Remote crew (legacy project) to run. Crews cannot be defined in flow source.'),
+    .describe(
+      'Which RAG of the collection to search. Defaults to the local collection\'s rag.strategy; ' +
+        'REQUIRED for an {existing: ...} collection.',
+    ),
+  query: z
+    .string()
+    .min(1)
+    .describe(
+      'Search query template. {name} placeholders are filled from this node\'s input_map keys at run time, ' +
+        'e.g. query: "{question}" with input_map: { question: variables.question }.',
+    ),
+  search_method: z
+    .enum(['basic', 'local', 'global', 'drift'])
+    .optional()
+    .describe('Graph RAG only: the graph search method. Backend default "basic" when omitted.'),
+  search_configs: z
+    .strictObject({
+      naive: z.record(z.string(), z.unknown()).optional().describe('Naive search params, e.g. { search_limit, similarity_threshold }.'),
+      graph: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe('Graph search params keyed by method, e.g. { basic: { k: 10 } }.'),
+    })
+    .optional()
+    .describe('Optional per-node search parameters, passed through to the backend as-is.'),
   input_map: inputMapField,
   output_variable_path: outputVariablePathField,
+});
+
+export const keyValueEntrySchema = z.strictObject({
+  key: z
+    .string()
+    .min(1)
+    .describe(
+      'Stored key. Letters, digits and _ (not starting with a digit), plus {variables.<path>} placeholders, ' +
+        'e.g. "profile_{variables.user_id}".',
+    ),
+  value: z
+    .string()
+    .optional()
+    .describe(
+      'Flow-state path. read: where the stored value is written (no |default). ' +
+        'write: where the value to store is read from (may end in |default). Omit for delete.',
+    ),
+});
+
+export const keyValueNodeSchema = z.strictObject({
+  type: z.literal('key-value'),
+  position: positionField,
+  table: z
+    .string()
+    .min(1)
+    .describe('Name of the organization Key-Value table. Created on push when no table with this name exists.'),
+  mode: z.enum(['read', 'write', 'delete']).default('read').describe('What the node does with its entries.'),
+  entries: z
+    .array(keyValueEntrySchema)
+    .default([])
+    .describe('Keys to read / write / delete (at most 500).'),
 });
 
 /** Legacy types — parse loosely so the loader can emit a precise ERROR diagnostic. */
 const forbiddenLlmNodeSchema = z.object({ type: z.literal('llm') }).passthrough();
 const forbiddenCodeAgentNodeSchema = z.object({ type: z.literal('code-agent') }).passthrough();
+const forbiddenCrewNodeSchema = z.object({ type: z.literal('crew') }).passthrough();
 
 export const nodeSchema = z
   .discriminatedUnion('type', [
@@ -280,9 +351,11 @@ export const nodeSchema = z
     decisionTableNodeSchema,
     classificationDecisionTableNodeSchema,
     audioToTextNodeSchema,
-    crewNodeSchema,
+    knowledgeRetrieverNodeSchema,
+    keyValueNodeSchema,
     forbiddenLlmNodeSchema,
     forbiddenCodeAgentNodeSchema,
+    forbiddenCrewNodeSchema,
   ])
   .describe('A flow node, discriminated by its "type" field.');
 
@@ -290,6 +363,15 @@ export type NodeSource = z.infer<typeof nodeSchema>;
 export type AgentNodeSource = z.infer<typeof agentNodeSchema>;
 export type TaskNodeSource = z.infer<typeof taskNodeSchema>;
 export type PythonNodeSource = z.infer<typeof pythonNodeSchema>;
+export type KnowledgeRetrieverNodeSource = z.infer<typeof knowledgeRetrieverNodeSchema>;
+export type KeyValueNodeSource = z.infer<typeof keyValueNodeSchema>;
+/** A node of a writable type — forbidden legacy types excluded. */
+export type WritableNodeSource = Exclude<NodeSource, { type: ForbiddenNodeType }>;
+
+/** Narrow a parsed node to the writable types (the loader rejects the forbidden ones). */
+export function isWritableNode(node: NodeSource): node is WritableNodeSource {
+  return !isForbiddenNodeType(node.type);
+}
 
 export const edgeConditionSchema = z
   .strictObject({

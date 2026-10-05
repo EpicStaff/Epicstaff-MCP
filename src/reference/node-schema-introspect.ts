@@ -17,7 +17,6 @@ export interface NodeField {
 
 export interface NodeSchemaInfo {
   type: FlowNodeType;
-  deprecated: boolean;
   fields: NodeField[];
 }
 
@@ -34,7 +33,7 @@ export function introspectNodeSchemas(): NodeSchemaInfo[] {
     const shape = option.shape as Record<string, z.ZodTypeAny>;
     const typeName = (shape.type as z.ZodLiteral<string>)._def.value;
     if (FORBIDDEN.has(typeName)) {
-      continue; // llm / code-agent are never valid — omit from the catalog entirely
+      continue; // llm / code-agent / crew are never valid — omit from the catalog entirely
     }
 
     const fields: NodeField[] = [];
@@ -49,7 +48,7 @@ export function introspectNodeSchemas(): NodeSchemaInfo[] {
       });
     }
 
-    result.push({ type: typeName as FlowNodeType, deprecated: typeName === 'crew', fields });
+    result.push({ type: typeName as FlowNodeType, fields });
   }
 
   return result;

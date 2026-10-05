@@ -31,7 +31,7 @@ export type SymbolSection =
   | 'nodes';
 
 /** Reference target namespaces that have no local symbol table in this flow. */
-export type RemoteOnlySection = 'flows' | 'crews';
+export type RemoteOnlySection = 'flows';
 
 export interface ResolvedReference {
   /** Dot path of the reference position, e.g. `agents.researcher.llm_config`. */
@@ -219,14 +219,8 @@ export function resolveFlow(source: FlowSource): ResolvedFlow {
         }
         break;
       }
-      case 'crew': {
-        if (node.crew !== undefined) {
-          references.push({
-            path: `${basePath}.crew`,
-            section: 'crews',
-            ref: { kind: 'existing', remoteName: node.crew.existing },
-          });
-        }
+      case 'knowledge-retriever': {
+        resolveEntity(node.collection, 'knowledge', `${basePath}.collection`);
         break;
       }
       default:

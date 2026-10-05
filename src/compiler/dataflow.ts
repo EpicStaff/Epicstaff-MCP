@@ -16,6 +16,7 @@
  */
 import { type Diagnostic, makeError, makeWarning } from '../flow-source/diagnostics.js';
 import type { FlowSource } from '../flow-source/schema/index.js';
+import { nodeReadPaths, nodeWritePaths, type NodeReadPath } from './node-io.js';
 import { isVarPathError, parseVarPath, sharesPrefix } from './varpath.js';
 
 interface ProducedPath {
@@ -33,45 +34,49 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
     ...startInitialStateKeys(source).map((name) => [name]),
   ];
 
-  // --- producers (output_variable_path per node) + write-path validation ---
+  // --- producers (output_variable_path, key-value read targets) + write-path validation ---
   const producedByNode = new Map<string, string[][]>();
   const producedAll: ProducedPath[] = [];
   for (const [nodeName, node] of Object.entries(nodes)) {
-    const writePath = (node as { output_variable_path?: unknown }).output_variable_path;
-    if (typeof writePath !== 'string' || writePath.trim() === '') continue;
-    const parsed = parseVarPath(writePath);
-    if (isVarPathError(parsed)) {
-      diagnostics.push(makeError(`flow.nodes.${nodeName}.output_variable_path`, parsed.error));
-      continue;
+    for (const write of nodeWritePaths(node, `flow.nodes.${nodeName}`)) {
+      const parsed = parseVarPath(write.path);
+      if (isVarPathError(parsed)) {
+        diagnostics.push(makeError(write.at, parsed.error));
+        continue;
+      }
+      if (parsed.isShared) continue;
+      const list = producedByNode.get(nodeName) ?? [];
+      list.push(parsed.segments);
+      producedByNode.set(nodeName, list);
+      producedAll.push({ node: nodeName, segments: parsed.segments });
     }
-    if (parsed.isShared) continue;
-    const list = producedByNode.get(nodeName) ?? [];
-    list.push(parsed.segments);
-    producedByNode.set(nodeName, list);
-    producedAll.push({ node: nodeName, segments: parsed.segments });
   }
 
   const ancestors = buildAncestors(source);
 
-  // --- consumers (input_map on nodes + conditional-edge condition input_map) ---
+  // --- consumers (node reads + conditional-edge condition input_map) ---
   for (const [nodeName, node] of Object.entries(nodes)) {
-    const inputMap = (node as { input_map?: Record<string, string> }).input_map;
-    if (inputMap) {
-      checkReads(inputMap, nodeName, `flow.nodes.${nodeName}.input_map`);
-    }
+    checkReads(nodeReadPaths(node, `flow.nodes.${nodeName}`), nodeName);
   }
   source.flow.edges.forEach((edge, index) => {
     if (edge.condition?.input_map) {
-      checkReads(edge.condition.input_map, edge.from, `flow.edges[${index}].condition.input_map`);
+      const basePath = `flow.edges[${index}].condition.input_map`;
+      // The condition runs AFTER its source node has written its output, so — unlike the
+      // node's own input_map — the source's writes count as produced for it.
+      checkReads(
+        Object.entries(edge.condition.input_map).map(([key, path]) => ({ at: `${basePath}.${key}`, path })),
+        edge.from,
+        { readerHasWritten: true },
+      );
     }
   });
 
   return diagnostics;
 
-  function checkReads(inputMap: Record<string, string>, readerNode: string, basePath: string): void {
-    for (const [key, rawValue] of Object.entries(inputMap)) {
+  function checkReads(reads: NodeReadPath[], readerNode: string, options: { readerHasWritten?: boolean } = {}): void {
+    const ownWrites = options.readerHasWritten ? (producedByNode.get(readerNode) ?? []) : [];
+    for (const { at: readPath, path: rawValue } of reads) {
       if (rawValue === '__all__') continue; // whole-state read
-      const readPath = `${basePath}.${key}`;
       const parsed = parseVarPath(rawValue);
       if (isVarPathError(parsed)) {
         diagnostics.push(makeError(readPath, parsed.error));
@@ -80,7 +85,7 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
       if (parsed.isShared || parsed.hasDefault) continue;
 
       const read = parsed.segments;
-      const reaching = [...declared, ...ancestorProduced(readerNode)];
+      const reaching = [...declared, ...ownWrites, ...ancestorProduced(readerNode)];
       if (reaching.some((produced) => sharesPrefix(read, produced))) {
         continue; // may-reach: produced on some reaching path (or declared)
       }
@@ -132,7 +137,8 @@ function startInitialStateKeys(source: FlowSource): string[] {
  * decision-table / CDT routes. A node with an outgoing conditional edge routes to a
  * runtime-decided target we cannot know, so it is treated as able to reach every node
  * (over-approximation → keeps may-reach false positives near zero). A node never counts
- * as its own ancestor: a node's own output does not satisfy its own input.
+ * as its own ancestor: a node's own output does not satisfy its own input (its outgoing
+ * condition is the exception — handled by `readerHasWritten` in checkReads).
  */
 function buildAncestors(source: FlowSource): Map<string, Set<string>> {
   const nodeNames = Object.keys(source.flow.nodes);

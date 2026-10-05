@@ -84,16 +84,20 @@ describe('loadFlowDirectory', () => {
     expect(diagnostic.message).toContain("'agent' node");
   });
 
-  it("accepts the deprecated 'crew' node type with a warning diagnostic", async () => {
-    const { source, diagnostics } = await loadFlowDirectory(fixture('warning-crew-node'));
+  it("rejects the removed 'crew' node type with an actionable error diagnostic", async () => {
+    const { source, diagnostics } = await loadFlowDirectory(fixture('invalid-crew-node'));
 
+    // Parsed loosely so the rest of the file is still validated; never silently dropped.
     expect(source).not.toBeNull();
-    expect(hasErrors(diagnostics)).toBe(false);
+    expect(hasErrors(diagnostics)).toBe(true);
     expect(diagnostics).toHaveLength(1);
     const diagnostic = diagnostics[0]!;
-    expect(diagnostic.severity).toBe('warning');
+    expect(diagnostic.severity).toBe('error');
     expect(diagnostic.path).toBe('flow.nodes.legacy.type');
-    expect(diagnostic.message).toContain('deprecated');
+    expect(diagnostic.file).toBe('flow.yaml');
+    expect(diagnostic.message).toContain('EST-3849');
+    expect(diagnostic.message).toContain("'agent' node");
+    expect(diagnostic.message).toContain("'task' nodes");
   });
 
   it('reports a duplicate symbolic name across split files', async () => {
