@@ -40,6 +40,38 @@ The plugin bundles the MCP server as built JS — no npm install needed at use t
 Organizations are resolved automatically (`GET /api/profile/`) before the first org-scoped call
 of every server process. One org → auto-selected; several → pick with `set_active_organization`.
 
+## Versioning & compatibility
+
+The plugin version mirrors the EpicStaff **MAJOR.MINOR** it speaks to; the **PATCH** (and any
+prerelease suffix) is the plugin's own. EpicStaff `1.2.x` pairs with plugin `1.2.y` — use the
+latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tracks EpicStaff
+`developer`, published as a prerelease of the *next* EpicStaff minor.
+
+| EpicStaff | Plugin |
+|---|---|
+| 1.3 (`developer`, unreleased) | `1.3.0-dev.N` (`main`) |
+| 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
+
+**How to pick:** check your EpicStaff version (release tag, or `developer`) and install the newest
+plugin version with the same MAJOR.MINOR. The plugin cannot check this for you — EpicStaff has no
+version endpoint yet, so a mismatch shows up only as failing or misbehaving API calls.
+
+Each plugin release records the exact EpicStaff commit it was verified against in
+`epicstaff-sync.json`:
+
+| Field | Meaning |
+|---|---|
+| `repo` | EpicStaff repository the tree was synced against |
+| `branch` | EpicStaff branch (`developer`, or a `release/vX.Y.x` branch) |
+| `commit` | full sha of the EpicStaff commit the tree was analysed and tested against |
+| `synced_at` | date of that sync (ISO-8601) |
+| `release_line` | EpicStaff MAJOR.MINOR this version targets (equals the plugin's MAJOR.MINOR) |
+| `status` | `dev` — tracks an unreleased branch; `release` — verified against a release tag |
+
+**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. `1.3.0-dev.1` is numerically
+*lower* than `3.1.0`, so uninstall and reinstall instead of updating:
+`claude plugin uninstall epicstaff-mcp@epicstaff` then `claude plugin install epicstaff-mcp@epicstaff`.
+
 ## Skills (the workflow)
 
 | Skill | Responsibility |
