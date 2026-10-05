@@ -897,62 +897,6 @@
                         "description": "Organization not found or not accessible"
                     }
                 }
-            },
-            "delete": {
-                "operationId": "admin_organizations_destroy",
-                "description": "Real delete (dry_run=false) requires the JSON body `{\"verification_phrase\": \"delete-<organization name>\"}`, matched exactly (case-sensitive, no trimming). The body is ignored when dry_run=true.",
-                "summary": "Permanently delete an organization (superadmin) — or preview with ?dry_run=true",
-                "parameters": [
-                    {
-                        "in": "query",
-                        "name": "dry_run",
-                        "schema": {
-                            "type": "boolean"
-                        },
-                        "description": "If true, report what would be deleted and delete nothing."
-                    },
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "string",
-                            "pattern": "^[0-9]+$"
-                        },
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Admin: Organizations"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/OrganizationDeleteReport"
-                                }
-                            }
-                        },
-                        "description": ""
-                    },
-                    "400": {
-                        "description": "default_organization_not_deletable, last_organization, invalid_verification_phrase (phrase missing or not matching), or invalid (malformed body or non-string phrase)"
-                    },
-                    "404": {
-                        "description": "Organization not found"
-                    }
-                }
             }
         },
         "/api/admin/organizations/{id}/deactivate/": {
@@ -1686,64 +1630,6 @@
                     },
                     "404": {
                         "description": "Organization or role not found"
-                    }
-                }
-            }
-        },
-        "/api/admin/users/{id}/": {
-            "delete": {
-                "operationId": "admin_users_destroy",
-                "description": "Real delete (dry_run=false) requires the JSON body `{\"verification_phrase\": \"delete-<user email>\"}`, matched exactly (case-sensitive, no trimming). The body is ignored when dry_run=true.",
-                "summary": "Permanently delete a user (superadmin) — or preview with ?dry_run=true",
-                "parameters": [
-                    {
-                        "in": "query",
-                        "name": "dry_run",
-                        "schema": {
-                            "type": "boolean"
-                        },
-                        "description": "If true, report what would be deleted and delete nothing."
-                    },
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "string",
-                            "pattern": "^[0-9]+$"
-                        },
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Admin: Users"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UserDeleteReport"
-                                }
-                            }
-                        },
-                        "description": ""
-                    },
-                    "400": {
-                        "description": "cannot_delete_self, last_superadmin, invalid_verification_phrase (phrase missing or not matching), or invalid (malformed body or non-string phrase)"
-                    },
-                    "404": {
-                        "description": "User not found"
                     }
                 }
             }
@@ -3567,7 +3453,7 @@
         "/api/auth/login/": {
             "post": {
                 "operationId": "auth_login_create",
-                "description": "Accepts `email`, `password`, and optional `remember_me` (bool, default false). Returns a short-lived access token; the refresh token is set as an HttpOnly cookie (`auth.refresh`, Path=/api/auth/, SameSite=Lax). `remember_me=true` -> Max-Age = configured refresh lifetime; `remember_me=false` -> Max-Age = 30 minutes. The intent is embedded as a claim so it survives rotation. Wrong credentials return a flat 401. Throttled to 5 attempts/min per IP+email; the 6th returns 429 with a `Retry-After` header.",
+                "description": "Accepts `email` and `password`. Validates both fields are present and non-blank before delegating to simplejwt. Returns a short-lived access token in the response body. The refresh token is set as an HttpOnly cookie (`auth.refresh`, Path=/api/auth/, SameSite=Lax). Wrong-credential errors are returned as a flat 401 (no per-field detail) to avoid user-enumeration leaks. Throttled to 5 attempts per minute per IP+email combination; the 6th attempt returns 429 with a `Retry-After` header.",
                 "summary": "Log in and obtain JWT tokens",
                 "tags": [
                     "Authentication"
@@ -10661,55 +10547,6 @@
                 }
             }
         },
-        "/api/graph-versions/{id}/preview/": {
-            "get": {
-                "operationId": "graph_versions_preview_retrieve",
-                "description": "Read-only: runs the same conversion and dependency filtering as restore and create-graph, then returns the result without persisting anything. Missing dependencies are nulled or dropped and reported in `warnings`, keyed by the version's original node ids. Credential-named fields in the snapshot's graph-level `metadata` are returned as null. A Key-Value node's `key_value_table` is the id of the flow organization's table a restore by the caller would bind (same id and name, else same name), or null when none matches or the caller lacks the node mode's Key-Value table permissions; `key_value_table_name` is the name stored in the version.",
-                "summary": "Preview the snapshot that restoring this version would apply.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "string"
-                        },
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Graph Versions"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/GraphVersionPreviewResponse"
-                                }
-                            }
-                        },
-                        "description": ""
-                    },
-                    "403": {
-                        "description": "The caller has no FLOWS READ permission."
-                    },
-                    "404": {
-                        "description": "No such version in the caller's organization."
-                    }
-                }
-            }
-        },
         "/api/graph-versions/{id}/restore/": {
             "post": {
                 "operationId": "graph_versions_restore_create",
@@ -11743,886 +11580,6 @@
                             }
                         },
                         "description": "Request is not authenticated — credentials are missing or invalid."
-                    }
-                }
-            }
-        },
-        "/api/internal/sessions/{session_id}/key-value-tables/{table_id}/delete/": {
-            "post": {
-                "operationId": "internal_sessions_key_value_tables_delete_create",
-                "description": "Crew's read/write/delete path. The SYSTEM key is superadmin, so this view carries\nthe org scoping itself: org comes from the session, never from the caller.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "session_id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "required": true
-                    },
-                    {
-                        "in": "path",
-                        "name": "table_id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "No response body"
-                    }
-                }
-            }
-        },
-        "/api/internal/sessions/{session_id}/key-value-tables/{table_id}/read/": {
-            "post": {
-                "operationId": "internal_sessions_key_value_tables_read_create",
-                "description": "Crew's read/write/delete path. The SYSTEM key is superadmin, so this view carries\nthe org scoping itself: org comes from the session, never from the caller.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "session_id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "required": true
-                    },
-                    {
-                        "in": "path",
-                        "name": "table_id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "No response body"
-                    }
-                }
-            }
-        },
-        "/api/internal/sessions/{session_id}/key-value-tables/{table_id}/write/": {
-            "post": {
-                "operationId": "internal_sessions_key_value_tables_write_create",
-                "description": "Crew's read/write/delete path. The SYSTEM key is superadmin, so this view carries\nthe org scoping itself: org comes from the session, never from the caller.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "session_id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "required": true
-                    },
-                    {
-                        "in": "path",
-                        "name": "table_id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "No response body"
-                    }
-                }
-            }
-        },
-        "/api/key-value-table-entries/": {
-            "get": {
-                "operationId": "key_value_table_entries_list",
-                "description": "For child resources scoped transitively through a parent FK.\n\nSet `org_filter_path` to the ORM lookup that reaches the owning org,\ne.g. \"graph__org_id\", \"crew__org_id\", \"agent__org_id\". Does not stamp\norg on create (children have no org column; the parent FK carries it).",
-                "parameters": [
-                    {
-                        "name": "limit",
-                        "required": false,
-                        "in": "query",
-                        "description": "Number of results to return per page.",
-                        "schema": {
-                            "type": "integer"
-                        }
-                    },
-                    {
-                        "name": "offset",
-                        "required": false,
-                        "in": "query",
-                        "description": "The initial index from which to return the results.",
-                        "schema": {
-                            "type": "integer"
-                        }
-                    },
-                    {
-                        "name": "ordering",
-                        "required": false,
-                        "in": "query",
-                        "description": "Which field to use when ordering the results.",
-                        "schema": {
-                            "type": "string"
-                        }
-                    },
-                    {
-                        "name": "search",
-                        "required": false,
-                        "in": "query",
-                        "description": "A search term.",
-                        "schema": {
-                            "type": "string"
-                        }
-                    },
-                    {
-                        "in": "query",
-                        "name": "table",
-                        "schema": {
-                            "type": "number"
-                        }
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/PaginatedKeyValueTableEntryListList"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "post": {
-                "operationId": "key_value_table_entries_create",
-                "description": "For child resources scoped transitively through a parent FK.\n\nSet `org_filter_path` to the ORM lookup that reaches the owning org,\ne.g. \"graph__org_id\", \"crew__org_id\", \"agent__org_id\". Does not stamp\norg on create (children have no org column; the parent FK carries it).",
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableEntryRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableEntryRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableEntryRequest"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTableEntry"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            }
-        },
-        "/api/key-value-table-entries/{id}/": {
-            "get": {
-                "operationId": "key_value_table_entries_retrieve",
-                "description": "For child resources scoped transitively through a parent FK.\n\nSet `org_filter_path` to the ORM lookup that reaches the owning org,\ne.g. \"graph__org_id\", \"crew__org_id\", \"agent__org_id\". Does not stamp\norg on create (children have no org column; the parent FK carries it).",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table entry.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTableEntry"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "put": {
-                "operationId": "key_value_table_entries_update",
-                "description": "For child resources scoped transitively through a parent FK.\n\nSet `org_filter_path` to the ORM lookup that reaches the owning org,\ne.g. \"graph__org_id\", \"crew__org_id\", \"agent__org_id\". Does not stamp\norg on create (children have no org column; the parent FK carries it).",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table entry.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableEntryRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableEntryRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableEntryRequest"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTableEntry"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "patch": {
-                "operationId": "key_value_table_entries_partial_update",
-                "description": "For child resources scoped transitively through a parent FK.\n\nSet `org_filter_path` to the ORM lookup that reaches the owning org,\ne.g. \"graph__org_id\", \"crew__org_id\", \"agent__org_id\". Does not stamp\norg on create (children have no org column; the parent FK carries it).",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table entry.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/PatchedKeyValueTableEntryRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/PatchedKeyValueTableEntryRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/PatchedKeyValueTableEntryRequest"
-                            }
-                        }
-                    }
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTableEntry"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "delete": {
-                "operationId": "key_value_table_entries_destroy",
-                "description": "For child resources scoped transitively through a parent FK.\n\nSet `org_filter_path` to the ORM lookup that reaches the owning org,\ne.g. \"graph__org_id\", \"crew__org_id\", \"agent__org_id\". Does not stamp\norg on create (children have no org column; the parent FK carries it).",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table entry.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": "No response body"
-                    }
-                }
-            }
-        },
-        "/api/key-value-tables/": {
-            "get": {
-                "operationId": "key_value_tables_list",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "parameters": [
-                    {
-                        "name": "limit",
-                        "required": false,
-                        "in": "query",
-                        "description": "Number of results to return per page.",
-                        "schema": {
-                            "type": "integer"
-                        }
-                    },
-                    {
-                        "name": "offset",
-                        "required": false,
-                        "in": "query",
-                        "description": "The initial index from which to return the results.",
-                        "schema": {
-                            "type": "integer"
-                        }
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/PaginatedKeyValueTableList"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "post": {
-                "operationId": "key_value_tables_create",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTable"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            }
-        },
-        "/api/key-value-tables/{id}/": {
-            "get": {
-                "operationId": "key_value_tables_retrieve",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTable"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "put": {
-                "operationId": "key_value_tables_update",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTable"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "patch": {
-                "operationId": "key_value_tables_partial_update",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/PatchedKeyValueTableRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/PatchedKeyValueTableRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/PatchedKeyValueTableRequest"
-                            }
-                        }
-                    }
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTable"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            },
-            "delete": {
-                "operationId": "key_value_tables_destroy",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": "No response body"
-                    }
-                }
-            }
-        },
-        "/api/key-value-tables/{id}/entries/lookup/": {
-            "post": {
-                "operationId": "key_value_tables_entries_lookup_create",
-                "description": "For top-level resources that own an `org` FK directly.\n\nPlace FIRST in the ViewSet's base list so get_queryset/perform_create\nwrap the concrete ViewSet base.",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        },
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        },
-                        "multipart/form-data": {
-                            "schema": {
-                                "$ref": "#/components/schemas/KeyValueTableRequest"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/KeyValueTable"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                }
-            }
-        },
-        "/api/key-value-tables/{id}/usage/": {
-            "get": {
-                "operationId": "key_value_tables_usage_retrieve",
-                "description": "How many Key-Value nodes reference this table, and in how many distinct flows. Nodes of soft-deleted flows are not counted. Deleting the table is allowed while it is in use: its nodes stay in their flows with no table selected.",
-                "summary": "Key-Value table usage",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "id",
-                        "schema": {
-                            "type": "integer"
-                        },
-                        "description": "A unique integer value identifying this key value table.",
-                        "required": true
-                    }
-                ],
-                "tags": [
-                    "Other"
-                ],
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "OrganizationId": []
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "additionalProperties": {}
-                                },
-                                "examples": {
-                                    "UsedByThreeNodesInTwoFlows": {
-                                        "value": {
-                                            "node_count": 3,
-                                            "flow_count": 2
-                                        },
-                                        "summary": "Used by three nodes in two flows"
-                                    },
-                                    "Unused": {
-                                        "value": {
-                                            "node_count": 0,
-                                            "flow_count": 0
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        "description": "Node and flow counts"
-                    },
-                    "404": {
-                        "description": "No such table in the active organization"
                     }
                 }
             }
@@ -17613,7 +16570,7 @@
             "get": {
                 "operationId": "permissions_catalog_retrieve",
                 "description": "Static taxonomy that drives the permission-matrix UI. Caller- and org-independent; safe to cache.",
-                "summary": "Permission catalog (resource types x actions)",
+                "summary": "Permission catalog (resource types × actions)",
                 "tags": [
                     "Other"
                 ],
@@ -24467,7 +23424,6 @@
                                                         "conditional_edge_list": [],
                                                         "decision_table_node_list": [],
                                                         "file_extractor_node_list": [],
-                                                        "key_value_node_list": [],
                                                         "audio_transcription_node_list": [],
                                                         "webhook_trigger_node_data_list": [],
                                                         "telegram_trigger_node_data_list": []
@@ -24483,17 +23439,7 @@
                                                     },
                                                     "graph": 0,
                                                     "parent_session": null,
-                                                    "graph_user": null,
-                                                    "trigger": {
-                                                        "trigger_type": "manual",
-                                                        "node_name": null
-                                                    },
-                                                    "principal": {
-                                                        "kind": "user",
-                                                        "user": 7,
-                                                        "api_key": null,
-                                                        "email": "a@b.com"
-                                                    }
+                                                    "graph_user": null
                                                 }
                                             ]
                                         },
@@ -24514,11 +23460,7 @@
                                                     "created_at": "2024-01-01T00:00:00Z",
                                                     "finished_at": "2024-01-01T00:00:00Z",
                                                     "parent_session": null,
-                                                    "has_output_files": true,
-                                                    "trigger": {
-                                                        "trigger_type": "manual",
-                                                        "node_name": null
-                                                    }
+                                                    "has_output_files": true
                                                 }
                                             ]
                                         },
@@ -33785,13 +32727,6 @@
                         },
                         "readOnly": true
                     },
-                    "key_value_node_list": {
-                        "type": "array",
-                        "items": {
-                            "$ref": "#/components/schemas/KeyValueNode"
-                        },
-                        "readOnly": true
-                    },
                     "audio_transcription_node_list": {
                         "type": "array",
                         "items": {
@@ -33934,7 +32869,6 @@
                     "file_extractor_node_list",
                     "graph_note_list",
                     "id",
-                    "key_value_node_list",
                     "knowledge_node_list",
                     "name",
                     "python_node_list",
@@ -34549,13 +33483,6 @@
                         }
                     },
                     "file_extractor_node_list": {
-                        "type": "array",
-                        "items": {
-                            "type": "integer",
-                            "minimum": 1
-                        }
-                    },
-                    "key_value_node_list": {
                         "type": "array",
                         "items": {
                             "type": "integer",
@@ -35515,26 +34442,6 @@
                     "name"
                 ]
             },
-            "GraphVersionPreviewResponse": {
-                "type": "object",
-                "properties": {
-                    "snapshot": {
-                        "type": "object",
-                        "additionalProperties": {}
-                    },
-                    "warnings": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": {}
-                        }
-                    }
-                },
-                "required": [
-                    "snapshot",
-                    "warnings"
-                ]
-            },
             "GraphVersionRead": {
                 "type": "object",
                 "properties": {
@@ -35689,321 +34596,6 @@
                 ],
                 "type": "string",
                 "description": "* `pcm16` - PCM 16-bit\n* `g711_ulaw` - G.711 u-law\n* `g711_alaw` - G.711 a-law"
-            },
-            "KeyValueNode": {
-                "type": "object",
-                "description": "Adds content_hash as an optional writable field.\n\ncontent_hash is a computed property on the model (not a DB column), so\nModelSerializer won't include it automatically. get_fields() injects it\nso Swagger shows it and clients can pass it. validate() removes it from\nvalidated_data — the view-level ContentHashPreconditionMixin is\nresponsible for setting instance._expected_hash before save().",
-                "properties": {
-                    "id": {
-                        "type": "integer",
-                        "readOnly": true
-                    },
-                    "graph": {
-                        "type": "integer"
-                    },
-                    "key_value_table": {
-                        "type": "integer",
-                        "nullable": true
-                    },
-                    "is_soft_deleted": {
-                        "type": "boolean"
-                    },
-                    "soft_deleted_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "nullable": true
-                    },
-                    "created_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "updated_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "metadata": {},
-                    "node_name": {
-                        "type": "string",
-                        "maxLength": 255
-                    },
-                    "input_map": {},
-                    "output_variable_path": {
-                        "type": "string",
-                        "nullable": true,
-                        "maxLength": 255
-                    },
-                    "mode": {
-                        "$ref": "#/components/schemas/KeyValueNodeModeEnum"
-                    },
-                    "entries": {},
-                    "content_hash": {
-                        "type": "string",
-                        "nullable": true
-                    }
-                },
-                "required": [
-                    "created_at",
-                    "graph",
-                    "id",
-                    "updated_at"
-                ]
-            },
-            "KeyValueNodeModeEnum": {
-                "enum": [
-                    "read",
-                    "write",
-                    "delete"
-                ],
-                "type": "string",
-                "description": "* `read` - Read\n* `write` - Write\n* `delete` - Delete"
-            },
-            "KeyValueNodeRequest": {
-                "type": "object",
-                "description": "Adds content_hash as an optional writable field.\n\ncontent_hash is a computed property on the model (not a DB column), so\nModelSerializer won't include it automatically. get_fields() injects it\nso Swagger shows it and clients can pass it. validate() removes it from\nvalidated_data — the view-level ContentHashPreconditionMixin is\nresponsible for setting instance._expected_hash before save().",
-                "properties": {
-                    "graph": {
-                        "type": "integer"
-                    },
-                    "key_value_table": {
-                        "type": "integer",
-                        "nullable": true
-                    },
-                    "is_soft_deleted": {
-                        "type": "boolean"
-                    },
-                    "soft_deleted_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "nullable": true
-                    },
-                    "metadata": {},
-                    "node_name": {
-                        "type": "string",
-                        "maxLength": 255
-                    },
-                    "input_map": {},
-                    "output_variable_path": {
-                        "type": "string",
-                        "nullable": true,
-                        "maxLength": 255
-                    },
-                    "mode": {
-                        "$ref": "#/components/schemas/KeyValueNodeModeEnum"
-                    },
-                    "entries": {},
-                    "content_hash": {
-                        "type": "string",
-                        "nullable": true,
-                        "minLength": 1
-                    }
-                },
-                "required": [
-                    "graph"
-                ]
-            },
-            "KeyValueTable": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "integer",
-                        "readOnly": true
-                    },
-                    "name": {
-                        "type": "string",
-                        "maxLength": 255
-                    },
-                    "description": {
-                        "type": "string"
-                    },
-                    "entry_count": {
-                        "type": "integer",
-                        "readOnly": true
-                    },
-                    "created_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "updated_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    }
-                },
-                "required": [
-                    "created_at",
-                    "entry_count",
-                    "id",
-                    "name",
-                    "updated_at"
-                ]
-            },
-            "KeyValueTableEntry": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "integer",
-                        "readOnly": true
-                    },
-                    "table": {
-                        "type": "integer"
-                    },
-                    "key": {
-                        "type": "string",
-                        "maxLength": 512
-                    },
-                    "value": {
-                        "nullable": true
-                    },
-                    "created_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "updated_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "updated_by_session": {
-                        "type": "integer",
-                        "readOnly": true,
-                        "nullable": true
-                    },
-                    "updated_by_graph": {
-                        "type": "integer",
-                        "readOnly": true,
-                        "nullable": true
-                    },
-                    "updated_by_graph_name": {
-                        "type": "string",
-                        "readOnly": true,
-                        "nullable": true
-                    }
-                },
-                "required": [
-                    "created_at",
-                    "id",
-                    "key",
-                    "table",
-                    "updated_at",
-                    "updated_by_graph",
-                    "updated_by_graph_name",
-                    "updated_by_session",
-                    "value"
-                ]
-            },
-            "KeyValueTableEntryList": {
-                "type": "object",
-                "description": "A list row: `value` (up to 256 KiB) swapped for a preview of its JSON text.\n\nReads the `value_preview` / `value_truncated` annotations that\nKeyValueTableService.with_value_preview adds; the full value is on the detail route.",
-                "properties": {
-                    "id": {
-                        "type": "integer",
-                        "readOnly": true
-                    },
-                    "table": {
-                        "type": "integer"
-                    },
-                    "key": {
-                        "type": "string",
-                        "maxLength": 512
-                    },
-                    "value_preview": {
-                        "type": "string",
-                        "readOnly": true
-                    },
-                    "value_truncated": {
-                        "type": "boolean",
-                        "readOnly": true
-                    },
-                    "created_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "updated_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "readOnly": true
-                    },
-                    "updated_by_session": {
-                        "type": "integer",
-                        "readOnly": true,
-                        "nullable": true
-                    },
-                    "updated_by_graph": {
-                        "type": "integer",
-                        "readOnly": true,
-                        "nullable": true
-                    },
-                    "updated_by_graph_name": {
-                        "type": "string",
-                        "readOnly": true,
-                        "nullable": true
-                    }
-                },
-                "required": [
-                    "created_at",
-                    "id",
-                    "key",
-                    "table",
-                    "updated_at",
-                    "updated_by_graph",
-                    "updated_by_graph_name",
-                    "updated_by_session",
-                    "value_preview",
-                    "value_truncated"
-                ]
-            },
-            "KeyValueTableEntryRequest": {
-                "type": "object",
-                "properties": {
-                    "table": {
-                        "type": "integer"
-                    },
-                    "key": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 512
-                    },
-                    "value": {
-                        "nullable": true
-                    }
-                },
-                "required": [
-                    "key",
-                    "table",
-                    "value"
-                ]
-            },
-            "KeyValueTableRequest": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                    },
-                    "description": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "name"
-                ]
-            },
-            "KindEnum": {
-                "enum": [
-                    "user",
-                    "api_key_user",
-                    "api_key_system",
-                    "trigger",
-                    "unknown"
-                ],
-                "type": "string",
-                "description": "* `user` - User\n* `api_key_user` - Api Key User\n* `api_key_system` - Api Key System\n* `trigger` - Trigger\n* `unknown` - Unknown"
             },
             "KnowledgeNodeRead": {
                 "type": "object",
@@ -37060,7 +35652,7 @@
                     "role"
                 ]
             },
-            "Mode49dEnum": {
+            "ModeEnum": {
                 "enum": [
                     "allow",
                     "deny"
@@ -37543,25 +36135,6 @@
                 },
                 "required": [
                     "name"
-                ]
-            },
-            "OrganizationDeleteReport": {
-                "type": "object",
-                "description": "What deleting an organization removed, or would remove.",
-                "properties": {
-                    "organization_id": {
-                        "type": "integer"
-                    },
-                    "affected_resources": {
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "integer"
-                        }
-                    }
-                },
-                "required": [
-                    "affected_resources",
-                    "organization_id"
                 ]
             },
             "OrganizationListResponse": {
@@ -38392,68 +36965,6 @@
                         "type": "array",
                         "items": {
                             "$ref": "#/components/schemas/GraphVersionRead"
-                        }
-                    }
-                }
-            },
-            "PaginatedKeyValueTableEntryListList": {
-                "type": "object",
-                "required": [
-                    "count",
-                    "results"
-                ],
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "example": 123
-                    },
-                    "next": {
-                        "type": "string",
-                        "nullable": true,
-                        "format": "uri",
-                        "example": "http://api.example.org/accounts/?offset=400&limit=100"
-                    },
-                    "previous": {
-                        "type": "string",
-                        "nullable": true,
-                        "format": "uri",
-                        "example": "http://api.example.org/accounts/?offset=200&limit=100"
-                    },
-                    "results": {
-                        "type": "array",
-                        "items": {
-                            "$ref": "#/components/schemas/KeyValueTableEntryList"
-                        }
-                    }
-                }
-            },
-            "PaginatedKeyValueTableList": {
-                "type": "object",
-                "required": [
-                    "count",
-                    "results"
-                ],
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "example": 123
-                    },
-                    "next": {
-                        "type": "string",
-                        "nullable": true,
-                        "format": "uri",
-                        "example": "http://api.example.org/accounts/?offset=400&limit=100"
-                    },
-                    "previous": {
-                        "type": "string",
-                        "nullable": true,
-                        "format": "uri",
-                        "example": "http://api.example.org/accounts/?offset=200&limit=100"
-                    },
-                    "results": {
-                        "type": "array",
-                        "items": {
-                            "$ref": "#/components/schemas/KeyValueTable"
                         }
                     }
                 }
@@ -40307,35 +38818,6 @@
                     }
                 }
             },
-            "PatchedKeyValueTableEntryRequest": {
-                "type": "object",
-                "properties": {
-                    "table": {
-                        "type": "integer"
-                    },
-                    "key": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 512
-                    },
-                    "value": {
-                        "nullable": true
-                    }
-                }
-            },
-            "PatchedKeyValueTableRequest": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                    },
-                    "description": {
-                        "type": "string"
-                    }
-                }
-            },
             "PatchedKnowledgeNodeWriteRequest": {
                 "type": "object",
                 "description": "Accepts a partial nested `search_configs` block and merges it into the\nnode-bound config rows, touching only the fields provided.",
@@ -41533,7 +40015,7 @@
                         "items": {
                             "type": "string"
                         },
-                        "description": "A list of pip requirement specifiers, for example 'requests>=2,<3'."
+                        "description": "A list of library names."
                     },
                     "global_kwargs": {},
                     "secrets": {
@@ -41572,7 +40054,7 @@
                             "type": "string",
                             "minLength": 1
                         },
-                        "description": "A list of pip requirement specifiers, for example 'requests>=2,<3'."
+                        "description": "A list of library names."
                     },
                     "global_kwargs": {},
                     "secret_ids": {
@@ -43224,14 +41706,6 @@
                         ],
                         "readOnly": true
                     },
-                    "principal": {
-                        "allOf": [
-                            {
-                                "$ref": "#/components/schemas/SessionPrincipal"
-                            }
-                        ],
-                        "readOnly": true
-                    },
                     "status": {
                         "allOf": [
                             {
@@ -43296,7 +41770,6 @@
                     "graph_schema",
                     "id",
                     "parent_session",
-                    "principal",
                     "status",
                     "status_updated_at",
                     "trigger",
@@ -43385,30 +41858,6 @@
                     "id",
                     "name",
                     "path"
-                ]
-            },
-            "SessionPrincipal": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "$ref": "#/components/schemas/KindEnum"
-                    },
-                    "user": {
-                        "type": "integer",
-                        "nullable": true
-                    },
-                    "api_key": {
-                        "type": "integer",
-                        "nullable": true
-                    },
-                    "email": {
-                        "type": "string",
-                        "nullable": true,
-                        "maxLength": 256
-                    }
-                },
-                "required": [
-                    "kind"
                 ]
             },
             "SessionTrigger": {
@@ -45224,7 +43673,7 @@
                     "mode": {
                         "allOf": [
                             {
-                                "$ref": "#/components/schemas/Mode49dEnum"
+                                "$ref": "#/components/schemas/ModeEnum"
                             }
                         ],
                         "description": "Whether this tool is explicitly allowed or denied for this surface.\n\n* `allow` - Allow\n* `deny` - Deny"
@@ -45242,7 +43691,7 @@
                         "type": "integer"
                     },
                     "mode": {
-                        "$ref": "#/components/schemas/Mode49dEnum"
+                        "$ref": "#/components/schemas/ModeEnum"
                     }
                 },
                 "required": [
@@ -45257,7 +43706,7 @@
                         "type": "integer"
                     },
                     "mode": {
-                        "$ref": "#/components/schemas/Mode49dEnum"
+                        "$ref": "#/components/schemas/ModeEnum"
                     }
                 },
                 "required": [
@@ -45338,7 +43787,7 @@
                     "mode": {
                         "allOf": [
                             {
-                                "$ref": "#/components/schemas/Mode49dEnum"
+                                "$ref": "#/components/schemas/ModeEnum"
                             }
                         ],
                         "description": "Whether this tool is explicitly allowed or denied for this surface.\n\n* `allow` - Allow\n* `deny` - Deny"
@@ -45356,7 +43805,7 @@
                         "type": "integer"
                     },
                     "mode": {
-                        "$ref": "#/components/schemas/Mode49dEnum"
+                        "$ref": "#/components/schemas/ModeEnum"
                     }
                 },
                 "required": [
@@ -45371,7 +43820,7 @@
                         "type": "integer"
                     },
                     "mode": {
-                        "$ref": "#/components/schemas/Mode49dEnum"
+                        "$ref": "#/components/schemas/ModeEnum"
                     }
                 },
                 "required": [
@@ -46360,25 +44809,6 @@
                 "required": [
                     "email",
                     "password"
-                ]
-            },
-            "UserDeleteReport": {
-                "type": "object",
-                "description": "What deleting a user removed, or would remove.",
-                "properties": {
-                    "user_id": {
-                        "type": "integer"
-                    },
-                    "affected_resources": {
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "integer"
-                        }
-                    }
-                },
-                "required": [
-                    "affected_resources",
-                    "user_id"
                 ]
             },
             "UserResponse": {

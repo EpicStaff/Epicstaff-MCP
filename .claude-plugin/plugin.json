@@ -1,6 +1,6 @@
 {
   "name": "epicstaff-mcp",
-  "version": "1.3.0-dev.1",
+  "version": "1.2.0",
   "description": "Develop EpicStaff flows like code: write flow-source locally, build (validate + auto-layout), push to EpicStaff, run and debug — via a bundled MCP server and skills.",
   "author": {
     "name": "EpicStaff"
