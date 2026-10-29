@@ -29340,10 +29340,12 @@ var AgentDefinitionsApi = class {
   }
 };
 
-// src/api/graphs.ts
+// src/api/paging.ts
 function unwrap2(response) {
   return Array.isArray(response) ? response : response.results;
 }
+
+// src/api/graphs.ts
 var GraphsApi = class {
   constructor(client) {
     this.client = client;
@@ -29374,8 +29376,40 @@ var GraphsApi = class {
   async patch(graphId, request) {
     return this.client.patch(`graphs/${graphId}/`, { body: request });
   }
+  /** Moves the flow to the recycle bin (restorable until purged). */
   async delete(graphId) {
     await this.client.delete(`graphs/${graphId}/`);
+  }
+  /** `copyGraph`: a new flow with the source's nodes and edges, under `name`. */
+  async copy(graphId, name) {
+    return this.client.post(`graphs/${graphId}/copy/`, { body: { name } });
+  }
+  /** `getSubflowUsage`: the flows that embed this one as a subflow. */
+  async subflowUsage(graphId) {
+    return this.client.get(`graphs/${graphId}/subflow-usage/`);
+  }
+  /**
+   * Org-level persistent variables of every flow in the active org (`graph-organizations/`,
+   * read-only — GraphOrganizationViewSet; the frontend does not call it). One row per flow.
+   */
+  async listOrganizationStates() {
+    return unwrap2(
+      await this.client.get("graph-organizations/", {
+        query: { limit: 1e3 }
+      })
+    );
+  }
+  /**
+   * Per-user persistent variables (`graph-organization-users/`, read-only —
+   * GraphOrganizationUserViewSet). One row per (flow, organization member).
+   */
+  async listOrganizationUserStates() {
+    return unwrap2(
+      await this.client.get(
+        "graph-organization-users/",
+        { query: { limit: 1e3 } }
+      )
+    );
   }
 };
 
@@ -29537,41 +29571,92 @@ var KnowledgeApi = class {
   }
 };
 
-// src/api/llm.ts
-function unwrap4(response) {
-  return Array.isArray(response) ? response : response.results;
+// src/api/bulk-delete.ts
+function bulkDeleteQuery(dryRun) {
+  return dryRun ? { dry_run: "true" } : void 0;
 }
+
+// src/api/llm.ts
 var LlmApi = class {
   constructor(client) {
     this.client = client;
   }
   client;
   async listProviders() {
-    return unwrap4(await this.client.get("providers/", { query: { limit: 1e3 } }));
+    return unwrap2(await this.client.get("providers/", { query: { limit: 1e3 } }));
   }
   async listModels() {
-    return unwrap4(await this.client.get("llm-models/", { query: { limit: 1e3 } }));
+    return unwrap2(await this.client.get("llm-models/", { query: { limit: 1e3 } }));
   }
   async listConfigs() {
-    return unwrap4(await this.client.get("llm-configs/", { query: { limit: 1e3 } }));
+    return unwrap2(await this.client.get("llm-configs/", { query: { limit: 1e3 } }));
+  }
+  async getConfig(id) {
+    return this.client.get(`llm-configs/${id}/`);
   }
   async createConfig(request) {
     return this.client.post("llm-configs/", { body: request });
   }
+  /** PATCH, not the frontend's full PUT: only the fields the caller names change. */
   async updateConfig(id, request) {
     return this.client.patch(`llm-configs/${id}/`, { body: request });
+  }
+  /** Configs are deleted for good (no recycle bin): references to it are cleared; skipped only when a referencing resource is hidden from the caller (BaseDeleteService). */
+  async deleteConfigs(ids, dryRun) {
+    return this.client.post("llm-configs/bulk-delete/", { body: { ids }, query: bulkDeleteQuery(dryRun) });
   }
   async getDefaultModels() {
     return this.client.get("default-models/");
   }
+  /** Writing needs LLM-config update permission in the active org. */
+  async updateDefaultModels(request) {
+    return this.client.put("default-models/", { body: request });
+  }
+  async listEmbeddingModels() {
+    return unwrap2(
+      await this.client.get("embedding-models/", { query: { limit: 1e3 } })
+    );
+  }
   async listEmbeddingConfigs() {
-    return unwrap4(
+    return unwrap2(
       await this.client.get("embedding-configs/", {
         query: { limit: 1e3 }
       })
     );
   }
+  async createEmbeddingConfig(request) {
+    return this.client.post("embedding-configs/", { body: request });
+  }
+  /** PATCH, not the frontend's full PUT: only the fields the caller names change. */
+  async updateEmbeddingConfig(id, request) {
+    return this.client.patch(`embedding-configs/${id}/`, { body: request });
+  }
+  /** Embedding configs are deleted for good: references to it are cleared; skipped only when a referencing resource is hidden from the caller (BaseDeleteService). */
+  async deleteEmbeddingConfigs(ids, dryRun) {
+    return this.client.post("embedding-configs/bulk-delete/", { body: { ids }, query: bulkDeleteQuery(dryRun) });
+  }
 };
+function buildModelIndex(models, providers) {
+  const providerName = new Map(providers.map((provider) => [provider.id, provider.name.toLowerCase()]));
+  const index = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    const key = model.name.toLowerCase();
+    const providerId = model.llm_provider ?? model.embedding_provider;
+    index.set(`${(providerId !== void 0 ? providerName.get(providerId) : void 0) ?? ""}/${key}`, model.id);
+    if (!index.has(key)) index.set(key, model.id);
+  }
+  return index;
+}
+function lookupModelId(index, label, modelName, providerHint, listToolName) {
+  const id = (providerHint ? index.get(`${providerHint.toLowerCase()}/${modelName.toLowerCase()}`) : void 0) ?? index.get(modelName.toLowerCase());
+  if (id === void 0) {
+    const available = [...index.keys()].filter((key) => !key.includes("/")).slice(0, 20).join(", ");
+    throw new Error(
+      `${label} "${modelName}" not found on the backend. Available models include: ${available}. Use ${listToolName} to see all options.`
+    );
+  }
+  return id;
+}
 async function resolveDefaultEmbeddingConfigId(llm) {
   const [configs, defaults] = await Promise.all([llm.listEmbeddingConfigs(), llm.getDefaultModels()]);
   if (configs.length === 0) {
@@ -29584,14 +29669,14 @@ async function resolveDefaultEmbeddingConfigId(llm) {
     return defaultId;
   }
   if (configs.length === 1) return configs[0].id;
-  const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+  const available = configs.map((config2) => config2.custom_name).filter(Boolean).join(", ");
   throw new Error(
     `Cannot pick a default embedding config: the organization has several and no default embedding config is set (Settings \u2192 Default models). Name one explicitly: ${available}.`
   );
 }
 
 // src/api/surfaces.ts
-function unwrap5(response) {
+function unwrap4(response) {
   return Array.isArray(response) ? response : response.results;
 }
 var SurfacesApi = class {
@@ -29600,7 +29685,7 @@ var SurfacesApi = class {
   }
   client;
   async list() {
-    return unwrap5(await this.client.get("surfaces/", { query: { limit: 1e3 } }));
+    return unwrap4(await this.client.get("surfaces/", { query: { limit: 1e3 } }));
   }
   async get(id) {
     return this.client.get(`surfaces/${id}/`);
@@ -29619,7 +29704,7 @@ var SurfacesApi = class {
 };
 
 // src/api/tools.ts
-function unwrap6(response) {
+function unwrap5(response) {
   return Array.isArray(response) ? response : response.results;
 }
 var ToolsApi = class {
@@ -29632,7 +29717,7 @@ var ToolsApi = class {
     return (await this.listPythonCodeTools()).filter((tool) => tool.built_in === true);
   }
   async listToolConfigs() {
-    return unwrap6(
+    return unwrap5(
       await this.client.get("python-code-tool-configs/", {
         query: { limit: 1e3 }
       })
@@ -29640,14 +29725,14 @@ var ToolsApi = class {
   }
   /** Every python-code tool visible to the org: its custom tools plus the built-in catalog. */
   async listPythonCodeTools() {
-    return unwrap6(
+    return unwrap5(
       await this.client.get("python-code-tool/", {
         query: { limit: 1e3 }
       })
     );
   }
   async listMcpTools() {
-    return unwrap6(await this.client.get("mcp-tools/", { query: { limit: 1e3 } }));
+    return unwrap5(await this.client.get("mcp-tools/", { query: { limit: 1e3 } }));
   }
   async createToolConfig(request) {
     return this.client.post("python-code-tool-configs/", { body: request });
@@ -29661,11 +29746,71 @@ var ToolsApi = class {
   async updatePythonCodeTool(id, request) {
     return this.client.patch(`python-code-tool/${id}/`, { body: request });
   }
+  async getPythonCodeTool(id) {
+    return this.client.get(`python-code-tool/${id}/`);
+  }
+  /** Moves the tool to the recycle bin; built-in catalog tools cannot be deleted. */
+  async deletePythonCodeTool(id) {
+    await this.client.delete(`python-code-tool/${id}/`);
+  }
   async createMcpTool(request) {
     return this.client.post("mcp-tools/", { body: request });
   }
   async updateMcpTool(id, request) {
     return this.client.patch(`mcp-tools/${id}/`, { body: request });
+  }
+  async getMcpTool(id) {
+    return this.client.get(`mcp-tools/${id}/`);
+  }
+  /** Moves the tool to the recycle bin. */
+  async deleteMcpTool(id) {
+    await this.client.delete(`mcp-tools/${id}/`);
+  }
+};
+
+// src/api/venvs.ts
+var VENV_NAME_PATTERN = /^[A-Za-z0-9 _-]+$/;
+var VENV_LIBRARY_VERSION_PATTERN = /^([1-9][0-9]*!)?(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))*((a|b|rc)(0|[1-9][0-9]*))?(\.post(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?(\+[a-z0-9]+([-_.][a-z0-9]+)*)?$/;
+var VENV_LIBRARY_SPECIFICATION_PATTERN = /^\s*(===|==|!=|~=|>=|<=|>|<)\s*[0-9A-Za-z][0-9A-Za-z.*+!_-]*(\s*,\s*(===|==|!=|~=|>=|<=|>|<)\s*[0-9A-Za-z][0-9A-Za-z.*+!_-]*)*\s*$/;
+var BUILDING_STATUSES = /* @__PURE__ */ new Set(["declared", "processing"]);
+var LIST_LIMIT = 1e3;
+var VenvsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async list(query = {}) {
+    const response = await this.client.get("venvs/", {
+      query: {
+        limit: LIST_LIMIT,
+        ...query.search ? { search: query.search } : {},
+        ...query.order ? { order: query.order } : {},
+        // Only the narrowing is a filter; 'false' would mean the same as no filter at all.
+        ...query.isFavorite ? { is_favorite: "true" } : {}
+      }
+    });
+    return response.result;
+  }
+  /** Venv names are not unique upstream; match exactly first, then case-insensitively. */
+  async findByName(name) {
+    const venvs = await this.list({ search: name });
+    const exact = venvs.filter((venv) => venv.name === name);
+    if (exact.length > 0) return exact;
+    const wanted = name.toLowerCase();
+    return venvs.filter((venv) => venv.name.toLowerCase() === wanted);
+  }
+  async get(id) {
+    return this.client.get(`venvs/${id}/`);
+  }
+  async create(body) {
+    return this.client.post("venvs/", { body });
+  }
+  async update(id, body) {
+    return this.client.patch(`venvs/${id}/`, { body });
+  }
+  /** Refused with 409 (venv_in_use) while any python code still runs in it — including binned owners. */
+  async delete(id) {
+    await this.client.delete(`venvs/${id}/`);
   }
 };
 
@@ -29735,6 +29880,10 @@ var positionSchema = external_exports.strictObject({
 var inputMapSchema = external_exports.record(external_exports.string(), external_exports.string()).describe(
   `Maps this node's named inputs to flow-state variable paths, e.g. { "query": "variables.user_query" }.`
 );
+var venvRefSchema = external_exports.string().regex(VENV_NAME_PATTERN, 'venv names contain only letters, digits, spaces, "_" and "-"').nullable().describe(
+  "Name of an existing EpicStaff virtual environment (list_venvs / create_venv) this code runs in; third-party packages come from it. null = the default venv; omit to keep the current one (new code gets the default)."
+);
+var LIBRARIES_DEPRECATION_NOTE = 'DEPRECATED \u2014 not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). Put the packages in a venv (create_venv) and reference it with venv: "<name>".';
 function credentialEnvName(description) {
   return external_exports.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name (letters, digits, underscores)").refine((name) => !isReservedEnvName(name), {
     message: "EPICSTAFF_* and ES_MCP_* variables are the MCP server's own credentials and settings and cannot be used as a flow credential \u2014 export the provider key under its own name (e.g. OPENAI_API_KEY)"
@@ -29892,9 +30041,8 @@ var pythonNodeSchema = external_exports.strictObject({
     "Path to a Python file relative to the flow directory. Provide exactly one of code / code_file."
   ),
   entrypoint: external_exports.string().default("main").describe("Name of the Python function executed by the sandbox."),
-  libraries: external_exports.array(external_exports.string()).default([]).describe(
-    "DEPRECATED \u2014 not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). Code runs in the default venv unless one is selected for it in the editor (a repush keeps that selection)."
-  ),
+  venv: venvRefSchema.optional(),
+  libraries: external_exports.array(external_exports.string()).default([]).describe(LIBRARIES_DEPRECATION_NOTE),
   input_map: inputMapField,
   output_variable_path: outputVariablePathField
 });
@@ -30154,9 +30302,8 @@ var pythonCodeToolSchema = external_exports.strictObject({
     "Path to a Python file relative to the flow directory. Provide exactly one of code / code_file."
   ),
   entrypoint: external_exports.string().default("main").describe("Name of the Python function called as the tool entrypoint."),
-  libraries: external_exports.array(external_exports.string()).default([]).describe(
-    "DEPRECATED \u2014 not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). The tool runs in the default venv unless one is selected for it in the editor (a repush keeps that selection)."
-  )
+  venv: venvRefSchema.optional(),
+  libraries: external_exports.array(external_exports.string()).default([]).describe(LIBRARIES_DEPRECATION_NOTE)
 }).superRefine((tool, ctx) => {
   const hasCode = tool.code !== void 0;
   const hasCodeFile = tool.code_file !== void 0;
@@ -31238,9 +31385,69 @@ function toNodeMetadata(node) {
   };
 }
 
+// src/graph/python-code-text.ts
+var PYTHON_WHITESPACE = /* @__PURE__ */ new Set([
+  "	",
+  "\n",
+  "\v",
+  "\f",
+  "\r",
+  "",
+  "",
+  "",
+  "",
+  " ",
+  "\x85",
+  "\xA0",
+  "\u1680",
+  "\u2000",
+  "\u2001",
+  "\u2002",
+  "\u2003",
+  "\u2004",
+  "\u2005",
+  "\u2006",
+  "\u2007",
+  "\u2008",
+  "\u2009",
+  "\u200A",
+  "\u2028",
+  "\u2029",
+  "\u202F",
+  "\u205F",
+  "\u3000"
+]);
+function storedPythonCode(code) {
+  let start = 0;
+  let end = code.length;
+  while (start < end && PYTHON_WHITESPACE.has(code.charAt(start))) start += 1;
+  while (end > start && PYTHON_WHITESPACE.has(code.charAt(end - 1))) end -= 1;
+  return code.slice(start, end);
+}
+
 // src/graph/diff.ts
 function areEqual(left, right) {
   return canonicalJson(left) === canonicalJson(right);
+}
+function isPlainObject4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function changedComparableFields(previous, current) {
+  if (!isPlainObject4(previous) || !isPlainObject4(current)) return areEqual(previous, current) ? [] : ["(value)"];
+  const changed = [];
+  for (const key of [.../* @__PURE__ */ new Set([...Object.keys(previous), ...Object.keys(current)])].sort()) {
+    const left = previous[key];
+    const right = current[key];
+    if (areEqual(left, right)) continue;
+    if (isPlainObject4(left) && isPlainObject4(right)) {
+      for (const subKey of [.../* @__PURE__ */ new Set([...Object.keys(left), ...Object.keys(right)])].sort()) {
+        if (!areEqual(left[subKey], right[subKey])) changed.push(`${key}.${subKey}`);
+      }
+    } else {
+      changed.push(key);
+    }
+  }
+  return changed;
 }
 function buildUuidToBackendIdMap(nodes) {
   const map = /* @__PURE__ */ new Map();
@@ -31271,8 +31478,14 @@ function diffNodesByBackendId(previous, current, toComparable) {
       continue;
     }
     matchedBackendIds.add(node.backendId);
-    if (!areEqual(toComparable(previousNode), toComparable(node))) {
-      toUpdate.push({ previous: previousNode, current: node });
+    const previousComparable = toComparable(previousNode);
+    const currentComparable = toComparable(node);
+    if (!areEqual(previousComparable, currentComparable)) {
+      toUpdate.push({
+        previous: previousNode,
+        current: node,
+        changedFields: changedComparableFields(previousComparable, currentComparable)
+      });
     }
   }
   const toDelete = [];
@@ -31314,8 +31527,13 @@ function toPythonComparable(node) {
     node_name: node.node_name,
     // secret_ids order is incidental (which secret record happened to resolve first), not a
     // real difference — sort it so two independent reconstructions of the same set don't
-    // register as a change.
-    python_code: { ...node.data, secret_ids: [...node.data.secret_ids || []].sort() },
+    // register as a change. Divergence: code is compared as the server stores it (stripped, see
+    // storedPythonCode) — source code ends with a newline the server never returns.
+    python_code: {
+      ...node.data,
+      code: storedPythonCode(node.data.code),
+      secret_ids: [...node.data.secret_ids || []].sort()
+    },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
     test_input: node.test_input ?? {},
@@ -31399,6 +31617,7 @@ function toWebhookComparable(node) {
     node_name: node.node_name,
     python_code: {
       ...node.data.python_code,
+      code: storedPythonCode(node.data.python_code.code),
       secret_ids: [...node.data.python_code.secret_ids || []].sort()
     },
     input_map: node.input_map || {},
@@ -31477,8 +31696,8 @@ function toCdtComparable(node, allNodes) {
     const backendId = allNodes.find((candidate) => candidate.id === uuid2)?.backendId ?? null;
     return backendId != null ? backendId : `temp:${uuid2}`;
   };
-  const preCode = tableData?.pre_computation?.code || tableData?.pre_computation_code || null;
-  const postCode = tableData?.post_computation?.code || tableData?.post_computation_code || null;
+  const preCode = storedPythonCode(tableData?.pre_computation?.code || tableData?.pre_computation_code || "") || null;
+  const postCode = storedPythonCode(tableData?.post_computation?.code || tableData?.post_computation_code || "") || null;
   return {
     node_name: node.node_name,
     pre_computation_code: preCode,
@@ -31505,8 +31724,11 @@ function toCdtComparable(node, allNodes) {
       variable_mappings: config2.variable_mappings ?? {}
     })),
     default_llm_config: tableData?.default_llm_config ?? null,
-    default_next_node: tableData?.default_next_node || null,
-    next_error_node: tableData?.next_error_node || null,
+    // Divergence: the frontend compares these uuids raw (its two states share uuids). A pushed
+    // state keeps compiler uuids against remote-<type>-<id> ones, so resolve them like next_node_id —
+    // compared raw, every table with a default or error route was rewritten on each push.
+    default_next_node: resolveRef(tableData?.default_next_node || null),
+    next_error_node: resolveRef(tableData?.next_error_node || null),
     pre_input_map: tableData?.pre_computation?.input_map || tableData?.pre_input_map || {},
     pre_output_variable_path: tableData?.pre_computation?.output_variable_path || tableData?.pre_output_variable_path || null,
     pre_use_storage: tableData?.pre_use_storage ?? false,
@@ -32210,6 +32432,15 @@ var RefRegistry = class {
       payload: { name: secretName(envName), value: { $env: envName } }
     }));
   }
+  /**
+   * `python_code.venv_id` for a source `venv:` value: a `{$ref}` to the named venv, `null` for the
+   * default venv, or no field at all when the source leaves the venv unstated.
+   */
+  venvField(venv) {
+    if (venv === void 0) return {};
+    if (venv === null) return { venv_id: null };
+    return { venv_id: this.ref("venvs", { existing: venv }) };
+  }
   keyValueTablePlans() {
     return [...this.keyValueTableNames].sort().map((tableName) => ({
       key: entityKey("key_value_tables", tableName),
@@ -32301,13 +32532,13 @@ function buildToolConfigPlans(source) {
     });
   });
 }
-function librariesNotInstalledWarning(atPath) {
+function librariesNotInstalledWarning(atPath, hasVenv) {
   return makeWarning(
     atPath,
-    "EpicStaff no longer installs per-code libraries \u2014 code runs in a virtual environment (venv). These libraries are NOT sent: create a venv holding them in the EpicStaff editor and select it for this code there (a repush keeps that selection), or remove `libraries`."
+    "EpicStaff no longer installs per-code libraries \u2014 code runs in a virtual environment (venv). " + (hasVenv ? "These libraries are NOT sent: make sure the venv named in `venv:` holds them, then remove `libraries`." : 'These libraries are NOT sent: create a venv holding them (create_venv) and reference it with `venv: "<name>"`, then remove `libraries`.')
   );
 }
-async function buildPythonToolPlans(source, flowDir, diagnostics) {
+async function buildPythonToolPlans(source, flowDir, registry2, diagnostics) {
   const plans = [];
   for (const [name, tool] of Object.entries(source.tools.python_code_tools)) {
     const code = tool.code ?? await readFlowFile(flowDir, tool.code_file);
@@ -32320,14 +32551,16 @@ async function buildPythonToolPlans(source, flowDir, diagnostics) {
       );
     }
     if (tool.libraries.length > 0) {
-      diagnostics.push(librariesNotInstalledWarning(`tools.python_code_tools.${name}.libraries`));
+      diagnostics.push(
+        librariesNotInstalledWarning(`tools.python_code_tools.${name}.libraries`, typeof tool.venv === "string")
+      );
     }
     plans.push(
       upsertPlan("tools.python_code_tools", name, "python_code_tool", tool, {
         name,
         description: tool.description,
         variables: [],
-        python_code: { code, entrypoint: tool.entrypoint }
+        python_code: { code, entrypoint: tool.entrypoint, ...registry2.venvField(tool.venv) }
       })
     );
   }
@@ -32600,12 +32833,12 @@ Expected output: ${node.expected_output}` : node.task;
       case "python": {
         const code = node.code ?? await readFlowFile(flowDir, node.code_file);
         if (node.libraries.length > 0) {
-          diagnostics.push(librariesNotInstalledWarning(`${nodePath}.libraries`));
+          diagnostics.push(librariesNotInstalledWarning(`${nodePath}.libraries`, typeof node.venv === "string"));
         }
         nodes.push({
           ...base,
           type: "python",
-          data: { name: nodeName, code, entrypoint: node.entrypoint },
+          data: { name: nodeName, code, entrypoint: node.entrypoint, ...registry2.venvField(node.venv) },
           test_input: {}
         });
         break;
@@ -32901,7 +33134,7 @@ async function emitFlow(source, flowDir) {
   const registry2 = new RefRegistry();
   const llmPlans = buildLlmConfigPlans(source, registry2);
   const toolConfigPlans = buildToolConfigPlans(source);
-  const pythonToolPlans = await buildPythonToolPlans(source, flowDir, diagnostics);
+  const pythonToolPlans = await buildPythonToolPlans(source, flowDir, registry2, diagnostics);
   const mcpToolPlans = buildMcpToolPlans(source, diagnostics);
   const knowledgePlans = buildKnowledgePlans(source, flowDir, registry2);
   const surfacePlans = buildSurfacePlans(source, registry2);
@@ -32914,9 +33147,10 @@ async function emitFlow(source, flowDir) {
   );
   applyLayout(source, nodes, layoutConnections);
   const entities = [
-    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    // Secrets, key-value tables and venvs are leaves: nothing they hold references another entity.
     ...registry2.secretPlans(),
     ...registry2.keyValueTablePlans(),
+    ...registry2.existingPlans("venvs", "venv"),
     ...registry2.existingPlans("llm_configs", "llm_config"),
     ...llmPlans,
     ...registry2.existingPlans("tools.tool_configs", "tool_config"),
@@ -33396,6 +33630,14 @@ var import_yaml2 = __toESM(require_dist2(), 1);
 import { existsSync as existsSync2 } from "node:fs";
 import { promises as fs4 } from "node:fs";
 import path5 from "node:path";
+
+// src/models/authorship.ts
+function describeUser(user) {
+  if (user == null) return null;
+  return user.display_name ?? `user #${user.id}`;
+}
+
+// src/flow-source/decompiler.ts
 var FLOW_SOURCE_FILE_NAME = "flow.yaml";
 async function decompileFlow(deps, graphId, targetDir) {
   refuseExistingFlowFiles(targetDir);
@@ -33446,17 +33688,50 @@ async function decompileFlow(deps, graphId, targetDir) {
       contentHash: contentHash({})
     });
   }
+  const authorship = collectAuthorship(dto, registry2);
   await fs4.mkdir(targetDir, { recursive: true });
   const flowPath = path5.join(targetDir, FLOW_SOURCE_FILE_NAME);
   const header = `# Pulled from EpicStaff graph #${dto.id} \u2014 edit locally, then diff_flow / push_flow.
-`;
+` + authorshipHeader(authorship);
   await fs4.writeFile(
     flowPath,
     header + (0, import_yaml2.stringify)(document, { lineWidth: 0, aliasDuplicateObjects: false }),
     "utf8"
   );
   await writeLock(targetDir, lock);
-  return { files: [flowPath, path5.join(targetDir, LOCKFILE_NAME)], warnings, lock };
+  return { files: [flowPath, path5.join(targetDir, LOCKFILE_NAME)], warnings, lock, authorship };
+}
+function collectAuthorship(dto, registry2) {
+  return {
+    created_by: describeUser(dto.created_by),
+    created_at: dto.created_at ?? null,
+    last_edited_by: describeUser(dto.last_edited_by),
+    last_edited_at: dto.last_edited_at ?? null,
+    nodes: registry2.nodes.map(({ entry, name }) => {
+      const nodeDto = entry.dto;
+      return {
+        name,
+        type: entry.type,
+        node_number: nodeDto.node_number ?? null,
+        created_by: describeUser(nodeDto.created_by),
+        last_edited_by: describeUser(nodeDto.last_edited_by),
+        last_edited_at: nodeDto.last_edited_at ?? null
+      };
+    })
+  };
+}
+function authorshipHeader(authorship) {
+  const lines = [];
+  if (authorship.created_by !== null) {
+    lines.push(`# Created by ${authorship.created_by}${authorship.created_at ? ` at ${authorship.created_at}` : ""}.`);
+  }
+  if (authorship.last_edited_by !== null) {
+    lines.push(
+      `# Last edited by ${authorship.last_edited_by}${authorship.last_edited_at ? ` at ${authorship.last_edited_at}` : ""}.`
+    );
+  }
+  return lines.map((line) => `${line.replace(/[\r\n]+/g, " ")}
+`).join("");
 }
 function refuseExistingFlowFiles(targetDir) {
   for (const fileName of [FLOW_SOURCE_FILE_NAME, LOCKFILE_NAME]) {
@@ -33490,8 +33765,9 @@ async function fetchReferencedEntityNames(deps, dto) {
   const needsCollections = inlineSurfaces.some((surface) => (surface.knowledge ?? []).length > 0) || (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
   const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
   const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
+  const needsVenvs = dto.python_node_list.some((node) => node.python_code.venv_id != null);
   const emptyMap = () => /* @__PURE__ */ new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] = await Promise.all([
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables, venvs] = await Promise.all([
     mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
     mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
     needsLlmConfigs ? deps.llm.listConfigs().then((configs) => new Map(configs.map((config2) => [config2.id, config2.custom_name]))) : Promise.resolve(emptyMap()),
@@ -33503,7 +33779,8 @@ async function fetchReferencedEntityNames(deps, dto) {
       )
     ) : Promise.resolve(emptyMap()),
     needsGraphList ? deps.graphs.listLight().then((graphs) => new Map(graphs.map((graph) => [graph.id, graph.name]))) : Promise.resolve(emptyMap()),
-    needsKeyValueTables ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name]))) : Promise.resolve(emptyMap())
+    needsKeyValueTables ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name]))) : Promise.resolve(emptyMap()),
+    needsVenvs ? deps.venvs.list().then((list) => new Map(list.map((venv) => [venv.id, venv.name]))) : Promise.resolve(emptyMap())
   ]);
   const subgraphs = new Map(graphNames);
   for (const node of dto.subgraph_node_list) {
@@ -33511,7 +33788,7 @@ async function fetchReferencedEntityNames(deps, dto) {
       subgraphs.set(node.subgraph, node.subgraph_detail.name);
     }
   }
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables, venvs };
 }
 async function mapFromFetches(ids, fetchOne, nameOf) {
   const pairs = await Promise.all(ids.map(async (id) => [id, nameOf(await fetchOne(id))]));
@@ -33692,6 +33969,24 @@ function inlineSurfaceField(surface, names, atPath, warnings) {
   }
   return { inline_surface: body };
 }
+function venvField(venvId, names, atPath, warnings) {
+  if (venvId == null) return {};
+  const venvName = names.venvs.get(venvId);
+  if (venvName === void 0) {
+    warnings.push(
+      `${atPath}: its virtual environment (venv #${venvId}) was not found in the active organization \u2014 left out of flow source; the next push keeps it`
+    );
+    return {};
+  }
+  const sameName = [...names.venvs.values()].filter((name) => name === venvName).length;
+  if (sameName > 1) {
+    warnings.push(
+      `${atPath}: its virtual environment "${venvName}" shares its name with another venv \u2014 left out of flow source (a name would be ambiguous); the next push keeps it. Rename one with update_venv to pull it as venv:.`
+    );
+    return {};
+  }
+  return { venv: venvName };
+}
 function missingToolName(kind, toolId, atPath, warnings) {
   return missingName(`${kind} tool #${toolId}`, atPath, warnings);
 }
@@ -33770,16 +34065,12 @@ function buildNodeBody(collected, registry2, names, warnings) {
         warnings.push(`${atPath}: test_input is not representable in flow source and resets on the next push`);
       }
       const code = entry.dto.python_code;
-      if (code.venv_id != null) {
-        warnings.push(
-          `${atPath}: the virtual environment (venv #${code.venv_id}) is not representable in flow source \u2014 it is kept on the next push`
-        );
-      }
       return {
         type: "python",
         position,
         code: code.code,
         ...code.entrypoint !== "main" ? { entrypoint: code.entrypoint } : {},
+        ...venvField(code.venv_id, names, atPath, warnings),
         ...inputMapField2(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField2(entry.dto.output_variable_path)
       };
@@ -34850,10 +35141,11 @@ var KeyValueTablesApi = class {
   }
   client;
   async list() {
-    const response = await this.client.get("key-value-tables/", {
-      query: { limit: 1e3 }
-    });
-    return Array.isArray(response) ? response : response.results;
+    return unwrap2(
+      await this.client.get("key-value-tables/", {
+        query: { limit: 1e3 }
+      })
+    );
   }
   /** Table names are unique per org, case-insensitively (KeyValueTableSerializer). */
   async findByName(name) {
@@ -34862,6 +35154,45 @@ var KeyValueTablesApi = class {
   }
   async create(request) {
     return this.client.post("key-value-tables/", { body: request });
+  }
+  async update(id, request) {
+    return this.client.patch(`key-value-tables/${id}/`, { body: request });
+  }
+  /** Moves the table and its entries to the recycle bin. */
+  async delete(id) {
+    await this.client.delete(`key-value-tables/${id}/`);
+  }
+  async usage(id) {
+    return this.client.get(`key-value-tables/${id}/usage/`);
+  }
+  async listEntries(query) {
+    return this.client.get("key-value-table-entries/", {
+      query: {
+        table: query.table,
+        limit: query.limit,
+        offset: query.offset,
+        ...query.search ? { search: query.search } : {},
+        ...query.ordering ? { ordering: query.ordering } : {}
+      }
+    });
+  }
+  async getEntry(id) {
+    return this.client.get(`key-value-table-entries/${id}/`);
+  }
+  async createEntry(request) {
+    return this.client.post("key-value-table-entries/", { body: request });
+  }
+  async updateEntry(id, request) {
+    return this.client.patch(`key-value-table-entries/${id}/`, { body: request });
+  }
+  async deleteEntry(id) {
+    await this.client.delete(`key-value-table-entries/${id}/`);
+  }
+  /** Which of `keys` exist in the table (`POST key-value-tables/{id}/entries/lookup/`). */
+  async lookupEntries(tableId, keys) {
+    return this.client.post(`key-value-tables/${tableId}/entries/lookup/`, {
+      body: { keys }
+    });
   }
 };
 
@@ -34891,6 +35222,18 @@ var StorageApi = class {
   }
 };
 
+// src/api/user-session.ts
+async function withUserSession(session, call) {
+  try {
+    return await call(await session.accessToken());
+  } catch (error2) {
+    if (error2 instanceof ApiError && error2.status === 401) {
+      return call(await session.renewAccessToken());
+    }
+    throw error2;
+  }
+}
+
 // src/api/secrets.ts
 var TAIL_LENGTH = 4;
 var MIN_LENGTH_FOR_TAIL = 9;
@@ -34905,10 +35248,11 @@ var SecretsApi = class {
   client;
   session;
   async list() {
-    const response = await this.withSession(
+    const response = await withUserSession(
+      this.session,
       (bearerToken) => this.client.get("secrets/", { bearerToken, query: { limit: 1e3 } })
     );
-    return Array.isArray(response) ? response : response.results;
+    return unwrap2(response);
   }
   async findByName(name) {
     return (await this.list()).find((secret) => secret.name === name);
@@ -34919,7 +35263,8 @@ var SecretsApi = class {
    */
   async create(name, value) {
     try {
-      return await this.withSession(
+      return await withUserSession(
+        this.session,
         (bearerToken) => this.client.post("secrets/", { bearerToken, body: { name, value } })
       );
     } catch (error2) {
@@ -34935,20 +35280,46 @@ var SecretsApi = class {
       throw error2;
     }
   }
-  async withSession(call) {
-    try {
-      return await call(await this.session.accessToken());
-    } catch (error2) {
-      if (error2 instanceof ApiError && error2.status === 401) {
-        return call(await this.session.renewAccessToken());
-      }
-      throw error2;
-    }
+  /** Move a secret to the recycle bin (`deleteSecret`). Configs and code that read it lose access. */
+  async delete(id) {
+    await withUserSession(this.session, (bearerToken) => this.client.delete(`secrets/${id}/`, { bearerToken }));
   }
 };
 
 // src/pusher/entities.ts
 import { readFileSync as readFileSync3 } from "node:fs";
+
+// src/pusher/env-secrets.ts
+function readCredentialEnv(envName) {
+  if (isReservedEnvName(envName)) {
+    throw new Error(
+      `Environment variable "${envName}" belongs to the MCP server's own configuration and cannot be stored as a credential. Export the provider key under its own name and reference that instead.`
+    );
+  }
+  const resolved = readEnv(process.env, envName);
+  if (resolved === void 0) {
+    throw new Error(
+      `Environment variable "${envName}" is not set for the MCP server. Export it in the shell that launches Claude Code (or the plugin env), then restart it.`
+    );
+  }
+  return resolved;
+}
+async function ensureSecretFromEnv(secrets, name, envName) {
+  const value = readCredentialEnv(envName);
+  const existing = await secrets.findByName(name);
+  if (existing) {
+    if (existing.tail !== secretTail(value)) {
+      throw new Error(
+        `Org secret "${name}" already exists but holds a different value than ${envName}. EpicStaff secrets are immutable \u2014 delete "${name}" (delete_secret) and try again, or restore the previous value of ${envName}.`
+      );
+    }
+    return { backendId: existing.id, created: false };
+  }
+  logger.info(`Creating org secret "${name}" from ${envName}`);
+  return { backendId: (await secrets.create(name, value)).id, created: true };
+}
+
+// src/pusher/entities.ts
 var EntityPusher = class {
   constructor(context) {
     this.context = context;
@@ -34960,6 +35331,7 @@ var EntityPusher = class {
     this.storage = new StorageApi(context.client);
     this.secrets = new SecretsApi(context.client, context.auth);
     this.keyValueTables = new KeyValueTablesApi(context.client);
+    this.venvs = new VenvsApi(context.client);
   }
   context;
   llm;
@@ -34970,7 +35342,10 @@ var EntityPusher = class {
   storage;
   secrets;
   keyValueTables;
-  modelIdByName = null;
+  venvs;
+  /** Venvs seen while resolving `venv:` references — their build status feeds push warnings. */
+  venvById = /* @__PURE__ */ new Map();
+  modelIndex = null;
   builtinToolIdByName = null;
   /**
    * @param options.sections When set, only entity plans whose `section` is in
@@ -34996,6 +35371,10 @@ var EntityPusher = class {
         const backendId2 = await this.resolveExisting(plan);
         idMap.set(plan.key, backendId2);
         actions.push({ key: plan.key, kind: plan.kind, action: "resolved-existing", backendId: backendId2 });
+        if (plan.kind === "venv") {
+          const venvWarning = venvStatusWarning(this.venvById.get(backendId2));
+          if (venvWarning !== null) warnings.push(`${plan.key}: ${venvWarning}`);
+        }
         continue;
       }
       if (plan.action === "ensure") {
@@ -35114,45 +35493,13 @@ var EntityPusher = class {
         throw new Error(`Entity kind ${plan.kind} has no ensure path \u2014 compiler bug.`);
     }
   }
-  /**
-   * Store the value of the plan's environment variable as the org Secret `name`.
-   * Secrets are immutable, so an existing secret is reused only when its visible tail
-   * matches the current value; a mismatch means the env value was rotated and the user
-   * must delete the old secret (it may still be referenced elsewhere). The value is
-   * never logged, echoed, or written to the lockfile.
-   */
+  /** Store the plan's environment variable as the org Secret `name` (see ensureSecretFromEnv). */
   async ensureSecret(plan, name) {
-    const payload = plan.payload ?? {};
-    const envRef = payload["value"];
+    const envRef = (plan.payload ?? {})["value"];
     if (!isEnvRef(envRef)) {
       throw new Error(`Secret plan "${plan.key}" carries no {$env} value \u2014 compiler bug.`);
     }
-    const value = this.readEnv(envRef.$env);
-    const existing = await this.secrets.findByName(name);
-    if (existing) {
-      if (existing.tail !== secretTail(value)) {
-        throw new Error(
-          `Org secret "${name}" already exists but holds a different value than ${envRef.$env} (tail ${existing.tail ? `\u2026${existing.tail}` : "hidden"}). EpicStaff secrets are immutable \u2014 delete "${name}" in EpicStaff (Settings \u2192 Secrets) and push again, or restore the previous value of ${envRef.$env}.`
-        );
-      }
-      return { backendId: existing.id, created: false };
-    }
-    logger.info(`Creating org secret "${name}" from ${envRef.$env}`);
-    return { backendId: (await this.secrets.create(name, value)).id, created: true };
-  }
-  readEnv(envName) {
-    if (isReservedEnvName(envName)) {
-      throw new Error(
-        `Environment variable "${envName}" belongs to the MCP server's own configuration and cannot be stored as a flow credential. Export the provider key under its own name and reference that instead.`
-      );
-    }
-    const resolved = readEnv(process.env, envName);
-    if (resolved === void 0) {
-      throw new Error(
-        `Environment variable "${envName}" is not set for the MCP server. Secrets referenced in flow source must be provided in the plugin environment.`
-      );
-    }
-    return resolved;
+    return ensureSecretFromEnv(this.secrets, name, envRef.$env);
   }
   async resolveBuiltinToolId(toolName) {
     if (!this.builtinToolIdByName) {
@@ -35171,28 +35518,17 @@ var EntityPusher = class {
     return id;
   }
   async resolveModelId(modelName, providerHint) {
-    if (!this.modelIdByName) {
-      const [models, providers] = await Promise.all([this.llm.listModels(), this.llm.listProviders()]);
-      const providerName = new Map(providers.map((provider) => [provider.id, provider.name.toLowerCase()]));
-      this.modelIdByName = /* @__PURE__ */ new Map();
-      for (const model of models) {
-        const key = model.name.toLowerCase();
-        this.modelIdByName.set(`${providerName.get(model.llm_provider) ?? ""}/${key}`, model.id);
-        if (!this.modelIdByName.has(key)) this.modelIdByName.set(key, model.id);
-      }
-    }
-    const id = (providerHint ? this.modelIdByName.get(`${providerHint.toLowerCase()}/${modelName.toLowerCase()}`) : void 0) ?? this.modelIdByName.get(modelName.toLowerCase());
-    if (id === void 0) {
-      const available = [...this.modelIdByName.keys()].filter((key) => !key.includes("/")).slice(0, 20).join(", ");
-      throw new Error(
-        `LLM model "${modelName}" not found on the backend. Available models include: ${available}. Use list_llm_models to see all options.`
-      );
-    }
-    return id;
+    this.modelIndex ??= buildModelIndex(...await Promise.all([this.llm.listModels(), this.llm.listProviders()]));
+    return lookupModelId(this.modelIndex, "LLM model", modelName, providerHint, "list_llm_models");
   }
   async resolveExisting(plan) {
     const remoteName = plan.remoteName ?? plan.name;
     const found = await this.lookupByName(plan, remoteName);
+    if (found === void 0 && plan.kind === "venv") {
+      throw new Error(
+        `venv: "${remoteName}" \u2014 no virtual environment with that name in the active organization. Check the name with list_venvs, or create it with create_venv.`
+      );
+    }
     if (found === void 0) {
       throw new Error(
         `existing: "${remoteName}" (${plan.kind}) was not found in the active organization. Check the name with the matching list_* tool, or define it locally in the flow source.`
@@ -35228,9 +35564,24 @@ var EntityPusher = class {
         return (await this.surfaces.list()).find(nameMatches)?.id;
       case "agent_definition":
         return (await this.agentDefinitions.list()).find(nameMatches)?.id;
+      case "venv":
+        return this.lookupVenv(remoteName);
       default:
         return void 0;
     }
+  }
+  /** Venv names are not unique upstream, so an ambiguous `venv:` name is refused, not guessed. */
+  async lookupVenv(name) {
+    const matches = await this.venvs.findByName(name);
+    if (matches.length > 1) {
+      throw new Error(
+        `venv: "${name}" is ambiguous \u2014 ${matches.length} virtual environments carry that name (ids ${matches.map((venv) => venv.id).join(", ")}). Rename one (update_venv) so the reference is unique.`
+      );
+    }
+    const match = matches[0];
+    if (match === void 0) return void 0;
+    this.venvById.set(match.id, match);
+    return match.id;
   }
   async createEntity(plan, payload) {
     try {
@@ -35367,10 +35718,10 @@ var EntityPusher = class {
       }
       const configs = await this.llm.listEmbeddingConfigs();
       const named = configs.find(
-        (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === embedderName.toLowerCase()
+        (config2) => config2.custom_name.toLowerCase() === embedderName.toLowerCase()
       );
       if (named) return named.id;
-      const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+      const available = configs.map((config2) => config2.custom_name).filter(Boolean).join(", ");
       throw new Error(
         `Embedding config "${embedderName}" not found in the organization. Available embedding configs: ${available || "(none)"}. Fix knowledge.<name>.rag.embedder, or omit it to use the org default.`
       );
@@ -35378,6 +35729,13 @@ var EntityPusher = class {
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
   }
 };
+function venvStatusWarning(venv) {
+  if (venv === void 0 || venv.status === "completed") return null;
+  if (BUILDING_STATUSES.has(venv.status)) {
+    return `venv "${venv.name}" is still being built (${venv.status}) \u2014 code that runs in it waits for the build.`;
+  }
+  return `venv "${venv.name}" failed to build${venv.error ? `: ${venv.error}` : ""} \u2014 code that runs in it will fail. Fix its libraries with update_venv.`;
+}
 function nameConflictError(plan) {
   const name = expectedRemoteName(plan);
   return new Error(
@@ -35680,6 +36038,10 @@ var GraphPusher = class {
       remote,
       saveVersion: remoteDto.save_version
     });
+    const changedFields = {};
+    for (const bucket of Object.values(getNodeDiff(remote, desired))) {
+      for (const { current, changedFields: fields } of bucket.toUpdate) changedFields[current.node_name] = fields;
+    }
     const orphanEdgeIds = collectOrphanEdgeIds(remoteDto);
     if (orphanEdgeIds.length > 0) {
       const alreadyDeleting = new Set(payload.deleted.edge_ids);
@@ -35729,7 +36091,13 @@ var GraphPusher = class {
       lock: currentLock,
       createdGraph,
       changed,
-      nodeActions: { created, updated, deleted, updatedNodes },
+      nodeActions: {
+        created,
+        updated,
+        deleted,
+        updatedNodes,
+        ...Object.keys(changedFields).length > 0 ? { changedFields } : {}
+      },
       warnings
     };
   }
@@ -35767,6 +36135,7 @@ function inheritUnrepresentableFields(desired, remote) {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
       node.data.test_payload ??= previous.data.test_payload;
+      if (node.data.fields.length === 0) node.data.fields = previous.data.fields;
     } else if (node.type === "python" && previous.type === "python") {
       inheritPythonCodeSettings(node.data, previous.data);
       node.data.use_storage ??= false;
@@ -36364,7 +36733,7 @@ function registerFlowTools(server, context) {
     "pull_flow",
     {
       title: "Pull a remote flow into local flow source",
-      description: 'Import an existing EpicStaff flow (graph) into a local flow-source directory so it can be edited and repushed: writes flow.yaml with every node, edge and pinned canvas position, plus a seeded flow.lock.json so push_flow updates the same graph in place. Referenced entities (agents, surfaces, llm configs, tools, knowledge collections) are written as {existing: "<name>"} references \u2014 they stay owned by the backend. Refuses to overwrite an existing flow source.',
+      description: `Import an existing EpicStaff flow (graph) into a local flow-source directory so it can be edited and repushed: writes flow.yaml with every node, edge and pinned canvas position, plus a seeded flow.lock.json so push_flow updates the same graph in place. Referenced entities (agents, surfaces, llm configs, tools, knowledge collections) are written as {existing: "<name>"} references \u2014 they stay owned by the backend; a python node's virtual environment as venv: "<name>". The result also reports who created and last edited the flow and each node (with its #N number) \u2014 read-only, so it is not part of flow source. Refuses to overwrite an existing flow source.`,
       inputSchema: {
         graph_id: external_exports.number().int().describe("Backend id of the graph to pull (see list output of graph-light)"),
         target_dir: external_exports.string().describe("Absolute path of the flow directory to create \u2014 must not already contain a flow source")
@@ -36373,7 +36742,7 @@ function registerFlowTools(server, context) {
     async ({ graph_id, target_dir }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
-      const { files, warnings } = await decompileFlow(
+      const { files, warnings, authorship } = await decompileFlow(
         {
           graphs: new GraphsApi(context.client),
           agentDefinitions: new AgentDefinitionsApi(context.client),
@@ -36381,7 +36750,8 @@ function registerFlowTools(server, context) {
           llm: new LlmApi(context.client),
           tools: new ToolsApi(context.client),
           knowledge: new KnowledgeApi(context.client),
-          keyValueTables: new KeyValueTablesApi(context.client)
+          keyValueTables: new KeyValueTablesApi(context.client),
+          venvs: new VenvsApi(context.client)
         },
         graph_id,
         target_dir
@@ -36389,6 +36759,7 @@ function registerFlowTools(server, context) {
       return {
         files,
         warnings,
+        authorship,
         next: "Run diff_flow to verify a no-op baseline, then edit with es-write-flow."
       };
     })
@@ -36693,7 +37064,7 @@ var NODE_REFERENCE = {
     whenToUse: "Deterministic transforms, glue, list/index manipulation, calling out to libraries.",
     caveats: [
       "Provide exactly one of `code` / `code_file`; the `entrypoint` function receives the mapped inputs.",
-      "Third-party packages come from the virtual environment (venv) selected for the node in the editor \u2014 `libraries:` is no longer installed. Without a venv the code runs in the default one."
+      'Third-party packages come from a virtual environment: set `venv: "<name>"` (list_venvs / create_venv) \u2014 `libraries:` is no longer installed. venv: null = the default venv; omitted = keep the current one (new code gets the default). A venv still building makes the code wait; a failed build makes it fail.'
     ]
   },
   end: {
@@ -36824,20 +37195,34 @@ var NODE_LIST_KEYS = [
   "knowledge_node_list",
   "key_value_node_list"
 ];
+function authorshipSummary(row) {
+  return {
+    ...row.created_by !== void 0 && { created_by: describeUser(row.created_by) },
+    ...row.last_edited_by !== void 0 && { last_edited_by: describeUser(row.last_edited_by) },
+    ...row.last_edited_at !== void 0 && { last_edited_at: row.last_edited_at }
+  };
+}
 function summarizeGraph(graph) {
   const raw = graph;
   const nodes = {};
   for (const key of NODE_LIST_KEYS) {
     const list = raw[key];
     if (Array.isArray(list) && list.length > 0) {
-      nodes[key] = list.map((node) => ({
-        id: node.id,
-        node_name: node.node_name,
-        ...node.agent_definition !== void 0 && { agent_definition: node.agent_definition },
-        ...node.surface_list !== void 0 && { surface_list: node.surface_list },
-        ...node.source_collection !== void 0 && { source_collection: node.source_collection },
-        ...node.key_value_table !== void 0 && { key_value_table: node.key_value_table }
-      }));
+      nodes[key] = list.map((node) => {
+        const pythonCode = node.python_code;
+        return {
+          id: node.id,
+          node_name: node.node_name,
+          // The server-issued #N badge; start, end and note nodes are not numbered.
+          ...node.node_number !== void 0 && { node_number: node.node_number },
+          ...node.agent_definition !== void 0 && { agent_definition: node.agent_definition },
+          ...node.surface_list !== void 0 && { surface_list: node.surface_list },
+          ...node.source_collection !== void 0 && { source_collection: node.source_collection },
+          ...node.key_value_table !== void 0 && { key_value_table: node.key_value_table },
+          ...key === "python_node_list" && pythonCode?.venv_id != null && { venv_id: pythonCode.venv_id },
+          ...authorshipSummary(node)
+        };
+      });
     }
   }
   return {
@@ -36845,6 +37230,9 @@ function summarizeGraph(graph) {
     name: graph.name,
     description: graph.description,
     save_version: graph.save_version,
+    created_at: graph.created_at,
+    ...authorshipSummary(raw),
+    label_ids: graph.label_ids ?? [],
     nodes,
     edges: (graph.edge_list ?? []).map((edge) => ({
       id: edge.id,
@@ -37034,7 +37422,7 @@ function registerReferenceTools(server, context) {
     "describe_graph",
     {
       title: "Describe a flow graph",
-      description: "Human-readable structural summary of a remote flow graph: nodes per type, edges, and the entities its agent/task nodes reference. Use to inspect a flow before pulling or editing it.",
+      description: "Human-readable structural summary of a remote flow graph: nodes per type (with their #N node_number), edges, the entities its nodes reference, and who created and last edited the flow and each node. Use to inspect a flow before pulling or editing it.",
       inputSchema: {
         graph_id: external_exports.number().int()
       }
@@ -37493,7 +37881,78 @@ function registerKnowledgeTools(server, context) {
 
 // src/tools/catalog.tools.ts
 import { existsSync as existsSync5 } from "node:fs";
+
+// src/tools/catalog-helpers.ts
 var idOrName = external_exports.union([external_exports.number().int(), external_exports.string().min(1)]);
+async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
+  if (typeof ref === "number") return ref;
+  const items = await list();
+  const wanted = ref.trim().toLowerCase();
+  const matches = items.filter((item) => nameOf(item).toLowerCase() === wanted);
+  if (matches.length > 1) {
+    const ids = matches.map(idOf).filter((id2) => id2 !== void 0);
+    throw new Error(
+      `${entityLabel} "${ref}" is ambiguous \u2014 ${matches.length} entries carry that name (ids ${ids.join(", ")}). Pass the numeric backend id instead.`
+    );
+  }
+  const match = matches[0];
+  const id = match ? idOf(match) : void 0;
+  if (id === void 0) {
+    const available = items.map(nameOf).filter(Boolean).slice(0, 30).join(", ");
+    throw new Error(
+      `${entityLabel} "${ref}" not found in the active organization. Available: ${available || "(none)"}. Pass a numeric backend id or an exact existing name.`
+    );
+  }
+  return id;
+}
+function isAlreadyExistsError(error2) {
+  if (error2.status === 409) return true;
+  const haystack = [
+    error2.message,
+    error2.bodyExcerpt ?? "",
+    ...error2.validationErrors?.map((issue2) => `${issue2.field} ${issue2.reason}`) ?? []
+  ].join(" ").toLowerCase();
+  return /already exist|must be unique|unique constraint|duplicate|conflict/.test(haystack);
+}
+async function createOrExplainConflict(create, name, updateToolName) {
+  try {
+    return await create();
+  } catch (error2) {
+    if (error2 instanceof ApiError && isAlreadyExistsError(error2)) {
+      throw new Error(
+        `An entity named "${name}" already exists in this organization (catalog names are org-unique). Use ${updateToolName} to modify the existing one, or choose a different name.`
+      );
+    }
+    throw error2;
+  }
+}
+async function resolveCredential(secrets, credentialEnv, credentialSecret, inputNames = { env: "api_key_env", secret: "api_key_secret" }) {
+  if (credentialEnv !== void 0 && credentialSecret !== void 0) {
+    throw new Error(`Pass either ${inputNames.env} or ${inputNames.secret}, not both.`);
+  }
+  if (credentialEnv !== void 0) {
+    return (await ensureSecretFromEnv(secrets(), secretName(credentialEnv), credentialEnv)).backendId;
+  }
+  if (credentialSecret === null || credentialSecret === void 0) return credentialSecret;
+  const api = secrets();
+  return resolveNamedRef(credentialSecret, "Secret", () => api.list(), (secret) => secret.id, (secret) => secret.name);
+}
+function summarizeAuthored(entity) {
+  const { created_by, last_edited_by, ...rest } = entity;
+  return {
+    ...rest,
+    ...created_by !== void 0 ? { created_by: describeUser(created_by) } : {},
+    ...last_edited_by !== void 0 ? { last_edited_by: describeUser(last_edited_by) } : {}
+  };
+}
+function pickDefined(fields) {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== void 0));
+}
+function recycleBinHint(kind, id) {
+  return `It is in the recycle bin: list_recycle_bin(kind: "${kind}") shows it, restore_from_recycle_bin(kind: "${kind}", ids: [${id}]) brings it back.`;
+}
+
+// src/tools/catalog.tools.ts
 var toolModeSchema2 = external_exports.enum(["allow", "deny"]).default("allow").describe('Tool permission. "deny" hard-wins over "allow" when surfaces combine.');
 var triStateSchema = external_exports.enum(["allow", "unset", "deny"]).default("unset").describe("Tri-state storage permission. When surfaces combine: deny > allow > unset.");
 var surfaceToolEntrySchema2 = external_exports.strictObject({
@@ -37538,56 +37997,21 @@ var ragInputSchema = external_exports.strictObject({
     "Graph strategy only. Re-ask passes for missed entities per chunk (backend default 1). Each increment adds roughly one full extraction pass of LLM cost."
   )
 });
-async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
-  if (typeof ref === "number") return ref;
-  const items = await list();
-  const wanted = ref.trim().toLowerCase();
-  const match = items.find((item) => nameOf(item).toLowerCase() === wanted);
-  const id = match ? idOf(match) : void 0;
-  if (id === void 0) {
-    const available = items.map(nameOf).filter(Boolean).slice(0, 30).join(", ");
-    throw new Error(
-      `${entityLabel} "${ref}" not found in the active organization. Available: ${available || "(none)"}. Pass a numeric backend id or an exact existing name.`
-    );
-  }
-  return id;
-}
 async function resolveEmbedderRef(ref, llm) {
   if (typeof ref === "number") return ref;
   const configs = await llm.listEmbeddingConfigs();
   if (typeof ref === "string") {
     const wanted = ref.trim().toLowerCase();
     const named = configs.find(
-      (config2) => String(config2.custom_name ?? config2.name ?? "").toLowerCase() === wanted
+      (config2) => config2.custom_name.toLowerCase() === wanted
     );
     if (named) return named.id;
-    const available = configs.map((config2) => String(config2.custom_name ?? config2.name ?? "")).filter(Boolean).join(", ");
+    const available = configs.map((config2) => config2.custom_name).filter(Boolean).join(", ");
     throw new Error(
       `Embedding config "${ref}" not found in the organization. Available: ${available || "(none)"}.`
     );
   }
   return resolveDefaultEmbeddingConfigId(llm);
-}
-function isAlreadyExistsError(error2) {
-  if (error2.status === 409) return true;
-  const haystack = [
-    error2.message,
-    error2.bodyExcerpt ?? "",
-    ...error2.validationErrors?.map((issue2) => `${issue2.field} ${issue2.reason}`) ?? []
-  ].join(" ").toLowerCase();
-  return /already exist|must be unique|unique constraint|duplicate|conflict/.test(haystack);
-}
-async function createOrExplainConflict(create, name, updateToolName) {
-  try {
-    return await create();
-  } catch (error2) {
-    if (error2 instanceof ApiError && isAlreadyExistsError(error2)) {
-      throw new Error(
-        `An entity named "${name}" already exists in this organization (catalog names are org-unique). Use ${updateToolName} to modify the existing one, or choose a different name.`
-      );
-    }
-    throw error2;
-  }
 }
 function registerCatalogTools(server, context) {
   const surfaces = new SurfacesApi(context.client);
@@ -37714,7 +38138,7 @@ function registerCatalogTools(server, context) {
     "delete_surface",
     {
       title: "Delete a catalog surface",
-      description: 'Delete a catalog surface by id or exact name: it moves to the EpicStaff recycle bin (restorable in the editor until purged). NOT flow-aware: while it is binned, any flow that references this surface via existing: "<name>" will FAIL its next push_flow (the reference will not resolve). Verify no flow depends on it first.',
+      description: 'Delete a catalog surface by id or exact name: it moves to the EpicStaff recycle bin (restorable with restore_from_recycle_bin kind "surface" until purged). NOT flow-aware: while it is binned, any flow that references this surface via existing: "<name>" will FAIL its next push_flow (the reference will not resolve). Verify no flow depends on it first.',
       inputSchema: {
         surface: idOrName.describe("The surface to delete: backend id or exact name.")
       }
@@ -37727,7 +38151,7 @@ function registerCatalogTools(server, context) {
       await surfaces.delete(surfaceId);
       return {
         deleted: { id: surfaceId, name: current.name },
-        next: 'WARNING: any flow referencing this surface via existing: "' + current.name + '" will fail its next push_flow. Update or remove those references, or restore it from the recycle bin.'
+        next: 'WARNING: any flow referencing this surface via existing: "' + current.name + '" will fail its next push_flow. Update or remove those references, or restore it. ' + recycleBinHint("surface", surfaceId)
       };
     })
   );
@@ -37829,7 +38253,7 @@ function registerCatalogTools(server, context) {
     "delete_agent",
     {
       title: "Delete an agent definition",
-      description: 'Delete an AgentDefinition by id or exact name: it moves to the EpicStaff recycle bin (restorable in the editor until purged), together with the surfaces it owns. NOT flow-aware: while it is binned, any flow that references this agent via existing: "<name>" will FAIL its next push_flow. Verify no flow depends on it first.',
+      description: 'Delete an AgentDefinition by id or exact name: it moves to the EpicStaff recycle bin (restorable with restore_from_recycle_bin kind "agent" until purged), together with the surfaces it owns. NOT flow-aware: while it is binned, any flow that references this agent via existing: "<name>" will FAIL its next push_flow. Verify no flow depends on it first.',
       inputSchema: {
         agent: idOrName.describe("The agent to delete: backend id or exact name.")
       }
@@ -37842,7 +38266,7 @@ function registerCatalogTools(server, context) {
       await agents.delete(agentId);
       return {
         deleted: { id: agentId, name: current.name },
-        next: 'WARNING: any flow referencing this agent via existing: "' + current.name + '" will fail its next push_flow. Surfaces owned by this agent went to the recycle bin with it.'
+        next: 'WARNING: any flow referencing this agent via existing: "' + current.name + '" will fail its next push_flow. Surfaces owned by this agent went to the recycle bin with it (and come back with it). ' + recycleBinHint("agent", agentId)
       };
     })
   );
@@ -37921,7 +38345,7 @@ function registerCatalogTools(server, context) {
     "delete_collection",
     {
       title: "Delete a knowledge collection",
-      description: 'Delete a knowledge source collection by id: it moves to the EpicStaff recycle bin with its documents and RAG strategies (restorable in the editor until purged; purging drops the index for good). NOT flow-aware: retrieval stops immediately, and while it is binned any flow whose surface references this collection via existing: "<name>" will FAIL its next push_flow. Verify no surface/flow depends on it first.',
+      description: 'Delete a knowledge source collection by id: it moves to the EpicStaff recycle bin with its documents and RAG strategies (restorable with restore_from_recycle_bin kind "collection" until purged; purging drops the index for good). NOT flow-aware: retrieval stops immediately, and while it is binned any flow whose surface references this collection via existing: "<name>" will FAIL its next push_flow. Verify no surface/flow depends on it first.',
       inputSchema: {
         collection_id: external_exports.number().int().describe("Backend id of the source collection to delete.")
       }
@@ -37932,7 +38356,7 @@ function registerCatalogTools(server, context) {
       await knowledge.deleteCollection(collection_id);
       return {
         deleted: { collectionId: collection_id },
-        next: 'WARNING: retrieval has stopped. The collection is in the recycle bin \u2014 restore it in the editor, or any surface/flow referencing it via existing: "<name>" will fail its next push_flow.'
+        next: 'WARNING: retrieval has stopped. Restore the collection, or any surface/flow referencing it via existing: "<name>" will fail its next push_flow. ' + recycleBinHint("collection", collection_id)
       };
     })
   );
@@ -38030,6 +38454,2881 @@ async function attachAndIndexRag(collectionId, rag, ctx) {
   return { ragId, ragType: "graph" };
 }
 
+// src/tools/tool-catalog.tools.ts
+import { existsSync as existsSync6, readFileSync as readFileSync5 } from "node:fs";
+import { isAbsolute as isAbsolute3 } from "node:path";
+
+// src/api/labels.ts
+var LABEL_COLORS = ["default", "purple", "blue", "green", "orange", "red"];
+var LABEL_PATHS = { flow: "labels/", tool: "tool-labels/" };
+var LabelsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async list(scope) {
+    return unwrap2(
+      await this.client.get(LABEL_PATHS[scope], { query: { limit: 1e3 } })
+    );
+  }
+  async create(scope, request) {
+    return this.client.post(LABEL_PATHS[scope], { body: request });
+  }
+  async patch(scope, id, request) {
+    return this.client.patch(`${LABEL_PATHS[scope]}${id}/`, { body: request });
+  }
+  /** Deletes the label and its child labels (CASCADE); flows/tools only lose the tag. */
+  async delete(scope, id) {
+    await this.client.delete(`${LABEL_PATHS[scope]}${id}/`);
+  }
+};
+
+// src/tools/tool-catalog.tools.ts
+var labelScopeSchema = external_exports.enum(["flow", "tool"]).describe('Which label tree: "flow" labels tag flows, "tool" labels tag python and MCP tools.');
+var pythonCodeShape = {
+  code: external_exports.string().optional().describe("Inline Python source defining the entrypoint. Exactly one of code / code_file."),
+  code_file: external_exports.string().optional().describe("Absolute path of a local .py file to upload as the code."),
+  entrypoint: external_exports.string().optional().describe('Function the tool calls (default "main").'),
+  venv: idOrName.nullable().optional().describe("Virtual environment the code runs in (list_venvs): id or name; null = the default venv."),
+  secrets: external_exports.array(idOrName).optional().describe("Org secrets the code may read (id or name). Code that reads an undeclared secret is refused."),
+  execution_timeout: external_exports.number().int().positive().optional().describe("Seconds one run may take (get_settings \u2192 execution_timeout_limits; above the max is saved as the max).")
+};
+var toolLabelsSchema = external_exports.array(idOrName).optional().describe('Tool labels (list_labels scope "tool"): id or name/full path.');
+function registerToolCatalogTools(server, context) {
+  const tools = new ToolsApi(context.client);
+  const labels = new LabelsApi(context.client);
+  const venvs = new VenvsApi(context.client);
+  const secrets = () => new SecretsApi(context.client, context.auth);
+  const resolvePythonTool = (ref) => resolveNamedRef(ref, "Python tool", () => tools.listPythonCodeTools(), (tool) => tool.id, (tool) => tool.name);
+  const resolveMcpTool = (ref) => resolveNamedRef(ref, "MCP tool", () => tools.listMcpTools(), (tool) => tool.id, (tool) => tool.name);
+  const resolveLabel = (scope, ref) => resolveNamedRef(ref, `${scope} label`, () => labels.list(scope), (label) => label.id, (label) => label.full_path);
+  const resolveLabels = (refs) => refs === void 0 ? Promise.resolve(void 0) : Promise.all(refs.map((ref) => resolveLabel("tool", ref)));
+  const resolveVenvId = async (ref) => ref === void 0 || ref === null ? ref : resolveNamedRef(ref, "Venv", () => venvs.list(), (venv) => venv.id, (venv) => venv.name);
+  const resolveSecretIds = async (refs) => {
+    if (refs === void 0) return void 0;
+    if (refs.every((ref) => typeof ref === "number")) return refs;
+    const all = await secrets().list();
+    return Promise.all(
+      refs.map((ref) => resolveNamedRef(ref, "Secret", async () => all, (secret) => secret.id, (secret) => secret.name))
+    );
+  };
+  async function buildPythonCode(input) {
+    if (input.code !== void 0 && input.code_file !== void 0) {
+      throw new Error("Pass either code or code_file, not both.");
+    }
+    let code = input.code;
+    if (input.code_file !== void 0) {
+      if (!isAbsolute3(input.code_file)) throw new Error("code_file must be an absolute path.");
+      if (!existsSync6(input.code_file)) throw new Error(`No file at ${input.code_file}.`);
+      code = readFileSync5(input.code_file, "utf8");
+    }
+    const venvId = await resolveVenvId(input.venv);
+    const secretIds = await resolveSecretIds(input.secrets);
+    return {
+      ...code !== void 0 ? { code } : {},
+      ...input.entrypoint !== void 0 ? { entrypoint: input.entrypoint } : {},
+      ...venvId !== void 0 ? { venv_id: venvId } : {},
+      ...secretIds !== void 0 ? { secret_ids: secretIds } : {},
+      ...input.execution_timeout !== void 0 ? { execution_timeout: input.execution_timeout } : {}
+    };
+  }
+  server.registerTool(
+    "create_python_tool",
+    {
+      title: "Create a python tool",
+      description: 'Create a custom python tool agents can call (granted through a surface). Its code runs in the sandbox, in the venv you name (third-party packages come from the venv). Names are org-unique. Flows reference it via existing: "<name>".',
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Org-unique tool name \u2014 what the LLM sees as the tool name."),
+        description: external_exports.string().min(1).describe("What the tool does \u2014 shown to the LLM deciding whether to call it."),
+        ...pythonCodeShape,
+        variables: external_exports.array(external_exports.unknown()).optional().describe("Tool variables (free-form JSON list), default []."),
+        use_storage: external_exports.boolean().optional().describe("Whether the code may access org file storage."),
+        labels: toolLabelsSchema
+      }
+    },
+    async ({ name, description, variables, use_storage, labels: labelRefs, ...codeInput }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const pythonCode = await buildPythonCode(codeInput);
+      if (pythonCode.code === void 0) throw new Error("Pass code or code_file.");
+      const labelIds = await resolveLabels(labelRefs);
+      const request = {
+        name,
+        description,
+        variables: variables ?? [],
+        python_code: {
+          code: pythonCode.code,
+          entrypoint: pythonCode.entrypoint ?? "main",
+          venv_id: pythonCode.venv_id ?? null,
+          global_kwargs: {},
+          ...pythonCode.secret_ids !== void 0 ? { secret_ids: pythonCode.secret_ids } : {},
+          ...pythonCode.execution_timeout !== void 0 ? { execution_timeout: pythonCode.execution_timeout } : {}
+        },
+        ...use_storage !== void 0 ? { use_storage } : {},
+        ...labelIds !== void 0 ? { labels: labelIds } : {}
+      };
+      const created = await createOrExplainConflict(() => tools.createPythonCodeTool(request), name, "update_python_tool");
+      return { tool: { id: created.id, name: created.name }, next: `Grant it to agents through a surface (python_tools: ["${name}"]).` };
+    })
+  );
+  server.registerTool(
+    "update_python_tool",
+    {
+      title: "Update a python tool",
+      description: "Change a custom python tool (PATCH \u2014 only what you pass changes; secrets and labels, when passed, replace the current lists). Built-in catalog tools accept label changes only.",
+      inputSchema: {
+        tool: idOrName.describe("The tool: backend id or exact name (list_tools)."),
+        name: external_exports.string().min(1).optional(),
+        description: external_exports.string().min(1).optional(),
+        ...pythonCodeShape,
+        variables: external_exports.array(external_exports.unknown()).optional(),
+        use_storage: external_exports.boolean().optional(),
+        labels: toolLabelsSchema
+      }
+    },
+    async ({ tool, name, description, variables, use_storage, labels: labelRefs, ...codeInput }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const toolId = await resolvePythonTool(tool);
+      const pythonCode = await buildPythonCode(codeInput);
+      const labelIds = await resolveLabels(labelRefs);
+      const request = {
+        ...name !== void 0 ? { name } : {},
+        ...description !== void 0 ? { description } : {},
+        ...variables !== void 0 ? { variables } : {},
+        ...use_storage !== void 0 ? { use_storage } : {},
+        ...labelIds !== void 0 ? { labels: labelIds } : {},
+        // A partial python_code: the backend applies only the fields it receives.
+        ...Object.keys(pythonCode).length > 0 ? { python_code: pythonCode } : {}
+      };
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one field.");
+      const updated = await tools.updatePythonCodeTool(toolId, request);
+      return {
+        tool: {
+          id: updated.id,
+          name: updated.name,
+          venv_id: updated.python_code?.venv_id ?? null,
+          labels: updated.labels ?? [],
+          last_edited_by: describeUser(updated.last_edited_by)
+        }
+      };
+    })
+  );
+  server.registerTool(
+    "delete_python_tool",
+    {
+      title: "Delete a python tool",
+      description: 'Delete a custom python tool: it moves to the recycle bin (restorable with restore_from_recycle_bin kind "python_tool"). Surfaces and flows granting it lose it while it is binned; a flow referencing it via existing: fails its next push. Built-in tools cannot be deleted.',
+      inputSchema: {
+        tool: idOrName.describe("The tool: backend id or exact name.")
+      }
+    },
+    async ({ tool }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const toolId = await resolvePythonTool(tool);
+      const current = await tools.getPythonCodeTool(toolId);
+      if (current.built_in === true) throw new Error(`"${current.name}" is a built-in catalog tool and cannot be deleted.`);
+      await tools.deletePythonCodeTool(toolId);
+      return { deleted: { id: toolId, name: current.name }, next: recycleBinHint("python_tool", toolId) };
+    })
+  );
+  const mcpToolShape = {
+    transport: external_exports.string().url().describe("http(s) URL of the remote MCP server (SSE)."),
+    tool_name: external_exports.string().min(1).describe("Name of the tool on that MCP server."),
+    timeout: external_exports.number().min(1).max(1800).optional().describe("Request timeout in seconds (1\u20131800, default 30)."),
+    init_timeout: external_exports.number().positive().optional().describe("Connection/initialisation timeout in seconds."),
+    auth_secret: idOrName.nullable().optional().describe("Org secret holding the server credential (id or name); null removes it."),
+    labels: toolLabelsSchema
+  };
+  async function buildMcpToolBody(input) {
+    const secretIds = input.auth_secret == null ? void 0 : await resolveSecretIds([input.auth_secret]);
+    const labelIds = await resolveLabels(input.labels);
+    return {
+      ...input.transport !== void 0 ? { transport: input.transport } : {},
+      ...input.tool_name !== void 0 ? { tool_name: input.tool_name } : {},
+      ...input.timeout !== void 0 ? { timeout: input.timeout } : {},
+      ...input.init_timeout !== void 0 ? { init_timeout: input.init_timeout } : {},
+      ...input.auth_secret === null ? { auth_secret_id: null } : {},
+      ...secretIds?.[0] !== void 0 ? { auth_secret_id: secretIds[0] } : {},
+      ...labelIds !== void 0 ? { labels: labelIds } : {}
+    };
+  }
+  server.registerTool(
+    "create_mcp_tool",
+    {
+      title: "Create an MCP tool",
+      description: "Register one tool of a remote MCP server (reached over http(s)/SSE) so agents can call it through a surface. Names are org-unique. stdio MCP servers cannot be registered \u2014 EpicStaff connects to a URL.",
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Org-unique name of this tool entry."),
+        ...mcpToolShape
+      }
+    },
+    async ({ name, ...input }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const request = { name, ...await buildMcpToolBody(input) };
+      const created = await createOrExplainConflict(() => tools.createMcpTool(request), name, "update_mcp_tool");
+      return { tool: created, next: `Grant it to agents through a surface (mcp_tools: ["${name}"]).` };
+    })
+  );
+  server.registerTool(
+    "update_mcp_tool",
+    {
+      title: "Update an MCP tool",
+      description: "Change an MCP tool entry (PATCH \u2014 only what you pass changes; labels, when passed, replace the list).",
+      inputSchema: {
+        tool: idOrName.describe("The tool: backend id or exact name (list_tools)."),
+        name: external_exports.string().min(1).optional(),
+        transport: mcpToolShape.transport.optional(),
+        tool_name: mcpToolShape.tool_name.optional(),
+        timeout: mcpToolShape.timeout,
+        init_timeout: mcpToolShape.init_timeout,
+        auth_secret: mcpToolShape.auth_secret,
+        labels: mcpToolShape.labels
+      }
+    },
+    async ({ tool, name, ...input }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const toolId = await resolveMcpTool(tool);
+      const request = { ...name !== void 0 ? { name } : {}, ...await buildMcpToolBody(input) };
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one field.");
+      return { tool: await tools.updateMcpTool(toolId, request) };
+    })
+  );
+  server.registerTool(
+    "delete_mcp_tool",
+    {
+      title: "Delete an MCP tool",
+      description: 'Delete an MCP tool entry: it moves to the recycle bin (restorable with restore_from_recycle_bin kind "mcp_tool"). Surfaces granting it lose it while it is binned.',
+      inputSchema: {
+        tool: idOrName.describe("The tool: backend id or exact name.")
+      }
+    },
+    async ({ tool }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const toolId = await resolveMcpTool(tool);
+      const current = await tools.getMcpTool(toolId);
+      await tools.deleteMcpTool(toolId);
+      return { deleted: { id: toolId, name: current.name }, next: recycleBinHint("mcp_tool", toolId) };
+    })
+  );
+  server.registerTool(
+    "list_labels",
+    {
+      title: "List labels",
+      description: 'List the flow labels or tool labels of the active organization (a tree: full_path is "parent/child"). Tag flows with set_flow_labels, tools with the labels field of create/update_python_tool / _mcp_tool.',
+      inputSchema: { scope: labelScopeSchema }
+    },
+    async ({ scope }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return (await labels.list(scope)).map((label) => ({
+        id: label.id,
+        name: label.name,
+        full_path: label.full_path,
+        parent: label.parent,
+        color: label.metadata?.color ?? "default"
+      }));
+    })
+  );
+  server.registerTool(
+    "create_label",
+    {
+      title: "Create a label",
+      description: "Create a flow or tool label, optionally nested under a parent label. Names are unique per parent.",
+      inputSchema: {
+        scope: labelScopeSchema,
+        name: external_exports.string().min(1).max(100),
+        parent: idOrName.optional().describe("Parent label of the same scope: id or full path."),
+        color: external_exports.enum(LABEL_COLORS).optional()
+      }
+    },
+    async ({ scope, name, parent, color }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const parentId = parent !== void 0 ? await resolveLabel(scope, parent) : void 0;
+      return createOrExplainConflict(
+        () => labels.create(scope, {
+          name,
+          ...parentId !== void 0 ? { parent: parentId } : {},
+          ...color !== void 0 ? { metadata: { color } } : {}
+        }),
+        name,
+        "update_label"
+      );
+    })
+  );
+  server.registerTool(
+    "update_label",
+    {
+      title: "Update a label",
+      description: "Rename a label, move it under another parent (null = top level) or change its color.",
+      inputSchema: {
+        scope: labelScopeSchema,
+        label: idOrName.describe("The label: id or full path."),
+        name: external_exports.string().min(1).max(100).optional(),
+        parent: idOrName.nullable().optional(),
+        color: external_exports.enum(LABEL_COLORS).optional()
+      }
+    },
+    async ({ scope, label, name, parent, color }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const labelId = await resolveLabel(scope, label);
+      const request = {
+        ...name !== void 0 ? { name } : {},
+        ...parent === null ? { parent: null } : {},
+        ...parent != null ? { parent: await resolveLabel(scope, parent) } : {},
+        ...color !== void 0 ? { metadata: { color } } : {}
+      };
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass name, parent or color.");
+      return labels.patch(scope, labelId, request);
+    })
+  );
+  server.registerTool(
+    "delete_label",
+    {
+      title: "Delete a label",
+      description: "Delete a label for good together with its child labels. Flows/tools keep existing \u2014 they only lose the tag.",
+      inputSchema: {
+        scope: labelScopeSchema,
+        label: idOrName.describe("The label: id or full path.")
+      }
+    },
+    async ({ scope, label }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const labelId = await resolveLabel(scope, label);
+      await labels.delete(scope, labelId);
+      return { deleted: { scope, id: labelId } };
+    })
+  );
+}
+
+// src/tools/venv.tools.ts
+var venvNameSchema = external_exports.string().min(1).regex(VENV_NAME_PATTERN, 'venv names contain only letters, digits, spaces, "_" and "-"');
+var libraryObjectSchema = external_exports.strictObject({
+  name: external_exports.string().min(1).describe('Package name as on PyPI, e.g. "requests".'),
+  specification: external_exports.string().regex(VENV_LIBRARY_SPECIFICATION_PATTERN, 'a PEP 440 specifier set, e.g. ">=2.31,<3"').optional().describe('PEP 440 specifier set the version must satisfy, e.g. ">=2.31,<3". Empty = any version.'),
+  version: external_exports.string().regex(VENV_LIBRARY_VERSION_PATTERN, "a PEP 440 version, e.g. 2.31.0").optional().describe("Exact version to pin. Omit to let the build pick the newest one the specification allows."),
+  description: external_exports.string().optional().describe("Why the venv carries this package.")
+});
+var librarySchema = external_exports.union([external_exports.string().min(1), libraryObjectSchema]).describe(
+  'A requirement string ("pandas", "requests>=2.31", "numpy==1.26.4") or {name, specification?, version?, description?}.'
+);
+var REQUIREMENT_OPERATOR = /[<>=!~]/;
+function toVenvLib(entry) {
+  if (typeof entry !== "string") {
+    return {
+      name: entry.name.trim(),
+      specification: (entry.specification ?? "").trim(),
+      version: entry.version?.trim() || null,
+      description: entry.description?.trim() || null
+    };
+  }
+  const requirement = entry.trim();
+  const operatorAt = requirement.search(REQUIREMENT_OPERATOR);
+  const name = (operatorAt === -1 ? requirement : requirement.slice(0, operatorAt)).trim();
+  const specification = operatorAt === -1 ? "" : requirement.slice(operatorAt).replace(/\s+/g, "");
+  if (name === "") {
+    throw new Error(`"${entry}" names no package \u2014 write it like "requests>=2.31".`);
+  }
+  if (specification !== "" && !VENV_LIBRARY_SPECIFICATION_PATTERN.test(specification)) {
+    throw new Error(`"${entry}": "${specification}" is not a PEP 440 specifier set (e.g. ">=2.31,<3").`);
+  }
+  return { name, specification, version: null, description: null };
+}
+function summarizeVenv(venv) {
+  return {
+    id: venv.id,
+    name: venv.name,
+    status: venv.status,
+    ...venv.error ? { error: venv.error } : {},
+    libraries: venv.libs.map(
+      (lib) => `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ""}`
+    ),
+    owner: venv.owner ? venv.owner.display_name ?? venv.owner.email : null,
+    created_at: venv.created_at
+  };
+}
+function buildStatusNext(venv) {
+  if (BUILDING_STATUSES.has(venv.status)) {
+    return `The venv is building (${venv.status}). Reference it from flow source with venv: "${venv.name}" now \u2014 code that runs in it waits for the build; poll list_venvs to see it reach "completed" (or "failed" with an error).`;
+  }
+  return `Reference it from a python node or python tool with venv: "${venv.name}".`;
+}
+function registerVenvTools(server, context) {
+  const venvs = new VenvsApi(context.client);
+  const resolveVenv = (ref) => resolveNamedRef(ref, "Venv", () => venvs.list(), (venv) => venv.id, (venv) => venv.name);
+  server.registerTool(
+    "list_venvs",
+    {
+      title: "List virtual environments",
+      description: 'List the virtual environments (venvs) of the active organization: name, build status, libraries. Python nodes and python tools run in a venv (flow source `venv: "<name>"`; omitted = the default venv). Check here before create_venv \u2014 reuse a venv that already has the packages.',
+      inputSchema: {
+        search: external_exports.string().optional().describe("Case-insensitive substring of the venv name.")
+      }
+    },
+    async ({ search }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return (await venvs.list(search ? { search } : {})).map(summarizeVenv);
+    })
+  );
+  server.registerTool(
+    "create_venv",
+    {
+      title: "Create a virtual environment",
+      description: 'Create a venv holding third-party Python packages, for python nodes / python tools to run in. The sandbox builds it asynchronously (status declared \u2192 processing \u2192 completed | failed). Reference it from flow source with venv: "<name>" (the replacement for the removed `libraries:` list).',
+      inputSchema: {
+        name: venvNameSchema.describe('Venv name (letters, digits, spaces, "_" and "-"). Keep it unique in the org.'),
+        libraries: external_exports.array(librarySchema).default([]).describe('Packages to install, e.g. ["pandas", "requests>=2.31"]. A package may appear once.')
+      }
+    },
+    async ({ name, libraries }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const libs = libraries.map(toVenvLib);
+      const sameName = (await venvs.findByName(name)).length;
+      const venv = await venvs.create({ name, libs });
+      return {
+        venv: summarizeVenv(venv),
+        ...sameName > 0 ? {
+          warning: `${sameName} other venv(s) already carry the name "${name}" \u2014 venv: "${name}" in flow source is now ambiguous and refused at push. Rename one with update_venv.`
+        } : {},
+        next: buildStatusNext(venv)
+      };
+    })
+  );
+  server.registerTool(
+    "update_venv",
+    {
+      title: "Update a virtual environment",
+      description: "Rename a venv and/or replace its library list (PATCH). A changed library list triggers a rebuild; code that runs in the venv waits for it. Renaming breaks flow sources that reference the old name via venv:.",
+      inputSchema: {
+        venv: idOrName.describe("The venv to update: backend id or exact name (list_venvs)."),
+        name: venvNameSchema.optional().describe("New name."),
+        libraries: external_exports.array(librarySchema).optional().describe("The COMPLETE new library list \u2014 it replaces the current one, it does not append.")
+      }
+    },
+    async ({ venv, name, libraries }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (name === void 0 && libraries === void 0) {
+        throw new Error("Nothing to change \u2014 pass name and/or libraries.");
+      }
+      const venvId = await resolveVenv(venv);
+      const updated = await venvs.update(venvId, {
+        ...name !== void 0 ? { name } : {},
+        ...libraries !== void 0 ? { libs: libraries.map(toVenvLib) } : {}
+      });
+      return { venv: summarizeVenv(updated), next: buildStatusNext(updated) };
+    })
+  );
+  server.registerTool(
+    "delete_venv",
+    {
+      title: "Delete a virtual environment",
+      description: "Delete a venv for good (venvs have no recycle bin). Refused while any python code still runs in it \u2014 including tools or nodes sitting in the recycle bin. Move that code to another venv first.",
+      inputSchema: {
+        venv: idOrName.describe("The venv to delete: backend id or exact name.")
+      }
+    },
+    async ({ venv }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const venvId = await resolveVenv(venv);
+      const current = await venvs.get(venvId);
+      try {
+        await venvs.delete(venvId);
+      } catch (error2) {
+        if (error2 instanceof ApiError && error2.status === 409) {
+          throw new Error(
+            `venv "${current.name}" is still in use and was not deleted: ${error2.bodyExcerpt ?? error2.message}`
+          );
+        }
+        throw error2;
+      }
+      return {
+        deleted: { id: venvId, name: current.name },
+        next: `Flow sources that reference venv: "${current.name}" now fail to push \u2014 change or remove that key.`
+      };
+    })
+  );
+}
+
+// src/api/execution-timeout-limits.ts
+var ExecutionTimeoutLimitsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async get() {
+    return this.client.get("execution-timeout-limits/");
+  }
+};
+
+// src/api/quickstart.ts
+var QuickstartApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async getStatus() {
+    return this.client.get("quickstart/");
+  }
+  async create(request) {
+    return this.client.post("quickstart/", { body: request });
+  }
+  /** Point the org's default models at the most recent quickstart's configs. */
+  async apply() {
+    return this.client.post("quickstart/apply/", { body: {} });
+  }
+};
+
+// src/api/recycle-bin.ts
+var RECYCLE_BIN_SOURCES = {
+  storage: { path: "storage/", kind: "File or folder" },
+  flow: { path: "graphs/", kind: "Flow" },
+  agent: { path: "agent-definitions/", kind: "Agent" },
+  surface: { path: "surfaces/", kind: "Surface" },
+  python_tool: { path: "python-code-tool/", kind: "Python tool" },
+  mcp_tool: { path: "mcp-tools/", kind: "MCP tool" },
+  collection: { path: "source-collections/", kind: "Collection" },
+  key_value_table: { path: "key-value-tables/", kind: "Key-value table" },
+  secret: { path: "secrets/", kind: "Secret" },
+  realtime_channel: { path: "realtime-channels/", kind: "Voice channel" },
+  webhook_trigger: { path: "webhook-triggers/", kind: "Webhook trigger" }
+};
+var RECYCLE_BIN_SOURCE_KEYS = Object.keys(RECYCLE_BIN_SOURCES);
+var RECYCLE_BIN_MAX_PAGE_SIZE = 100;
+var RECYCLE_BIN_BULK_ID_LIMIT = 100;
+var RecycleBinApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  /** One page of a bin, normalized to the current entry shape (see {@link normalizeBinPage}). */
+  async list(source, query) {
+    const params = {
+      limit: query.limit,
+      offset: query.offset,
+      ordering: query.ordering ?? "-deleted_at",
+      ...query.search ? { search: query.search } : {},
+      ...source === "storage" && query.itemType ? { item_type: query.itemType } : {}
+    };
+    const response = await this.call(
+      source,
+      false,
+      (bearerToken) => this.client.get(binPath(source), {
+        query: params,
+        ...bearer(bearerToken)
+      })
+    );
+    return normalizeBinPage(response, query);
+  }
+  async restore(source, selection) {
+    return this.call(
+      source,
+      false,
+      (bearerToken) => this.client.post(`${binPath(source)}restore/`, {
+        body: selection,
+        ...bearer(bearerToken)
+      })
+    );
+  }
+  /** Delete for good. Superadmin only and refused to API keys — always sent with the user session. */
+  async purge(source, ids) {
+    return this.call(
+      source,
+      true,
+      (bearerToken) => this.client.post(`${binPath(source)}purge/`, {
+        body: { ids },
+        ...bearer(bearerToken)
+      })
+    );
+  }
+  /** Deployment-wide retention: how many days a deleted item stays restorable. */
+  async getSettings() {
+    return this.client.get("recycle-bin/settings/");
+  }
+  /** Route a call through the user session when the backend refuses API keys for it. */
+  async call(source, sessionOnly, request) {
+    if (sessionOnly || source === "secret") {
+      return withUserSession(this.session, (bearerToken) => request(bearerToken));
+    }
+    return request(void 0);
+  }
+};
+function normalizeBinEntry(entry) {
+  const contents = entry.contents ?? [];
+  const hiddenContents = entry.hidden_contents ?? [];
+  return {
+    ...entry,
+    details: entry.details ?? [],
+    contents,
+    hidden_contents: hiddenContents,
+    contents_total: entry.contents_total ?? contents.length + hiddenContents.reduce((total, item) => total + item.count, 0)
+  };
+}
+function normalizeBinPage(response, query) {
+  if (Array.isArray(response)) {
+    const wanted = query.search?.trim().toLowerCase();
+    const matching = wanted ? response.filter((entry) => entry.name.toLowerCase().includes(wanted)) : response;
+    return {
+      count: matching.length,
+      next: null,
+      previous: null,
+      results: matching.slice(query.offset, query.offset + query.limit).map(normalizeBinEntry)
+    };
+  }
+  const results = (response.results ?? []).map(normalizeBinEntry);
+  return {
+    count: response.count ?? results.length,
+    next: response.next ?? null,
+    previous: response.previous ?? null,
+    results
+  };
+}
+function binPath(source) {
+  return `${RECYCLE_BIN_SOURCES[source].path}recycle-bin/`;
+}
+function bearer(bearerToken) {
+  return bearerToken === void 0 ? {} : { bearerToken };
+}
+
+// src/api/voice-configs.ts
+var VOICE_PROVIDERS = ["openai", "elevenlabs", "gemini"];
+var DEFAULT_VOICE_MODEL = {
+  openai: "gpt-realtime-1.5",
+  elevenlabs: "eleven_turbo_v2_5",
+  gemini: "gemini-3.1-flash-live-preview"
+};
+var VOICE_CONFIG_PATHS = {
+  openai: "openai-realtime-configs/",
+  elevenlabs: "elevenlabs-realtime-configs/",
+  gemini: "gemini-realtime-configs/"
+};
+var LIST_QUERY = { limit: 1e3 };
+var VoiceConfigsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async listConfigs(provider) {
+    return unwrap2(
+      await this.client.get(
+        VOICE_CONFIG_PATHS[provider],
+        { query: LIST_QUERY }
+      )
+    );
+  }
+  async createConfig(provider, request) {
+    return this.client.post(VOICE_CONFIG_PATHS[provider], { body: request });
+  }
+  /** PATCH, not the frontend's full PUT: only the fields the caller names change. */
+  async updateConfig(provider, id, request) {
+    return this.client.patch(`${VOICE_CONFIG_PATHS[provider]}${id}/`, { body: request });
+  }
+  /** Deleted for good (no recycle bin): references to it are cleared; skipped only when a referencing resource is hidden from the caller (BaseDeleteService). */
+  async deleteConfigs(provider, ids, dryRun) {
+    return this.client.post(`${VOICE_CONFIG_PATHS[provider]}bulk-delete/`, {
+      body: { ids },
+      query: bulkDeleteQuery(dryRun)
+    });
+  }
+  async listRealtimeModels() {
+    return unwrap2(await this.client.get("realtime-models/", { query: LIST_QUERY }));
+  }
+  /** Registers an org custom model (`is_custom` is stamped by the backend). */
+  async createRealtimeModel(request) {
+    return this.client.post("realtime-models/", { body: request });
+  }
+  /** Only custom models can be deleted; built-in ones answer `built_in_model_immutable`. */
+  async deleteRealtimeModel(id) {
+    await this.client.delete(`realtime-models/${id}/`);
+  }
+  async listTranscriptionModels() {
+    return unwrap2(
+      await this.client.get("realtime-transcription-models/", {
+        query: LIST_QUERY
+      })
+    );
+  }
+  async listLegacyRealtimeConfigs() {
+    return unwrap2(
+      await this.client.get("realtime-model-configs/", {
+        query: LIST_QUERY
+      })
+    );
+  }
+  async listLegacyTranscriptionConfigs() {
+    return unwrap2(
+      await this.client.get(
+        "realtime-transcription-model-configs/",
+        { query: LIST_QUERY }
+      )
+    );
+  }
+  async getVoices() {
+    return this.client.get("realtime-voices/");
+  }
+};
+
+// src/tools/config.tools.ts
+var REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+var apiKeyEnvSchema = credentialEnvName(
+  'Environment variable of the MCP server holding the provider API key. Stored as the org Secret "es-mcp:<ENV>" (reused when it already holds that value); the key itself never appears in a tool call.'
+);
+var apiKeySecretSchema = idOrName.describe("An existing org Secret (list_secrets) holding the provider API key: id or name.");
+var llmConfigFieldsShape = {
+  temperature: external_exports.number().min(0).max(2).nullable().optional().describe("Sampling temperature, 0\u20132."),
+  max_tokens: external_exports.number().int().min(500).nullable().optional().describe("Max output tokens (backend minimum 500)."),
+  top_p: external_exports.number().min(0).max(1).nullable().optional(),
+  timeout: external_exports.number().positive().nullable().optional().describe("Request timeout in seconds."),
+  seed: external_exports.number().int().nullable().optional(),
+  stop: external_exports.array(external_exports.string()).nullable().optional().describe("Stop sequences."),
+  presence_penalty: external_exports.number().nullable().optional(),
+  frequency_penalty: external_exports.number().nullable().optional(),
+  reasoning_effort: external_exports.enum(REASONING_EFFORTS).nullable().optional().describe("Reasoning effort for models that support it (the backend refuses levels the model lacks)."),
+  input_cost_per_token: external_exports.number().min(0).nullable().optional().describe("USD per prompt token; set with output_cost_per_token."),
+  output_cost_per_token: external_exports.number().min(0).nullable().optional().describe("USD per completion token; set with input_cost_per_token."),
+  extra_headers: external_exports.record(external_exports.string(), external_exports.string()).optional().describe("Extra HTTP headers sent to the provider."),
+  is_visible: external_exports.boolean().optional().describe("Whether the config is offered in pickers.")
+};
+var DEFAULT_MODEL_LLM_SLOTS = ["agent_llm_config", "agent_fcm_llm_config", "project_manager_llm_config", "memory_llm_config"];
+function registerConfigTools(server, context) {
+  const llm = new LlmApi(context.client);
+  const quickstart = new QuickstartApi(context.client);
+  const timeoutLimits = new ExecutionTimeoutLimitsApi(context.client);
+  const voice = new VoiceConfigsApi(context.client);
+  const secrets = () => new SecretsApi(context.client, context.auth);
+  const resolveLlmConfig = (ref) => resolveNamedRef(ref, "LLM config", () => llm.listConfigs(), (config2) => config2.id, (config2) => config2.custom_name);
+  const resolveEmbeddingConfig = (ref) => resolveNamedRef(
+    ref,
+    "Embedding config",
+    () => llm.listEmbeddingConfigs(),
+    (config2) => config2.id,
+    (config2) => config2.custom_name
+  );
+  async function resolveLlmModel(ref, provider) {
+    if (typeof ref === "number") return ref;
+    const index = buildModelIndex(...await Promise.all([llm.listModels(), llm.listProviders()]));
+    return lookupModelId(index, "LLM model", ref, provider, "list_llm_models");
+  }
+  async function resolveEmbeddingModel(ref, provider) {
+    if (typeof ref === "number") return ref;
+    const index = buildModelIndex(...await Promise.all([llm.listEmbeddingModels(), llm.listProviders()]));
+    return lookupModelId(index, "Embedding model", ref, provider, "list_embedding_configs (models)");
+  }
+  const resolveLegacyVoiceConfig = (ref) => resolveNamedRef(
+    ref,
+    "Legacy realtime config",
+    () => voice.listLegacyRealtimeConfigs(),
+    (config2) => config2.id,
+    (config2) => config2.custom_name
+  );
+  const resolveLegacyTranscriptionConfig = (ref) => resolveNamedRef(
+    ref,
+    "Legacy transcription config",
+    () => voice.listLegacyTranscriptionConfigs(),
+    (config2) => config2.id,
+    (config2) => config2.custom_name
+  );
+  const resolveApiKey = (apiKeyEnv, apiKeySecret) => resolveCredential(secrets, apiKeyEnv, apiKeySecret);
+  server.registerTool(
+    "create_llm_config",
+    {
+      title: "Create an LLM config",
+      description: "Create an org LLM config (a model + its generation settings + the provider key) that agents and classification tables reference by name. Names are org-unique; on a clash use update_llm_config. The key comes from api_key_env (an env var of the MCP server) or api_key_secret (an existing org secret).",
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Org-unique config name (custom_name) \u2014 the handle flows reference."),
+        model: idOrName.describe("LLM model: backend id or exact model name (list_llm_models)."),
+        provider: external_exports.string().optional().describe("Provider name to disambiguate a model name several providers share."),
+        api_key_env: apiKeyEnvSchema.optional(),
+        api_key_secret: apiKeySecretSchema.optional(),
+        ...llmConfigFieldsShape
+      }
+    },
+    async ({ name, model, provider, api_key_env, api_key_secret, ...fields }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const request = {
+        custom_name: name,
+        model: await resolveLlmModel(model, provider),
+        api_key_secret_id: await resolveApiKey(api_key_env, api_key_secret) ?? null,
+        ...pickDefined(fields)
+      };
+      const created = await createOrExplainConflict(() => llm.createConfig(request), name, "update_llm_config");
+      return {
+        config: summarizeAuthored(created),
+        next: `Reference it from flow source with llm_config: { existing: "${name}" }, or make it an org default with update_default_models.`
+      };
+    })
+  );
+  server.registerTool(
+    "update_llm_config",
+    {
+      title: "Update an LLM config",
+      description: "Change an LLM config (PATCH \u2014 only the fields you pass change; null clears a setting). Every agent and flow using it picks the change up on its next run.",
+      inputSchema: {
+        config: idOrName.describe("The config to update: backend id or exact name (list_llm_configs)."),
+        name: external_exports.string().min(1).optional().describe("New name."),
+        model: idOrName.optional().describe("New model: id or exact model name."),
+        provider: external_exports.string().optional().describe("Provider hint for a model name."),
+        api_key_env: apiKeyEnvSchema.optional(),
+        api_key_secret: apiKeySecretSchema.nullable().optional().describe("Existing secret (id or name); null removes the key."),
+        ...llmConfigFieldsShape
+      }
+    },
+    async ({ config: config2, name, model, provider, api_key_env, api_key_secret, ...fields }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const configId = await resolveLlmConfig(config2);
+      const credential = await resolveApiKey(api_key_env, api_key_secret);
+      const request = {
+        ...name !== void 0 ? { custom_name: name } : {},
+        ...model !== void 0 ? { model: await resolveLlmModel(model, provider) } : {},
+        ...credential !== void 0 ? { api_key_secret_id: credential } : {},
+        ...pickDefined(fields)
+      };
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one field.");
+      return { config: summarizeAuthored(await llm.updateConfig(configId, request)) };
+    })
+  );
+  server.registerTool(
+    "delete_llm_config",
+    {
+      title: "Delete an LLM config",
+      description: "Delete an LLM config FOR GOOD (configs have no recycle bin). Agents, flows and collections that use it lose it (their reference is cleared), and so does an org default model slot \u2014 dry_run: true lists that usage first. It is skipped, not deleted, only when something you cannot see uses it (in_use_restricted) or a database guard refuses (protected).",
+      inputSchema: {
+        config: idOrName.describe("The config: backend id or exact name."),
+        dry_run: external_exports.boolean().default(false).describe("Report what would happen (and the usage) without deleting.")
+      }
+    },
+    async ({ config: config2, dry_run }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return llm.deleteConfigs([await resolveLlmConfig(config2)], dry_run);
+    })
+  );
+  server.registerTool(
+    "list_embedding_configs",
+    {
+      title: "List embedding configs and models",
+      description: "List the org's embedding configs (what knowledge collections index with) and which one is the org default; with include_models, also the embedding models a new config can use.",
+      inputSchema: {
+        include_models: external_exports.boolean().default(false).describe("Also list the available embedding models.")
+      }
+    },
+    async ({ include_models }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const [configs, defaults] = await Promise.all([llm.listEmbeddingConfigs(), llm.getDefaultModels()]);
+      const result = {
+        default: defaults.memory_embedding_config,
+        configs: configs.map((config2) => ({
+          id: config2.id,
+          custom_name: config2.custom_name,
+          model: config2.model,
+          has_api_key: config2.api_key_secret_id != null
+        }))
+      };
+      if (include_models) {
+        const [models, providers] = await Promise.all([llm.listEmbeddingModels(), llm.listProviders()]);
+        const providerName = new Map(providers.map((provider) => [provider.id, provider.name]));
+        result.models = models.map((model) => ({
+          id: model.id,
+          name: model.name,
+          provider: providerName.get(model.embedding_provider) ?? model.embedding_provider
+        }));
+      }
+      return result;
+    })
+  );
+  server.registerTool(
+    "create_embedding_config",
+    {
+      title: "Create an embedding config",
+      description: "Create an org embedding config (an embedding model + the provider key) for knowledge collections to index with. Names are org-unique. Make it the org default with update_default_models(memory_embedding_config).",
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Org-unique config name."),
+        model: idOrName.describe("Embedding model: backend id or exact name (list_embedding_configs include_models)."),
+        provider: external_exports.string().optional().describe("Provider hint for a model name."),
+        api_key_env: apiKeyEnvSchema.optional(),
+        api_key_secret: apiKeySecretSchema.optional(),
+        extra_headers: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+        is_visible: external_exports.boolean().optional()
+      }
+    },
+    async ({ name, model, provider, api_key_env, api_key_secret, extra_headers, is_visible }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const request = {
+        custom_name: name,
+        model: await resolveEmbeddingModel(model, provider),
+        api_key_secret_id: await resolveApiKey(api_key_env, api_key_secret) ?? null,
+        ...extra_headers !== void 0 ? { extra_headers } : {},
+        ...is_visible !== void 0 ? { is_visible } : {}
+      };
+      const created = await createOrExplainConflict(
+        () => llm.createEmbeddingConfig(request),
+        name,
+        "update_embedding_config"
+      );
+      return { config: summarizeAuthored(created) };
+    })
+  );
+  server.registerTool(
+    "update_embedding_config",
+    {
+      title: "Update an embedding config",
+      description: "Change an embedding config (PATCH \u2014 only the fields you pass change). Changing the model of a config whose collections are already indexed leaves their old vectors in place \u2014 re-index them.",
+      inputSchema: {
+        config: idOrName.describe("The config: backend id or exact name."),
+        name: external_exports.string().min(1).optional(),
+        model: idOrName.optional(),
+        provider: external_exports.string().optional(),
+        api_key_env: apiKeyEnvSchema.optional(),
+        api_key_secret: apiKeySecretSchema.nullable().optional().describe("Existing secret (id or name); null removes the key."),
+        extra_headers: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+        is_visible: external_exports.boolean().optional()
+      }
+    },
+    async ({ config: config2, name, model, provider, api_key_env, api_key_secret, extra_headers, is_visible }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const configId = await resolveEmbeddingConfig(config2);
+      const credential = await resolveApiKey(api_key_env, api_key_secret);
+      const request = {
+        ...name !== void 0 ? { custom_name: name } : {},
+        ...model !== void 0 ? { model: await resolveEmbeddingModel(model, provider) } : {},
+        ...credential !== void 0 ? { api_key_secret_id: credential } : {},
+        ...extra_headers !== void 0 ? { extra_headers } : {},
+        ...is_visible !== void 0 ? { is_visible } : {}
+      };
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one field.");
+      return { config: summarizeAuthored(await llm.updateEmbeddingConfig(configId, request)) };
+    })
+  );
+  server.registerTool(
+    "delete_embedding_config",
+    {
+      title: "Delete an embedding config",
+      description: "Delete an embedding config FOR GOOD (no recycle bin). Collections indexing with it and the org default embedder lose it (their reference is cleared; re-index those collections with another embedder) \u2014 dry_run: true lists that usage first. It is skipped only when a collection you cannot see uses it (in_use_restricted) or a database guard refuses (protected).",
+      inputSchema: {
+        config: idOrName.describe("The config: backend id or exact name."),
+        dry_run: external_exports.boolean().default(false)
+      }
+    },
+    async ({ config: config2, dry_run }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return llm.deleteEmbeddingConfigs([await resolveEmbeddingConfig(config2)], dry_run);
+    })
+  );
+  server.registerTool(
+    "get_settings",
+    {
+      title: "Get model defaults and platform settings",
+      description: "The org's default models (what agents and memory use when nothing else is set), the deployment's python execution-timeout bounds, the recycle-bin retention and the provider quickstart status.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const [defaults, configs, embeddingConfigs, limits, binSettings, quickstartStatus] = await Promise.all([
+        llm.getDefaultModels(),
+        llm.listConfigs(),
+        llm.listEmbeddingConfigs(),
+        timeoutLimits.get(),
+        new RecycleBinApi(context.client, context.auth).getSettings(),
+        // Needs LLM-config read in the org and answers 500 on an internal failure — never let it
+        // hide the rest of the settings.
+        quickstart.getStatus().catch((error2) => error2 instanceof Error ? error2 : new Error(String(error2)))
+      ]);
+      const [legacyVoiceConfigs, legacyTranscriptionConfigs] = await Promise.all([
+        defaults.voice_llm_config === null ? [] : voice.listLegacyRealtimeConfigs(),
+        defaults.transcription_llm_config === null ? [] : voice.listLegacyTranscriptionConfigs()
+      ]);
+      const nameMap = (rows) => new Map(rows.map((row) => [row.id, row.custom_name]));
+      const configName = nameMap(configs);
+      const named = (id, names) => id === null ? null : { id, name: names.get(id) ?? null };
+      return {
+        default_models: {
+          ...Object.fromEntries(DEFAULT_MODEL_LLM_SLOTS.map((slot) => [slot, named(defaults[slot], configName)])),
+          memory_embedding_config: named(defaults.memory_embedding_config, nameMap(embeddingConfigs)),
+          voice_llm_config: named(defaults.voice_llm_config, nameMap(legacyVoiceConfigs)),
+          transcription_llm_config: named(defaults.transcription_llm_config, nameMap(legacyTranscriptionConfigs))
+        },
+        execution_timeout_limits: limits,
+        recycle_bin_retention_days: binSettings.retention_days,
+        quickstart: quickstartStatus instanceof Error ? { unavailable: quickstartStatus.message } : {
+          supported_providers: quickstartStatus.supported_providers,
+          last_config_name: quickstartStatus.last_config?.config_name ?? null,
+          is_synced: quickstartStatus.is_synced
+        }
+      };
+    })
+  );
+  server.registerTool(
+    "update_default_models",
+    {
+      title: "Set the org default models",
+      description: "Set the active organization's default models (needs LLM-config update permission). Each slot takes an LLM config (memory_embedding_config: an embedding config) by id or name, or null to unset it; slots you omit keep their value. voice_llm_config / transcription_llm_config are legacy slots: they take a legacy realtime / transcription config (list_voice_configs include_legacy) \u2014 a voice agent talks through its own voice config (set_agent_voice), not through these.",
+      inputSchema: {
+        agent_llm_config: idOrName.nullable().optional().describe("Default LLM of agents."),
+        agent_fcm_llm_config: idOrName.nullable().optional().describe("Default function-calling LLM of agents."),
+        project_manager_llm_config: idOrName.nullable().optional(),
+        memory_llm_config: idOrName.nullable().optional(),
+        memory_embedding_config: idOrName.nullable().optional().describe("Default embedder \u2014 knowledge collections index with it when they name none."),
+        voice_llm_config: idOrName.nullable().optional().describe("Legacy default voice config: a legacy realtime config by id or name (list_voice_configs include_legacy)."),
+        transcription_llm_config: idOrName.nullable().optional().describe("Legacy default transcription config: id or name (list_voice_configs include_legacy).")
+      }
+    },
+    async (slots) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const request = {};
+      for (const slot of DEFAULT_MODEL_LLM_SLOTS) {
+        const ref = slots[slot];
+        if (ref !== void 0) request[slot] = ref === null ? null : await resolveLlmConfig(ref);
+      }
+      if (slots.memory_embedding_config !== void 0) {
+        request.memory_embedding_config = slots.memory_embedding_config === null ? null : await resolveEmbeddingConfig(slots.memory_embedding_config);
+      }
+      if (slots.voice_llm_config !== void 0) {
+        request.voice_llm_config = slots.voice_llm_config === null ? null : await resolveLegacyVoiceConfig(slots.voice_llm_config);
+      }
+      if (slots.transcription_llm_config !== void 0) {
+        request.transcription_llm_config = slots.transcription_llm_config === null ? null : await resolveLegacyTranscriptionConfig(slots.transcription_llm_config);
+      }
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one slot.");
+      return llm.updateDefaultModels(request);
+    })
+  );
+  server.registerTool(
+    "run_quickstart",
+    {
+      title: "Provider quickstart",
+      description: "One-step setup for a provider: from one API key, EpicStaff creates a ready LLM config and embedding config for that provider (for openai / gemini also a voice config of the same name \u2014 list_voice_configs); apply_defaults makes them the org default models. supported providers: get_settings \u2192 quickstart. The key comes from api_key_env (env var of the MCP server) or api_key_secret \u2014 never inline.",
+      inputSchema: {
+        provider: external_exports.string().min(1).describe('Provider name, e.g. "openai" (get_settings \u2192 quickstart.supported_providers).'),
+        api_key_env: apiKeyEnvSchema.optional(),
+        api_key_secret: apiKeySecretSchema.optional(),
+        apply_defaults: external_exports.boolean().default(false).describe("Also point the org default models at the new configs (overwrites the current defaults).")
+      }
+    },
+    async ({ provider, api_key_env, api_key_secret, apply_defaults }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const secretId = await resolveApiKey(api_key_env, api_key_secret);
+      if (secretId == null) throw new Error("Pass api_key_env or api_key_secret \u2014 the quickstart needs a provider key.");
+      const created = await quickstart.create({ provider, api_key_secret_id: secretId });
+      const defaults = apply_defaults ? await quickstart.apply() : void 0;
+      return {
+        config_name: created.config_name,
+        llm_config: created.configs.llm_config ? summarizeAuthored(created.configs.llm_config) : null,
+        embedding_config: created.configs.embedding_config ? summarizeAuthored(created.configs.embedding_config) : null,
+        ...defaults !== void 0 ? { default_models: defaults } : {}
+      };
+    })
+  );
+}
+
+// src/tools/org-data.tools.ts
+var ENTRY_PAGE_LIMIT = 100;
+function registerOrgDataTools(server, context) {
+  const secrets = () => new SecretsApi(context.client, context.auth);
+  const tables = new KeyValueTablesApi(context.client);
+  const resolveTable = (ref) => resolveNamedRef(ref, "Key-value table", () => tables.list(), (table) => table.id, (table) => table.name);
+  server.registerTool(
+    "list_secrets",
+    {
+      title: "List org secrets",
+      description: "List the org Secrets by name (never their values \u2014 EpicStaff does not return them, and not even the masked tail is passed on): id, name, how many configs/tools/nodes use each. Needs a signed-in session (EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD): EpicStaff refuses secrets to API keys.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return (await secrets().list()).map((secret) => ({
+        id: secret.id,
+        name: secret.name,
+        usage_count: secret.usage_count ?? null,
+        created_by: describeUser(secret.created_by),
+        created_at: secret.created_at
+      }));
+    })
+  );
+  server.registerTool(
+    "create_secret",
+    {
+      title: "Create an org secret",
+      description: "Store the value of an environment variable of the MCP server as an org Secret. The value never appears in the tool call or its result. Secrets are immutable (to rotate: delete_secret, then create again). Python code reads a secret it declares; LLM configs reference one by id (create_llm_config api_key_secret).",
+      inputSchema: {
+        name: external_exports.string().min(1).max(255).describe("Org-unique secret name."),
+        value_env: credentialEnvName(
+          "Environment variable of the MCP server holding the value (export it in the shell that launches Claude Code). EPICSTAFF_* / ES_MCP_* names are refused."
+        )
+      }
+    },
+    async ({ name, value_env }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const api = secrets();
+      if (await api.findByName(name)) {
+        throw new Error(
+          `A secret named "${name}" already exists. Secrets are immutable \u2014 delete_secret it first to replace its value, or pick another name.`
+        );
+      }
+      const value = readCredentialEnv(value_env);
+      const created = await createOrExplainConflict(() => api.create(name, value), name, "delete_secret + create_secret");
+      return { secret: { id: created.id, name: created.name }, source: `environment variable ${value_env}` };
+    })
+  );
+  server.registerTool(
+    "delete_secret",
+    {
+      title: "Delete an org secret",
+      description: 'Delete an org Secret: it moves to the recycle bin (restorable with restore_from_recycle_bin kind "secret"). Configs, tools and code that use it lose the credential while it is binned \u2014 check usage_count (list_secrets) first.',
+      inputSchema: {
+        secret: idOrName.describe("The secret: backend id or exact name.")
+      }
+    },
+    async ({ secret }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const api = secrets();
+      const all = await api.list();
+      const secretId = await resolveNamedRef(secret, "Secret", async () => all, (row) => row.id, (row) => row.name);
+      const current = all.find((row) => row.id === secretId);
+      await api.delete(secretId);
+      return {
+        deleted: { id: secretId, name: current?.name ?? null, usage_count: current?.usage_count ?? null },
+        next: recycleBinHint("secret", secretId)
+      };
+    })
+  );
+  server.registerTool(
+    "list_key_value_tables",
+    {
+      title: "List key-value tables",
+      description: "List the org Key-Value tables (what key-value nodes read and write by table name): id, name, description, entry count, last edit.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return (await tables.list()).map((table) => ({
+        id: table.id,
+        name: table.name,
+        description: table.description ?? "",
+        entry_count: table.entry_count ?? 0,
+        created_by: describeUser(table.created_by),
+        last_edited_by: describeUser(table.last_edited_by),
+        last_edited_at: table.last_edited_at ?? null
+      }));
+    })
+  );
+  server.registerTool(
+    "create_key_value_table",
+    {
+      title: "Create a key-value table",
+      description: "Create an org Key-Value table. (push_flow also creates the tables its key-value nodes name when missing.) Names are unique per org, ignoring case.",
+      inputSchema: {
+        name: external_exports.string().min(1).describe("Table name \u2014 what a key-value node's `table:` refers to."),
+        description: external_exports.string().optional()
+      }
+    },
+    async ({ name, description }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return createOrExplainConflict(
+        () => tables.create({ name, ...description !== void 0 ? { description } : {} }),
+        name,
+        "update_key_value_table"
+      );
+    })
+  );
+  server.registerTool(
+    "update_key_value_table",
+    {
+      title: "Update a key-value table",
+      description: "Rename a Key-Value table or change its description. Renaming breaks flow sources whose key-value nodes name the old table (their next push creates a new, empty table under the old name).",
+      inputSchema: {
+        table: idOrName.describe("The table: backend id or exact name."),
+        name: external_exports.string().min(1).optional(),
+        description: external_exports.string().optional()
+      }
+    },
+    async ({ table, name, description }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (name === void 0 && description === void 0) throw new Error("Nothing to change \u2014 pass name and/or description.");
+      const tableId = await resolveTable(table);
+      return tables.update(tableId, {
+        ...name !== void 0 ? { name } : {},
+        ...description !== void 0 ? { description } : {}
+      });
+    })
+  );
+  server.registerTool(
+    "delete_key_value_table",
+    {
+      title: "Delete a key-value table",
+      description: 'Delete a Key-Value table with its entries: it moves to the recycle bin (restorable with restore_from_recycle_bin kind "key_value_table"). The result says how many nodes/flows used it.',
+      inputSchema: {
+        table: idOrName.describe("The table: backend id or exact name.")
+      }
+    },
+    async ({ table }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const tableId = await resolveTable(table);
+      const usage = await tables.usage(tableId);
+      await tables.delete(tableId);
+      return { deleted: { id: tableId }, usedBy: usage, next: recycleBinHint("key_value_table", tableId) };
+    })
+  );
+  server.registerTool(
+    "list_key_value_entries",
+    {
+      title: "List key-value entries",
+      description: "Read entries of a Key-Value table. Without `key`: a page of entries with a 200-character preview of each value and which flow run wrote it. With `key`: that one entry with its full value.",
+      inputSchema: {
+        table: idOrName.describe("The table: backend id or exact name."),
+        key: external_exports.string().optional().describe("Exact key to read in full."),
+        search: external_exports.string().optional().describe("Substring of the key (list mode)."),
+        limit: external_exports.number().int().min(1).max(ENTRY_PAGE_LIMIT).default(50),
+        offset: external_exports.number().int().min(0).default(0)
+      }
+    },
+    async ({ table, key, search, limit, offset }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const tableId = await resolveTable(table);
+      if (key !== void 0) {
+        const entry = await findEntry(tables, tableId, key);
+        if (entry === void 0) return { table: tableId, key, exists: false };
+        return { table: tableId, exists: true, entry: await tables.getEntry(entry.id) };
+      }
+      const page = await tables.listEntries({ table: tableId, limit, offset, ...search ? { search } : {} });
+      return { table: tableId, count: page.count, offset, entries: page.results };
+    })
+  );
+  server.registerTool(
+    "write_key_value_entries",
+    {
+      title: "Write key-value entries",
+      description: "Hand-edit a Key-Value table: `set` creates or overwrites entries (key \u2192 any JSON value), `delete` removes keys. Flows read the new values on their next run. Keys a key-value node reads must match exactly.",
+      inputSchema: {
+        table: idOrName.describe("The table: backend id or exact name."),
+        set: external_exports.record(external_exports.string().min(1), external_exports.unknown()).optional().describe("Entries to create or overwrite."),
+        delete: external_exports.array(external_exports.string().min(1)).optional().describe("Keys to delete.")
+      }
+    },
+    async ({ table, set, delete: keysToDelete }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const tableId = await resolveTable(table);
+      const created = [];
+      const updated = [];
+      const deleted = [];
+      const missing = [];
+      for (const [key, value] of Object.entries(set ?? {})) {
+        const existing = await findEntry(tables, tableId, key);
+        if (existing === void 0) {
+          await tables.createEntry({ table: tableId, key, value });
+          created.push(key);
+        } else {
+          await tables.updateEntry(existing.id, { value });
+          updated.push(key);
+        }
+      }
+      for (const key of keysToDelete ?? []) {
+        const existing = await findEntry(tables, tableId, key);
+        if (existing === void 0) {
+          missing.push(key);
+          continue;
+        }
+        await tables.deleteEntry(existing.id);
+        deleted.push(key);
+      }
+      return { table: tableId, created, updated, deleted, ...missing.length > 0 ? { notFound: missing } : {} };
+    })
+  );
+}
+async function findEntry(tables, tableId, key) {
+  for (let offset = 0; ; offset += ENTRY_PAGE_LIMIT) {
+    const page = await tables.listEntries({ table: tableId, search: key, ordering: "key", limit: ENTRY_PAGE_LIMIT, offset });
+    const match = page.results.find((entry) => entry.key === key);
+    if (match !== void 0) return match;
+    if (offset + page.results.length >= page.count || page.results.length === 0) return void 0;
+  }
+}
+
+// src/tools/flow-history.tools.ts
+import { closeSync, constants as fsConstants, existsSync as existsSync7, lstatSync, mkdirSync as mkdirSync4, openSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname3, extname, isAbsolute as isAbsolute4 } from "node:path";
+
+// src/api/graph-versions.ts
+var GraphVersionsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  /** Versions of one flow, newest first (the backend orders by `-created_at`). */
+  async list(graphId) {
+    return unwrap2(
+      await this.client.get("graph-versions/", {
+        query: { graph_id: graphId, limit: 1e3 }
+      })
+    );
+  }
+  async get(id) {
+    return this.client.get(`graph-versions/${id}/`);
+  }
+  async create(request) {
+    return this.client.post("graph-versions/", { body: request });
+  }
+  async update(id, request) {
+    return this.client.patch(`graph-versions/${id}/`, { body: request });
+  }
+  /**
+   * Restore the version into its flow. `saveVersion` is the flow's current save_version (the
+   * restore is refused with 409 when the flow changed since); `backup` first saves the current
+   * state as a version of its own.
+   */
+  async restore(id, saveVersion, backup) {
+    return this.client.post(`graph-versions/${id}/restore/`, {
+      body: { save_version: saveVersion },
+      ...backup ? { query: { backup: "true" } } : {}
+    });
+  }
+  /** Make a brand-new, independent flow from the version (the original flow is untouched). */
+  async createGraph(id) {
+    return this.client.post(`graph-versions/${id}/create-graph/`, { body: {} });
+  }
+};
+
+// src/api/import-export.ts
+import { readFileSync as readFileSync6 } from "node:fs";
+import { basename as basename2 } from "node:path";
+var TRANSFER_PATHS = {
+  flow: "graphs/",
+  python_tool: "python-code-tool/",
+  mcp_tool: "mcp-tools/"
+};
+var ImportExportApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  /** One id → `GET <list>{id}/export/`; several → `POST <list>bulk-export/ {ids}`. */
+  async export(kind, ids) {
+    let excludedHeader = null;
+    const onResponseHeaders = (headers) => {
+      excludedHeader = headers.get("X-Export-Excluded");
+    };
+    const path6 = TRANSFER_PATHS[kind];
+    const document = ids.length === 1 ? await this.client.get(`${path6}${ids[0]}/export/`, { onResponseHeaders }) : await this.client.post(`${path6}bulk-export/`, { body: { ids }, onResponseHeaders });
+    return { document, excluded: parseExcludedHeader(excludedHeader) };
+  }
+  /** Dry run: what importing the file would ask about (`import/inspect/`) — nothing is created. */
+  async inspect(kind, filePath) {
+    return this.client.post(`${TRANSFER_PATHS[kind]}import/inspect/`, { formData: fileForm(filePath) });
+  }
+  async import(kind, filePath, options) {
+    const formData = fileForm(filePath);
+    if (kind === "flow") {
+      formData.append("preserve_uuids", String(options.preserveUuids ?? false));
+      formData.append("replace_existing", String(options.replaceExisting ?? false));
+    }
+    formData.append("import_labels", String(options.importLabels ?? true));
+    return this.client.post(`${TRANSFER_PATHS[kind]}import/`, { formData });
+  }
+};
+function fileForm(filePath) {
+  const formData = new FormData();
+  formData.append("file", new Blob([new Uint8Array(readFileSync6(filePath))]), basename2(filePath));
+  return formData;
+}
+function parseExcludedHeader(header) {
+  if (!header) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(header);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.every(isExcludedExportEntity) ? parsed : [];
+}
+function isExcludedExportEntity(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const { type, count, names } = value;
+  return typeof type === "string" && typeof count === "number" && Array.isArray(names) && names.every((name) => typeof name === "string");
+}
+
+// src/tools/flow-history.tools.ts
+var transferKindSchema = external_exports.enum(["flow", "python_tool", "mcp_tool"]).default("flow").describe("What the export document holds: flows (default), python tools or MCP tools.");
+function registerFlowHistoryTools(server, context) {
+  const graphs = new GraphsApi(context.client);
+  const versions = new GraphVersionsApi(context.client);
+  const transfer = new ImportExportApi(context.client);
+  const labels = new LabelsApi(context.client);
+  const openInEditor = (graphId) => `${context.config.apiUrl.replace(/\/api\/$/, "")}/flows/${graphId}`;
+  server.registerTool(
+    "list_graph_versions",
+    {
+      title: "List flow versions",
+      description: "List the saved versions (named snapshots) of one flow, newest first. Restore one with restore_graph_version.",
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the flow (list_graphs).")
+      }
+    },
+    async ({ graph_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return versions.list(graph_id);
+    })
+  );
+  server.registerTool(
+    "create_graph_version",
+    {
+      title: "Save a flow version",
+      description: "Save the current state of a flow as a named version (snapshot) \u2014 take one before a risky push or edit so restore_graph_version can roll back. Snapshots never contain secret values.",
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the flow."),
+        name: external_exports.string().min(1).max(255).describe('Version name, e.g. "before refactor".'),
+        description: external_exports.string().optional().describe("What this version captures.")
+      }
+    },
+    async ({ graph_id, name, description }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const version2 = await versions.create({ graph_id, name, ...description !== void 0 ? { description } : {} });
+      return { version: version2, next: `Roll back later with restore_graph_version(version_id: ${version2.id}).` };
+    })
+  );
+  server.registerTool(
+    "restore_graph_version",
+    {
+      title: "Restore a flow version",
+      description: `Bring a saved version back. mode "overwrite" (default) rewrites the version's own flow in place \u2014 by default the current state is saved as a backup version first; it is refused when the flow changed since the save_version it was checked against. mode "new_flow" leaves the flow untouched and creates a new, independent flow from the version. Nodes whose dependencies (agents, tools \u2026) are gone are skipped and listed in warnings. After an overwrite, a local flow source of that flow is stale: pull_flow it again.`,
+      inputSchema: {
+        version_id: external_exports.number().int().describe("Backend id of the version (list_graph_versions)."),
+        mode: external_exports.enum(["overwrite", "new_flow"]).default("overwrite"),
+        backup: external_exports.boolean().default(true).describe("overwrite only: save the current state as a version first (default true, like the editor)."),
+        save_version: external_exports.number().int().optional().describe(
+          "overwrite only: the flow save_version you expect. Omitted \u2192 the current one is read just before restoring."
+        )
+      }
+    },
+    async ({ version_id, mode, backup, save_version }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (mode === "new_flow") {
+        const created = await versions.createGraph(version_id);
+        return { ...created, openInEditor: openInEditor(created.graph_id) };
+      }
+      const version2 = await versions.get(version_id);
+      const expectedSaveVersion = save_version ?? (await graphs.get(version2.graph_id)).save_version;
+      const restored = await versions.restore(version_id, expectedSaveVersion, backup);
+      return {
+        ...restored,
+        version: { id: version2.id, name: version2.name },
+        openInEditor: openInEditor(restored.graph_id),
+        next: "The flow was rewritten \u2014 a local flow source of it is now stale: pull_flow into a fresh directory " + (restored.auto_backup_version_id != null ? `(the previous state is version #${restored.auto_backup_version_id}).` : "(no backup version was taken).")
+      };
+    })
+  );
+  server.registerTool(
+    "copy_flow",
+    {
+      title: "Copy a flow",
+      description: 'Duplicate a flow under a new name (same nodes, edges and references to org entities). The copy is independent of the source. Copying a flow with trigger nodes needs flow "use" permission.',
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the flow to copy."),
+        name: external_exports.string().min(1).describe("Name of the new flow.")
+      }
+    },
+    async ({ graph_id, name }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const copy = await graphs.copy(graph_id, name);
+      return { graphId: copy.id, name: copy.name, openInEditor: openInEditor(copy.id) };
+    })
+  );
+  server.registerTool(
+    "delete_flow",
+    {
+      title: "Delete a flow",
+      description: 'Delete a flow: it moves to the recycle bin (restorable with restore_from_recycle_bin kind "flow" until purged). Flows that embed it as a subflow are listed in the result \u2014 they fail to run while it is binned. A local flow source that pushed it re-creates a new flow on its next push.',
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the flow to delete.")
+      }
+    },
+    async ({ graph_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const flow = await graphs.get(graph_id);
+      const usage = await graphs.subflowUsage(graph_id);
+      await graphs.delete(graph_id);
+      return {
+        deleted: { id: graph_id, name: flow.name },
+        ...usage.parent_flow_ids.length > 0 ? { usedAsSubflowBy: usage.parent_flow_ids } : {},
+        next: recycleBinHint("flow", graph_id)
+      };
+    })
+  );
+  server.registerTool(
+    "set_flow_labels",
+    {
+      title: "Set the labels of a flow",
+      description: 'Replace the labels a flow carries (flow labels \u2014 list_labels scope "flow"). Pass [] to clear them.',
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the flow."),
+        labels: external_exports.array(idOrName).describe('Flow labels by id or exact name / full path ("parent/child").')
+      }
+    },
+    async ({ graph_id, labels: labelRefs }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const flowLabels = labelRefs.length > 0 ? await labels.list("flow") : [];
+      const labelIds = await Promise.all(
+        labelRefs.map(
+          (ref) => resolveNamedRef(ref, "Flow label", async () => flowLabels, (label) => label.id, (label) => label.full_path)
+        )
+      );
+      const flow = await graphs.get(graph_id);
+      const updated = await graphs.patch(graph_id, { save_version: flow.save_version, label_ids: labelIds });
+      return { graphId: graph_id, label_ids: updated.label_ids ?? labelIds, saveVersion: updated.save_version };
+    })
+  );
+  server.registerTool(
+    "export_entities",
+    {
+      title: "Export flows or tools to a file",
+      description: "Write an EpicStaff export document (the editor's Export) for one or more flows, python tools or MCP tools to a local .json file. It carries everything they depend on (agents, LLM configs, tools \u2026) so import_entities can recreate them in another organization or instance. Secret values are never exported; entities you may not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. Refuses to overwrite an existing file unless overwrite: true, and never writes through a symbolic link.",
+      inputSchema: {
+        kind: transferKindSchema,
+        ids: external_exports.array(external_exports.number().int()).min(1).max(100).describe("Backend ids to export (one file for all)."),
+        output_path: external_exports.string().describe("Absolute path of the .json file to write (parent dirs are created)."),
+        overwrite: external_exports.boolean().default(false).describe("Replace output_path when it already exists (a symbolic link is still refused).")
+      }
+    },
+    async ({ kind, ids, output_path, overwrite }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (!isAbsolute4(output_path) || extname(output_path).toLowerCase() !== ".json") {
+        throw new Error("output_path must be an absolute path to a .json file.");
+      }
+      assertWritableExportPath(output_path, overwrite);
+      const result = await transfer.export(kind, ids);
+      const body = `${JSON.stringify(result.document, null, 2)}
+`;
+      mkdirSync4(dirname3(output_path), { recursive: true });
+      writeExportFile(output_path, body, overwrite);
+      return {
+        output_path,
+        kind,
+        ids,
+        bytes: body.length,
+        excluded: result.excluded,
+        next: "Recreate it elsewhere with import_entities(kind, file_path)."
+      };
+    })
+  );
+  server.registerTool(
+    "import_entities",
+    {
+      title: "Import flows or tools from a file",
+      description: "Import an EpicStaff export document (from export_entities or the editor's Export) into the active organization. inspect_only: true first reports what the import would ask about, creating nothing. Flows: by default every import creates new copies; preserve_uuids + replace_existing overwrite the flows with the same uuid in place (needs flow update permission). Secrets are not in export files \u2014 re-attach credentials after importing.",
+      inputSchema: {
+        kind: transferKindSchema,
+        file_path: external_exports.string().describe("Absolute path of the export .json file."),
+        inspect_only: external_exports.boolean().default(false).describe("Dry run: report what would be imported, change nothing."),
+        preserve_uuids: external_exports.boolean().default(false).describe("Flows only: keep the file's uuids."),
+        replace_existing: external_exports.boolean().default(false).describe("Flows only: overwrite flows with the same uuid in place (requires preserve_uuids)."),
+        import_labels: external_exports.boolean().default(true).describe("Recreate the file's labels and tag the imports with them.")
+      }
+    },
+    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels: import_labels3 }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (!isAbsolute4(file_path)) throw new Error("file_path must be an absolute path.");
+      if (!existsSync7(file_path)) throw new Error(`No file at ${file_path}.`);
+      if (kind !== "flow" && (preserve_uuids || replace_existing)) {
+        throw new Error("preserve_uuids / replace_existing apply to flow imports only.");
+      }
+      if (replace_existing && !preserve_uuids) {
+        throw new Error("replace_existing requires preserve_uuids: true (the backend matches flows by uuid).");
+      }
+      if (inspect_only) {
+        return { inspected: await transfer.inspect(kind, file_path) };
+      }
+      const result = await transfer.import(kind, file_path, {
+        preserveUuids: preserve_uuids,
+        replaceExisting: replace_existing,
+        importLabels: import_labels3
+      });
+      return { imported: result, next: "Check the created entities (list_graphs / list_tools) and re-attach secrets." };
+    })
+  );
+  server.registerTool(
+    "get_flow_persistent_state",
+    {
+      title: "Read a flow's persistent variables",
+      description: "Read the values a flow carries across sessions: its organization-scoped persistent variables and the per-member ones (`persistent_variables` in flow source). Read-only \u2014 EpicStaff exposes no write route; the values change only when the flow runs. Use it to debug a flow that remembers state.",
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the flow.")
+      }
+    },
+    async ({ graph_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const [organizationStates, userStates] = await Promise.all([
+        graphs.listOrganizationStates(),
+        graphs.listOrganizationUserStates()
+      ]);
+      const organization = organizationStates.find((state) => state.graph === graph_id);
+      return {
+        graphId: graph_id,
+        organization: organization ? { persistent_variables: organization.persistent_variables, user_variables_seed: organization.user_variables } : null,
+        users: userStates.filter((state) => state.graph === graph_id).map((state) => ({
+          organization_user: state.organization_user,
+          persistent_variables: state.persistent_variables
+        }))
+      };
+    })
+  );
+}
+function existingFileError(outputPath) {
+  return new Error(
+    `${outputPath} already exists \u2014 export to a new path, or pass overwrite: true if you really want to replace it.`
+  );
+}
+function assertWritableExportPath(outputPath, overwrite) {
+  let stats;
+  try {
+    stats = lstatSync(outputPath);
+  } catch {
+    return;
+  }
+  if (stats.isSymbolicLink()) {
+    throw new Error(`${outputPath} is a symbolic link \u2014 refusing to write through it. Pick a regular file path.`);
+  }
+  if (!overwrite) throw existingFileError(outputPath);
+  if (!stats.isFile()) throw new Error(`${outputPath} exists and is not a regular file.`);
+}
+function writeExportFile(outputPath, body, overwrite) {
+  const flags = overwrite ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0) : "wx";
+  let descriptor;
+  try {
+    descriptor = openSync(outputPath, flags, 420);
+  } catch (error2) {
+    const code = error2.code;
+    if (code === "EEXIST") throw existingFileError(outputPath);
+    if (code === "ELOOP") throw new Error(`${outputPath} is a symbolic link \u2014 refusing to write through it.`);
+    throw error2;
+  }
+  try {
+    writeFileSync4(descriptor, body, "utf8");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+// src/tools/recycle-bin.tools.ts
+var binKindSchema = external_exports.enum(RECYCLE_BIN_SOURCE_KEYS).describe(
+  "Which bin: flow, agent, surface, python_tool, mcp_tool, collection, key_value_table, secret, webhook_trigger, realtime_channel (voice channel) or storage (files and folders)."
+);
+var idsSchema = external_exports.array(external_exports.number().int().positive()).min(1).max(RECYCLE_BIN_BULK_ID_LIMIT).describe(`Ids of binned items of that kind (list_recycle_bin), at most ${RECYCLE_BIN_BULK_ID_LIMIT}.`);
+function summarizeBinEntry(kind, entry) {
+  const details = {};
+  for (const detail of entry.details) {
+    details[detail.label] = detail.format === "user" && typeof detail.value === "object" ? describeUser(detail.value) : detail.value;
+  }
+  const hidden = entry.hidden_contents.reduce((total, item) => total + item.count, 0);
+  return {
+    kind,
+    id: entry.id,
+    name: entry.name,
+    ...entry.item_type !== void 0 ? { item_type: entry.item_type } : {},
+    deleted_at: entry.deleted_at,
+    days_left: entry.days_left,
+    details,
+    // What a restore brings back with the item.
+    contents_total: entry.contents_total,
+    ...entry.contents.length > 0 ? { contents: entry.contents.slice(0, 20).map((content) => `${content.kind}: ${content.name}`) } : {},
+    ...hidden > 0 ? { hidden_contents: hidden } : {}
+  };
+}
+function registerRecycleBinTools(server, context) {
+  const recycleBin = () => new RecycleBinApi(context.client, context.auth);
+  server.registerTool(
+    "list_recycle_bin",
+    {
+      title: "List the recycle bin",
+      description: "List deleted items that can still be restored (newest deletion first), with days left before they are purged automatically and what a restore brings back with them. Pass kind for one bin (paged), or omit it for the first page of every bin you may read.",
+      inputSchema: {
+        kind: binKindSchema.optional(),
+        search: external_exports.string().optional().describe("Case-insensitive substring of the item name."),
+        limit: external_exports.number().int().min(1).max(RECYCLE_BIN_MAX_PAGE_SIZE).optional().describe(`Page size (default 50 for one kind, 20 per kind for all; max ${RECYCLE_BIN_MAX_PAGE_SIZE}).`),
+        offset: external_exports.number().int().min(0).default(0).describe("Page offset (one kind only).")
+      }
+    },
+    async ({ kind, search, limit, offset }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const bin = recycleBin();
+      const settings = await bin.getSettings();
+      if (kind !== void 0) {
+        const page = await bin.list(kind, { limit: limit ?? 50, offset, ...search ? { search } : {} });
+        return {
+          retention_days: settings.retention_days,
+          kind,
+          count: page.count,
+          offset,
+          items: page.results.map((entry) => summarizeBinEntry(kind, entry))
+        };
+      }
+      const perKind = limit ?? 20;
+      const bins = {};
+      const unavailable = {};
+      await Promise.all(
+        RECYCLE_BIN_SOURCE_KEYS.map(async (source) => {
+          try {
+            const page = await bin.list(source, { limit: perKind, offset: 0, ...search ? { search } : {} });
+            if (page.count > 0) {
+              bins[source] = {
+                count: page.count,
+                items: page.results.map((entry) => summarizeBinEntry(source, entry))
+              };
+            }
+          } catch (error2) {
+            if (error2 instanceof ApiError && (error2.status === 403 || error2.status === 404)) {
+              unavailable[source] = error2.status === 403 ? "no permission" : "not available";
+              return;
+            }
+            throw error2;
+          }
+        })
+      );
+      return {
+        retention_days: settings.retention_days,
+        bins,
+        ...Object.keys(unavailable).length > 0 ? { unavailable } : {},
+        next: "Restore with restore_from_recycle_bin(kind, ids). Pass kind for more than the first page of a bin."
+      };
+    })
+  );
+  server.registerTool(
+    "restore_from_recycle_bin",
+    {
+      title: "Restore deleted items",
+      description: "Restore binned items of one kind, with what they owned (a flow's nodes, an agent's own surfaces \u2026). An item whose name was taken meanwhile comes back renamed (renamed_from). links_restored tells whether everything that used it is connected again. Failures are reported per item; the rest go ahead. Pass ids, or all: true to restore every item of that kind in the bin (only when the user asks for the whole bin).",
+      inputSchema: {
+        kind: binKindSchema,
+        ids: idsSchema.optional(),
+        all: external_exports.literal(true).optional().describe("Restore every binned item of this kind instead of the listed ids.")
+      }
+    },
+    async ({ kind, ids, all }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (ids === void 0 === (all === void 0)) {
+        throw new Error("Pass either ids (list_recycle_bin) or all: true, not both and not neither.");
+      }
+      const result = await recycleBin().restore(kind, ids !== void 0 ? { ids } : { all: true });
+      const renamed = result.restored.filter((item) => item.renamed_from !== null);
+      return {
+        kind: RECYCLE_BIN_SOURCES[kind].kind,
+        ...result,
+        ...renamed.length > 0 ? {
+          note: `Some items came back under a new name \u2014 flow sources that reference the old name via existing: need updating${kind === "secret" ? ", and code that reads a renamed secret by name must use the new name" : ""}.`
+        } : {}
+      };
+    })
+  );
+  server.registerTool(
+    "purge_from_recycle_bin",
+    {
+      title: "Permanently delete binned items",
+      description: "IRREVERSIBLE: delete binned items of one kind for good \u2014 they can never be restored. EpicStaff allows it to superadmins only, through a signed-in session (never an API key); everyone else gets a 403. Items are purged automatically when their retention runs out anyway, so purge only on an explicit user request, naming the exact items. Requires confirm: true.",
+      inputSchema: {
+        kind: binKindSchema,
+        ids: idsSchema,
+        confirm: external_exports.literal(true).describe("Must be true: the user explicitly asked to delete exactly these items forever.")
+      }
+    },
+    async ({ kind, ids }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      try {
+        const result = await recycleBin().purge(kind, ids);
+        return { kind: RECYCLE_BIN_SOURCES[kind].kind, ...result };
+      } catch (error2) {
+        if (error2 instanceof ApiError && error2.status === 403) {
+          throw new Error(
+            "Purging was refused: EpicStaff lets only a superadmin purge, and only from a signed-in session (EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD, not EPICSTAFF_API_TOKEN). Nothing was deleted; the items expire on their own when their retention runs out."
+          );
+        }
+        throw error2;
+      }
+    })
+  );
+}
+
+// src/tools/voice-config.tools.ts
+var voiceProviderSchema = external_exports.enum(VOICE_PROVIDERS).describe('Voice provider: "openai" (OpenAI Realtime), "elevenlabs" or "gemini" (Gemini Live).');
+var apiKeyEnvSchema2 = credentialEnvName(
+  'Environment variable of the MCP server holding the provider API key, stored as the org Secret "es-mcp:<ENV>" (reused while it holds that value). The key never appears in a tool call.'
+);
+var apiKeySecretSchema2 = idOrName.describe("An existing org Secret (list_secrets) holding the provider API key: id or name.");
+var providerFieldsShape = {
+  base_url: external_exports.string().url().nullable().optional().describe("openai only: custom API base URL (null = OpenAI)."),
+  transcription_model_name: external_exports.string().max(250).nullable().optional().describe('openai only: model that transcribes the caller (EpicStaff default "whisper-1").'),
+  transcription_api_key_env: credentialEnvName(
+    "openai only: environment variable holding the transcription API key (stored as an org Secret)."
+  ).optional(),
+  voice_recognition_prompt: external_exports.string().nullable().optional().describe('openai / gemini: hint that guides transcription, e.g. "Expect product names like Nimbus".'),
+  language: external_exports.string().max(10).nullable().optional().describe('elevenlabs only: ISO-639-1 language code, e.g. "en".')
+};
+var PROVIDER_ONLY_FIELDS = {
+  base_url: ["openai"],
+  transcription_model_name: ["openai"],
+  transcription_api_key_env: ["openai"],
+  transcription_api_key_secret: ["openai"],
+  voice_recognition_prompt: ["openai", "gemini"],
+  language: ["elevenlabs"]
+};
+function assertProviderFields(provider, fields) {
+  const misplaced = [];
+  for (const [key, value] of Object.entries(fields)) {
+    const owners = PROVIDER_ONLY_FIELDS[key];
+    if (value !== void 0 && owners !== void 0 && !owners.includes(provider)) {
+      misplaced.push(`${key} (${owners.join(" / ")} only)`);
+    }
+  }
+  if (misplaced.length > 0) {
+    throw new Error(`A ${provider} voice config has no ${misplaced.join(", ")}. Drop those fields.`);
+  }
+}
+function registerVoiceConfigTools(server, context) {
+  const voice = new VoiceConfigsApi(context.client);
+  const llm = new LlmApi(context.client);
+  const secrets = () => new SecretsApi(context.client, context.auth);
+  const resolveVoiceConfig = (provider, ref) => resolveNamedRef(
+    ref,
+    `${provider} voice config`,
+    () => voice.listConfigs(provider),
+    (config2) => config2.id,
+    (config2) => config2.custom_name
+  );
+  const transcriptionKeyNames = { env: "transcription_api_key_env", secret: "transcription_api_key_secret" };
+  server.registerTool(
+    "list_voice_configs",
+    {
+      title: "List voice configs",
+      description: "List the org's voice configs \u2014 the OpenAI / ElevenLabs / Gemini realtime configs an agent's voice settings use (set_agent_voice). include_models adds the realtime model registry (an OpenAI config's model must be in it), include_voices the voices each provider offers, include_legacy the deprecated realtime / transcription configs the default-model voice slots point at.",
+      inputSchema: {
+        provider: voiceProviderSchema.optional().describe("Only this provider's configs."),
+        include_models: external_exports.boolean().default(false).describe("Also list the realtime and transcription model registry."),
+        include_voices: external_exports.boolean().default(false).describe("Also list the voices of each provider."),
+        include_legacy: external_exports.boolean().default(false).describe("Also list the deprecated realtime / transcription configs.")
+      }
+    },
+    async ({ provider, include_models, include_voices, include_legacy }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const providers = provider ? [provider] : [...VOICE_PROVIDERS];
+      const perProvider = await Promise.all(providers.map((key) => voice.listConfigs(key)));
+      const result = {
+        configs: providers.flatMap((key, index) => (perProvider[index] ?? []).map((config2) => describeVoiceConfig(key, config2)))
+      };
+      if (include_models) {
+        const [realtimeModels, transcriptionModels, llmProviders] = await Promise.all([
+          voice.listRealtimeModels(),
+          voice.listTranscriptionModels(),
+          llm.listProviders()
+        ]);
+        const providerName = new Map(llmProviders.map((entry) => [entry.id, entry.name]));
+        const describeModel = (model) => ({
+          id: model.id,
+          name: model.name,
+          provider: model.provider === null ? null : providerName.get(model.provider) ?? model.provider,
+          is_custom: model.is_custom
+        });
+        result.models = {
+          realtime: realtimeModels.map(describeModel),
+          transcription: transcriptionModels.map(describeModel),
+          defaults: DEFAULT_VOICE_MODEL
+        };
+      }
+      if (include_voices) {
+        const voices = await voice.getVoices();
+        result.voices = {
+          elevenlabs: "free-form ElevenLabs voice id (from your ElevenLabs voice library)",
+          ...Object.fromEntries(Object.entries(voices).map(([key, list]) => [key, list.map((entry) => entry.id)]))
+        };
+      }
+      if (include_legacy) {
+        const [realtimeConfigs, transcriptionConfigs] = await Promise.all([
+          voice.listLegacyRealtimeConfigs(),
+          voice.listLegacyTranscriptionConfigs()
+        ]);
+        result.legacy = {
+          note: "Deprecated upstream: only the default-model voice_llm_config / transcription_llm_config slots (update_default_models) point at these; voice agents use the configs above.",
+          realtime_configs: realtimeConfigs.map((config2) => ({
+            id: config2.id,
+            name: config2.custom_name,
+            model: config2.realtime_model,
+            provider: config2.provider_name ?? null,
+            has_api_key: config2.api_key_secret_id != null
+          })),
+          transcription_configs: transcriptionConfigs.map((config2) => ({
+            id: config2.id,
+            name: config2.custom_name,
+            model: config2.realtime_transcription_model,
+            has_api_key: config2.api_key_secret_id != null
+          }))
+        };
+      }
+      return result;
+    })
+  );
+  server.registerTool(
+    "create_voice_config",
+    {
+      title: "Create a voice config",
+      description: "Create a voice config for one provider (what an agent's voice settings talk through). The provider key comes from api_key_env (env var of the MCP server) or api_key_secret (existing org secret) \u2014 a config without a key cannot start a session. model_name defaults per provider (list_voice_configs include_models); an OpenAI model_name must be in the realtime model registry (create_voice_model adds one). Names are not unique \u2014 a second config with the same name is created, with a warning.",
+      inputSchema: {
+        provider: voiceProviderSchema,
+        name: external_exports.string().min(1).max(250).describe("Config name (custom_name)."),
+        model_name: external_exports.string().min(1).max(250).optional().describe("Realtime model; provider default when omitted."),
+        api_key_env: apiKeyEnvSchema2.optional(),
+        api_key_secret: apiKeySecretSchema2.optional(),
+        transcription_api_key_secret: idOrName.optional().describe("openai only: existing org secret (id or name) holding the transcription API key."),
+        ...providerFieldsShape
+      }
+    },
+    async ({ provider, name, model_name, api_key_env, api_key_secret, transcription_api_key_env, transcription_api_key_secret, ...fields }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      assertProviderFields(provider, { ...fields, transcription_api_key_env, transcription_api_key_secret });
+      const sameName = (await voice.listConfigs(provider)).filter(
+        (config2) => config2.custom_name.toLowerCase() === name.trim().toLowerCase()
+      );
+      const apiKeySecretId = await resolveCredential(secrets, api_key_env, api_key_secret);
+      const transcriptionKeySecretId = await resolveCredential(
+        secrets,
+        transcription_api_key_env,
+        transcription_api_key_secret,
+        transcriptionKeyNames
+      );
+      const request = {
+        custom_name: name,
+        api_key_secret_id: apiKeySecretId ?? null,
+        ...model_name !== void 0 ? { model_name } : {},
+        ...transcriptionKeySecretId !== void 0 ? { transcription_api_key_secret_id: transcriptionKeySecretId } : {},
+        ...pickDefined(fields)
+      };
+      const created = await voice.createConfig(provider, request);
+      const warnings = [];
+      if (sameName.length > 0) {
+        warnings.push(
+          `Another ${provider} voice config already has this name (id ${sameName.map((config2) => config2.id).join(", ")}); refer to this one by id ${created.id}.`
+        );
+      }
+      if (created.api_key_secret_id == null) {
+        warnings.push("No API key: voice sessions with this config fail until one is set (update_voice_config api_key_env).");
+      }
+      return {
+        config: { provider, ...summarizeAuthored(created) },
+        ...warnings.length > 0 ? { warnings } : {},
+        next: `Give an agent this voice with set_agent_voice(agent, provider: "${provider}", config: ${created.id}).`
+      };
+    })
+  );
+  server.registerTool(
+    "update_voice_config",
+    {
+      title: "Update a voice config",
+      description: "Change a voice config (PATCH \u2014 only the fields you pass change; null clears an optional field). Every agent whose voice settings use it picks the change up on its next session.",
+      inputSchema: {
+        provider: voiceProviderSchema,
+        config: idOrName.describe("The config: backend id or exact name (list_voice_configs)."),
+        name: external_exports.string().min(1).max(250).optional().describe("New name."),
+        model_name: external_exports.string().min(1).max(250).optional(),
+        api_key_env: apiKeyEnvSchema2.optional(),
+        api_key_secret: apiKeySecretSchema2.nullable().optional().describe("Existing secret (id or name); null removes the key."),
+        transcription_api_key_secret: idOrName.nullable().optional().describe("openai only: existing secret (id or name) for transcription; null removes it."),
+        ...providerFieldsShape
+      }
+    },
+    async ({
+      provider,
+      config: config2,
+      name,
+      model_name,
+      api_key_env,
+      api_key_secret,
+      transcription_api_key_env,
+      transcription_api_key_secret,
+      ...fields
+    }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      assertProviderFields(provider, { ...fields, transcription_api_key_env, transcription_api_key_secret });
+      const configId = await resolveVoiceConfig(provider, config2);
+      const apiKeySecretId = await resolveCredential(secrets, api_key_env, api_key_secret);
+      const transcriptionKeySecretId = await resolveCredential(
+        secrets,
+        transcription_api_key_env,
+        transcription_api_key_secret,
+        transcriptionKeyNames
+      );
+      const request = {
+        ...name !== void 0 ? { custom_name: name } : {},
+        ...model_name !== void 0 ? { model_name } : {},
+        ...apiKeySecretId !== void 0 ? { api_key_secret_id: apiKeySecretId } : {},
+        ...transcriptionKeySecretId !== void 0 ? { transcription_api_key_secret_id: transcriptionKeySecretId } : {},
+        ...pickDefined(fields)
+      };
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one field.");
+      return { config: { provider, ...summarizeAuthored(await voice.updateConfig(provider, configId, request)) } };
+    })
+  );
+  server.registerTool(
+    "delete_voice_config",
+    {
+      title: "Delete a voice config",
+      description: "Delete a voice config FOR GOOD (no recycle bin). Agents whose voice settings use it have their voice switched off (the config is cleared from their settings) \u2014 dry_run: true lists those agents first. It is skipped, not deleted, only when an agent you cannot see uses it (in_use_restricted). Past voice chats keep their history.",
+      inputSchema: {
+        provider: voiceProviderSchema,
+        config: idOrName.describe("The config: backend id or exact name."),
+        dry_run: external_exports.boolean().default(false).describe("Report what would happen (and the usage) without deleting.")
+      }
+    },
+    async ({ provider, config: config2, dry_run }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return voice.deleteConfigs(provider, [await resolveVoiceConfig(provider, config2)], dry_run);
+    })
+  );
+  server.registerTool(
+    "create_voice_model",
+    {
+      title: "Register a custom realtime model",
+      description: "Add an org custom model to the realtime model registry \u2014 needed before an OpenAI voice config can use a model the built-in registry lacks (list_voice_configs include_models shows it). The model name must be one the provider actually serves; EpicStaff does not check that.",
+      inputSchema: {
+        provider: voiceProviderSchema,
+        name: external_exports.string().min(1).max(250).describe('Exact model name the provider serves, e.g. "gpt-realtime".')
+      }
+    },
+    async ({ provider, name }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const providerId = await resolveProviderId(llm, provider);
+      const created = await voice.createRealtimeModel({ name: name.trim(), provider: providerId });
+      return {
+        model: { id: created.id, name: created.name, provider, is_custom: created.is_custom },
+        next: `Use it with create_voice_config(provider: "${provider}", model_name: "${created.name}", \u2026).`
+      };
+    })
+  );
+  server.registerTool(
+    "delete_voice_model",
+    {
+      title: "Delete a custom realtime model",
+      description: "Delete an org custom model from the realtime model registry for good. Built-in models cannot be deleted. Existing voice configs keep their model_name; a new or changed OpenAI config can no longer name it.",
+      inputSchema: {
+        model: idOrName.describe("The custom model: backend id or exact name (list_voice_configs include_models)."),
+        provider: voiceProviderSchema.optional().describe("Provider, to disambiguate a name several providers share.")
+      }
+    },
+    async ({ model, provider }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const providerId = provider === void 0 ? void 0 : await resolveProviderId(llm, provider);
+      const modelId = await resolveNamedRef(
+        model,
+        "Custom realtime model",
+        async () => (await voice.listRealtimeModels()).filter(
+          (entry) => entry.is_custom && (providerId === void 0 || entry.provider === providerId)
+        ),
+        (entry) => entry.id,
+        (entry) => entry.name
+      );
+      await voice.deleteRealtimeModel(modelId);
+      return { deleted: { id: modelId } };
+    })
+  );
+}
+function describeVoiceConfig(provider, config2) {
+  const summary = {
+    provider,
+    id: config2.id,
+    name: config2.custom_name,
+    model_name: config2.model_name,
+    has_api_key: config2.api_key_secret_id != null
+  };
+  if (provider === "openai") {
+    const openai = config2;
+    summary.base_url = openai.base_url;
+    summary.transcription_model_name = openai.transcription_model_name;
+    summary.has_transcription_api_key = openai.transcription_api_key_secret_id != null;
+  }
+  if ("voice_recognition_prompt" in config2) summary.voice_recognition_prompt = config2.voice_recognition_prompt;
+  if ("language" in config2) summary.language = config2.language;
+  return summary;
+}
+async function resolveProviderId(llm, provider) {
+  const match = (await llm.listProviders()).find((entry) => entry.name.toLowerCase() === provider);
+  if (match === void 0) throw new Error(`Provider "${provider}" is not registered on this EpicStaff deployment.`);
+  return match.id;
+}
+
+// src/api/realtime-agent-definitions.ts
+function activeVoiceProvider(row) {
+  if (row.openai_config != null) return { provider: "openai", configId: row.openai_config };
+  if (row.elevenlabs_config != null) return { provider: "elevenlabs", configId: row.elevenlabs_config };
+  if (row.gemini_config != null) return { provider: "gemini", configId: row.gemini_config };
+  return null;
+}
+var RealtimeAgentDefinitionsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async list() {
+    return unwrap2(
+      await this.client.get("realtime-agent-definitions/", {
+        query: { limit: 1e3 }
+      })
+    );
+  }
+  /** 404 = no row = voice was never set up for the agent → null. Other errors propagate. */
+  async getByAgentId(agentId) {
+    try {
+      return await this.client.get(`realtime-agent-definitions/${agentId}/`);
+    } catch (error2) {
+      if (error2 instanceof ApiError && error2.status === 404) return null;
+      throw error2;
+    }
+  }
+  async create(request) {
+    return this.client.post("realtime-agent-definitions/", { body: request });
+  }
+  async partialUpdate(agentId, request) {
+    return this.client.patch(`realtime-agent-definitions/${agentId}/`, { body: request });
+  }
+  /** Deletes the row for good (it has no recycle bin). */
+  async delete(agentId) {
+    await this.client.delete(`realtime-agent-definitions/${agentId}/`);
+  }
+};
+
+// src/api/realtime-channels.ts
+var TWILIO_ACCOUNT_SID_PATTERN = /^AC[0-9a-fA-F]{32}$/;
+var RealtimeChannelsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async listChannels() {
+    return unwrap2(
+      await this.client.get("realtime-channels/", { query: { limit: 1e3 } })
+    );
+  }
+  async getChannel(id) {
+    return this.client.get(`realtime-channels/${id}/`);
+  }
+  async createChannel(request) {
+    return this.client.post("realtime-channels/", { body: request });
+  }
+  async updateChannel(id, request) {
+    return this.client.patch(`realtime-channels/${id}/`, { body: request });
+  }
+  /** Moves the channel to the recycle bin (RecycleBinActionsMixin). */
+  async deleteChannel(id) {
+    await this.client.delete(`realtime-channels/${id}/`);
+  }
+  /** The backend upserts by `channel`: an existing Twilio row of that channel is updated (200). */
+  async createTwilioChannel(request) {
+    return this.client.post("twilio-channels/", { body: request });
+  }
+  async updateTwilioChannel(channelId, request) {
+    return this.client.patch(`twilio-channels/${channelId}/`, { body: request });
+  }
+  /** The incoming numbers of the Twilio account `sid`, read with the auth token held by the given secret. */
+  async getPhoneNumbers(sid, authTokenSecretId) {
+    const response = await this.client.get("twilio-channels/phone-numbers/", {
+      query: { sid, auth_token_secret_id: authTokenSecretId }
+    });
+    return response.results;
+  }
+  /** Point the Twilio number's VoiceUrl at the channel (needs a non-localhost webhook trigger). */
+  async configureWebhook(phoneSid, channelToken) {
+    return this.client.post("twilio/configure-webhook/", { body: { phone_sid: phoneSid, channel_token: channelToken } });
+  }
+};
+
+// src/api/voice-history.ts
+var SESSION_ITEM_PAGE_SIZE = 1e3;
+var VoiceHistoryApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async listChats(options) {
+    return this.client.get("realtime-agent-chats/", {
+      query: {
+        limit: options.limit,
+        offset: options.offset,
+        ...options.agentId !== void 0 ? { rt_agent_definition: options.agentId } : {}
+      }
+    });
+  }
+  async getChat(id) {
+    return this.client.get(`realtime-agent-chats/${id}/`);
+  }
+  /** Deletes the chat for good, its recordings with it (no recycle bin). */
+  async deleteChat(id) {
+    await this.client.delete(`realtime-agent-chats/${id}/`);
+  }
+  async listRecordings(chatId) {
+    const page = await this.client.get("conversation-recordings/", {
+      query: { rt_agent_chat: chatId, limit: 100 }
+    });
+    return page.results;
+  }
+  /** One page of the org's session items, in backend order — the endpoint offers no filter. */
+  async listSessionItems(limit, offset) {
+    return this.client.get("realtime-session-items/", { query: { limit, offset } });
+  }
+};
+
+// src/tools/voice-agent.tools.ts
+var DEFAULT_VOICE = "alloy";
+var LANGUAGE_PATTERN = /^[a-z]{2}$/;
+var MAX_SESSION_ITEM_PAGES = 10;
+var EVENT_STRING_LIMIT = 500;
+function registerVoiceAgentTools(server, context) {
+  const agents = new AgentDefinitionsApi(context.client);
+  const voiceSettings = new RealtimeAgentDefinitionsApi(context.client);
+  const voiceConfigs = new VoiceConfigsApi(context.client);
+  const channels = new RealtimeChannelsApi(context.client);
+  const history = new VoiceHistoryApi(context.client);
+  const resolveAgent = (ref) => resolveNamedRef(ref, "Agent", () => agents.list(), (agent) => agent.id, (agent) => agent.name);
+  async function loadConfigNames() {
+    const [openai, elevenlabs, gemini] = await Promise.all(VOICE_PROVIDERS.map((provider) => voiceConfigs.listConfigs(provider)));
+    const names = (rows) => new Map((rows ?? []).map((row) => [row.id, row.custom_name]));
+    return { openai: names(openai), elevenlabs: names(elevenlabs), gemini: names(gemini) };
+  }
+  async function loadAgentNames() {
+    return new Map((await agents.list()).map((agent) => [agent.id, agent.name]));
+  }
+  server.registerTool(
+    "list_voice_agents",
+    {
+      title: "List agents with voice settings",
+      description: "List the agents that have voice settings: provider + voice config, voice, wake / stop word, language, transcription hint. enabled = a provider config is set (the agent appears in the Chats page and can take calls). Pass agent to read one agent's settings ({enabled: false, configured: false} when it has none).",
+      inputSchema: {
+        agent: idOrName.optional().describe("Only this agent: backend id or exact name.")
+      }
+    },
+    async ({ agent }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const [agentNames, configNames] = await Promise.all([loadAgentNames(), loadConfigNames()]);
+      if (agent !== void 0) {
+        const agentId = await resolveAgent(agent);
+        const row = await voiceSettings.getByAgentId(agentId);
+        if (row === null) {
+          return { agent: { id: agentId, name: agentNames.get(agentId) ?? null }, configured: false, enabled: false };
+        }
+        return { configured: true, ...describeVoiceSettings(row, agentNames, configNames) };
+      }
+      return (await voiceSettings.list()).map((row) => describeVoiceSettings(row, agentNames, configNames));
+    })
+  );
+  server.registerTool(
+    "set_agent_voice",
+    {
+      title: "Set an agent's voice settings",
+      description: "Give an agent a voice, or change its voice settings (creates them on first use, else PATCHes only what you pass). provider + config pick the voice config (list_voice_configs); provider: null switches voice off but keeps the settings and chat history. OpenAI / Gemini voices must be one of the provider's voices (list_voice_configs include_voices); an ElevenLabs voice is a free-form voice id. The agent's instructions, LLM and surfaces are its own (update_agent).",
+      inputSchema: {
+        agent: idOrName.describe("The agent: backend id or exact name."),
+        provider: voiceProviderSchema.nullable().optional().describe("Provider of the voice config; null switches voice off. Omit to keep the current one."),
+        config: idOrName.optional().describe("The provider's voice config: id or exact name. Required with provider."),
+        voice: external_exports.string().max(100).optional().describe('Voice id, e.g. "alloy" (OpenAI), "Puck" (Gemini).'),
+        wake_word: external_exports.string().max(255).nullable().optional().describe("Word that wakes the agent (default: its name)."),
+        stop_prompt: external_exports.string().max(255).nullable().optional().describe('Word that ends the conversation (default "stop").'),
+        language: external_exports.string().regex(LANGUAGE_PATTERN, 'language must be a lowercase ISO-639-1 code, e.g. "en"').nullable().optional().describe('ISO-639-1 code the agent expects, e.g. "en"; null clears it.'),
+        voice_recognition_prompt: external_exports.string().nullable().optional().describe('Hint that guides transcription, e.g. "Expect product names like Nimbus".')
+      }
+    },
+    async ({ agent, provider, config: config2, ...fields }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (provider == null && config2 !== void 0) throw new Error("config needs provider (openai, elevenlabs or gemini).");
+      if (provider != null && config2 === void 0) throw new Error(`Pass config: the ${provider} voice config to use.`);
+      const agentId = await resolveAgent(agent);
+      const existing = await voiceSettings.getByAgentId(agentId);
+      const previousProvider = existing ? activeVoiceProvider(existing)?.provider ?? null : null;
+      const request = pickDefined(fields);
+      if (provider !== void 0) {
+        let configId = null;
+        if (provider !== null && config2 !== void 0) {
+          configId = await resolveNamedRef(
+            config2,
+            `${provider} voice config`,
+            () => voiceConfigs.listConfigs(provider),
+            (row) => row.id,
+            (row) => row.custom_name
+          );
+        }
+        request.openai_config = provider === "openai" ? configId : null;
+        request.elevenlabs_config = provider === "elevenlabs" ? configId : null;
+        request.gemini_config = provider === "gemini" ? configId : null;
+      }
+      const nextProvider = provider !== void 0 ? provider : previousProvider;
+      if (fields.voice !== void 0 || provider !== void 0) {
+        await assertVoiceFits(voiceConfigs, nextProvider, previousProvider, fields.voice, existing?.voice ?? DEFAULT_VOICE);
+      }
+      if (existing === null && provider === null) {
+        return {
+          agent: { id: agentId },
+          configured: false,
+          enabled: false,
+          note: "The agent has no voice settings \u2014 there was nothing to switch off."
+        };
+      }
+      if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass provider + config or a setting.");
+      const saved = existing === null ? await voiceSettings.create({ agent_definition: agentId, ...request }) : await voiceSettings.partialUpdate(agentId, request);
+      const [agentNames, configNames] = await Promise.all([loadAgentNames(), loadConfigNames()]);
+      const settings = describeVoiceSettings(saved, agentNames, configNames);
+      return {
+        ...existing === null ? { created: true } : {},
+        voice_settings: settings,
+        next: settings.enabled ? "Talk to it in the EpicStaff Chats page, or route a phone number to it with create_voice_channel." : "Voice is off: pick provider + config to switch it on."
+      };
+    })
+  );
+  server.registerTool(
+    "delete_agent_voice",
+    {
+      title: "Delete an agent's voice settings",
+      description: "Delete an agent's voice settings FOR GOOD (no recycle bin). Its voice chats are no longer listed (they are scoped through these settings) and voice channels routed to it lose their destination. To only switch voice off, use set_agent_voice(provider: null).",
+      inputSchema: {
+        agent: idOrName.describe("The agent: backend id or exact name.")
+      }
+    },
+    async ({ agent }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const agentId = await resolveAgent(agent);
+      if (await voiceSettings.getByAgentId(agentId) === null) {
+        throw new Error(`Agent ${agentId} has no voice settings \u2014 nothing to delete.`);
+      }
+      const routedChannels = (await channels.listChannels()).filter(
+        (channel) => channel.realtime_agent_definition === agentId
+      );
+      await voiceSettings.delete(agentId);
+      return {
+        deleted: { agent: agentId },
+        ...routedChannels.length > 0 ? {
+          channels_without_destination: routedChannels.map((channel) => ({ id: channel.id, name: channel.name })),
+          next: "Point those channels at another agent with update_voice_channel(agent: \u2026), or delete them."
+        } : {}
+      };
+    })
+  );
+  server.registerTool(
+    "list_voice_chats",
+    {
+      title: "List voice chats",
+      description: "List voice conversations (Chats page sessions and phone calls) of the org, or of one agent: when they started and ended, why they ended, the provider config and voice used. get_voice_chat shows one with its recordings and logged events.",
+      inputSchema: {
+        agent: idOrName.optional().describe("Only this agent's chats: backend id or exact name."),
+        limit: external_exports.number().int().min(1).max(100).default(20),
+        offset: external_exports.number().int().min(0).default(0)
+      }
+    },
+    async ({ agent, limit, offset }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const agentId = agent === void 0 ? void 0 : await resolveAgent(agent);
+      const [page, agentNames] = await Promise.all([
+        history.listChats({ ...agentId !== void 0 ? { agentId } : {}, limit, offset }),
+        loadAgentNames()
+      ]);
+      return { count: page.count, offset, chats: page.results.map((chat) => describeChat(chat, agentNames)) };
+    })
+  );
+  server.registerTool(
+    "get_voice_chat",
+    {
+      title: "Get a voice chat",
+      description: "One voice conversation: timing, end reason, settings snapshot, its call recordings (inbound = caller, outbound = agent; file URL, duration, size) and \u2014 with include_events \u2014 the provider events the realtime service logged for it (transcripts, tool calls; audio is redacted unless the deployment keeps it, long strings are cut). Events are found by scanning the org's event log, so include_events is slower.",
+      inputSchema: {
+        chat: external_exports.number().int().describe("Chat id (list_voice_chats)."),
+        include_events: external_exports.boolean().default(false).describe("Also return the logged provider events of the chat."),
+        event_limit: external_exports.number().int().min(1).max(500).default(100).describe("Max events returned (oldest first).")
+      }
+    },
+    async ({ chat, include_events, event_limit }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const [row, recordings, agentNames] = await Promise.all([
+        history.getChat(chat),
+        history.listRecordings(chat),
+        loadAgentNames()
+      ]);
+      const result = {
+        chat: describeChat(row, agentNames),
+        recordings: recordings.map((recording) => ({
+          id: recording.id,
+          recording_type: recording.recording_type,
+          audio_format: recording.audio_format,
+          duration_seconds: recording.duration_seconds,
+          file_size: recording.file_size,
+          created_at: recording.created_at,
+          file: recording.file
+        }))
+      };
+      if (include_events) {
+        const scan = await collectSessionItems(history, row.connection_key);
+        const events = scan.items.sort((left, right) => left.id - right.id);
+        result.events = events.slice(0, event_limit).map((item) => ({
+          id: item.id,
+          created_at: item.created_at,
+          type: eventType(item.data),
+          data: truncateStrings(item.data)
+        }));
+        result.events_total = events.length;
+        if (!scan.complete) {
+          result.events_note = `Scanned the first ${scan.scanned} logged events of the organization; the chat may have more.`;
+        }
+      }
+      return result;
+    })
+  );
+  server.registerTool(
+    "delete_voice_chat",
+    {
+      title: "Delete a voice chat",
+      description: "Delete one voice conversation and its call recordings FOR GOOD (no recycle bin).",
+      inputSchema: {
+        chat: external_exports.number().int().describe("Chat id (list_voice_chats).")
+      }
+    },
+    async ({ chat }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const row = await history.getChat(chat);
+      await history.deleteChat(chat);
+      return { deleted: { id: row.id, agent: row.rt_agent_definition, created_at: row.created_at } };
+    })
+  );
+}
+function describeVoiceSettings(row, agentNames, configNames) {
+  const active = activeVoiceProvider(row);
+  return {
+    agent: { id: row.agent_definition, name: agentNames.get(row.agent_definition) ?? null },
+    enabled: active !== null,
+    provider: active?.provider ?? null,
+    config: active ? { id: active.configId, name: configNames[active.provider].get(active.configId) ?? null } : null,
+    voice: row.voice,
+    wake_word: row.wake_word,
+    stop_prompt: row.stop_prompt,
+    language: row.language,
+    voice_recognition_prompt: row.voice_recognition_prompt
+  };
+}
+async function assertVoiceFits(voiceConfigs, provider, previousProvider, requestedVoice, currentVoice) {
+  if (provider === null) return;
+  if (provider === "elevenlabs") {
+    if (requestedVoice === void 0 && previousProvider !== "elevenlabs") {
+      throw new Error("ElevenLabs takes a free-form voice id from your ElevenLabs voice library \u2014 pass voice.");
+    }
+    return;
+  }
+  const offered = (await voiceConfigs.getVoices())[provider];
+  if (offered === void 0 || offered.length === 0) return;
+  const voice = requestedVoice ?? currentVoice;
+  if (!offered.some((entry) => entry.id === voice)) {
+    throw new Error(
+      `${provider} has no voice "${voice}"${requestedVoice === void 0 ? " (the current voice)" : ""}. Pass voice: one of ${offered.map((entry) => entry.id).join(", ")}.`
+    );
+  }
+}
+function describeChat(chat, agentNames) {
+  const active = activeVoiceProvider(chat);
+  return {
+    id: chat.id,
+    agent: chat.rt_agent_definition === null ? null : { id: chat.rt_agent_definition, name: agentNames.get(chat.rt_agent_definition) ?? null },
+    provider: active?.provider ?? null,
+    config_id: active?.configId ?? null,
+    voice: chat.voice,
+    language: chat.language,
+    created_at: chat.created_at,
+    ended_at: chat.ended_at,
+    duration_seconds: chat.duration_seconds,
+    end_reason: chat.end_reason || null
+  };
+}
+async function collectSessionItems(history, connectionKey) {
+  const items = [];
+  let scanned = 0;
+  for (let page = 0; page < MAX_SESSION_ITEM_PAGES; page += 1) {
+    const response = await history.listSessionItems(SESSION_ITEM_PAGE_SIZE, scanned);
+    scanned += response.results.length;
+    items.push(...response.results.filter((item) => item.connection_key === connectionKey));
+    if (response.results.length === 0 || scanned >= response.count) return { items, scanned, complete: true };
+  }
+  return { items, scanned, complete: false };
+}
+function eventType(data) {
+  if (typeof data === "object" && data !== null && "type" in data) {
+    const type = data.type;
+    return typeof type === "string" ? type : null;
+  }
+  return null;
+}
+function truncateStrings(value) {
+  if (typeof value === "string") {
+    return value.length > EVENT_STRING_LIMIT ? `${value.slice(0, EVENT_STRING_LIMIT)}\u2026 (${value.length} chars)` : value;
+  }
+  if (Array.isArray(value)) return value.map(truncateStrings);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, truncateStrings(entry)]));
+  }
+  return value;
+}
+
+// src/tools/voice-channel.tools.ts
+var accountSidSchema = external_exports.string().regex(TWILIO_ACCOUNT_SID_PATTERN, 'a Twilio account SID is "AC" followed by 32 hex characters').describe('Twilio account SID ("AC\u2026", from the Twilio console).');
+var authTokenEnvSchema = credentialEnvName(
+  'Environment variable of the MCP server holding the Twilio auth token, stored as the org Secret "es-mcp:<ENV>" (reused while it holds that value). The token never appears in a tool call.'
+);
+var authTokenSecretSchema = idOrName.describe("An existing org Secret (list_secrets) holding the Twilio auth token: id or name.");
+var phoneNumberSchema = external_exports.string().min(1).max(32).describe('Twilio phone number of the account in E.164 form, e.g. "+15551234567" (list_twilio_phone_numbers).');
+var webhookTriggerSchema = external_exports.number().int().describe(
+  "Id of an existing public (ngrok) webhook trigger Twilio calls \u2014 a localhost trigger is refused. Without one, Twilio cannot reach the channel."
+);
+var AUTH_TOKEN_INPUTS = { env: "auth_token_env", secret: "auth_token_secret" };
+function registerVoiceChannelTools(server, context) {
+  const channels = new RealtimeChannelsApi(context.client);
+  const agents = new AgentDefinitionsApi(context.client);
+  const voiceSettings = new RealtimeAgentDefinitionsApi(context.client);
+  const secrets = () => new SecretsApi(context.client, context.auth);
+  const resolveChannel = (ref) => resolveNamedRef(ref, "Voice channel", () => channels.listChannels(), (channel) => channel.id, (channel) => channel.name);
+  async function loadAgentNames() {
+    return new Map((await agents.list()).map((agent) => [agent.id, agent.name]));
+  }
+  async function resolveVoiceAgent(ref, warnings) {
+    const agentId = await resolveNamedRef(ref, "Agent", () => agents.list(), (agent) => agent.id, (agent) => agent.name);
+    const settings = await voiceSettings.getByAgentId(agentId);
+    if (settings === null) {
+      throw new Error(`Agent ${JSON.stringify(ref)} has no voice settings \u2014 give it a voice with set_agent_voice first.`);
+    }
+    if (activeVoiceProvider(settings) === null) {
+      warnings.push("The agent's voice is switched off (no provider config): calls fail until set_agent_voice sets one.");
+    }
+    return agentId;
+  }
+  async function configureWebhook(channel, accountSid, authTokenSecretId, phoneNumber, warnings) {
+    let numbers;
+    try {
+      numbers = await channels.getPhoneNumbers(accountSid, authTokenSecretId);
+    } catch (error2) {
+      warnings.push(`Could not read the Twilio account's numbers to configure the webhook: ${errorText(error2)}`);
+      return { configured: false };
+    }
+    const number3 = numbers.find((entry) => entry.phone_number === phoneNumber);
+    if (number3 === void 0) {
+      warnings.push(
+        `The Twilio account has no number ${phoneNumber}, so its webhook was not configured. Numbers: ${numbers.map((entry) => entry.phone_number).join(", ") || "(none)"}.`
+      );
+      return { configured: false };
+    }
+    try {
+      const { webhook_url } = await channels.configureWebhook(number3.sid, channel.token);
+      return { configured: true, webhook_url: redactChannelToken(webhook_url) };
+    } catch (error2) {
+      warnings.push(`The channel is saved, but configuring the Twilio webhook failed (check the tunnel): ${errorText(error2)}`);
+      return { configured: false };
+    }
+  }
+  server.registerTool(
+    "list_voice_channels",
+    {
+      title: "List voice channels",
+      description: "List the org's voice channels (phone numbers routed to an agent's voice): destination agent, enabled, Twilio account SID, phone number, whether an auth token is set, the webhook trigger and its public URL.",
+      inputSchema: {
+        agent: idOrName.optional().describe("Only channels routed to this agent: backend id or exact name.")
+      }
+    },
+    async ({ agent }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const [rows, agentNames] = await Promise.all([channels.listChannels(), loadAgentNames()]);
+      const agentId = agent === void 0 ? void 0 : await resolveNamedRef(agent, "Agent", async () => [...agentNames].map(([id, name]) => ({ id, name })), (row) => row.id, (row) => row.name);
+      return rows.filter((channel) => agentId === void 0 || channel.realtime_agent_definition === agentId).map((channel) => describeChannel(channel, agentNames));
+    })
+  );
+  server.registerTool(
+    "create_voice_channel",
+    {
+      title: "Create a voice channel",
+      description: "Route a Twilio phone number to an agent's voice (the agent needs voice settings \u2014 set_agent_voice). Saves the channel, then its Twilio settings, then (configure_webhook, default on) points the number's webhook at the channel when a phone_number and a public webhook_trigger are given. The auth token comes from auth_token_env (env var of the MCP server) or auth_token_secret \u2014 never inline.",
+      inputSchema: {
+        name: external_exports.string().min(1).max(250).describe("Channel name."),
+        agent: idOrName.optional().describe("Agent whose voice answers the calls: backend id or exact name."),
+        enabled: external_exports.boolean().default(true).describe("Whether the channel takes calls."),
+        account_sid: accountSidSchema,
+        auth_token_env: authTokenEnvSchema.optional(),
+        auth_token_secret: authTokenSecretSchema.optional(),
+        phone_number: phoneNumberSchema.optional(),
+        webhook_trigger: webhookTriggerSchema.optional(),
+        configure_webhook: external_exports.boolean().default(true).describe("Point the Twilio number's webhook at this channel (needs phone_number + webhook_trigger).")
+      }
+    },
+    async ({ name, agent, enabled, account_sid, auth_token_env, auth_token_secret, phone_number, webhook_trigger, configure_webhook }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const warnings = [];
+      const agentId = agent === void 0 ? null : await resolveVoiceAgent(agent, warnings);
+      const authTokenSecretId = await resolveCredential(secrets, auth_token_env, auth_token_secret, AUTH_TOKEN_INPUTS);
+      if (authTokenSecretId == null) throw new Error("Pass auth_token_env or auth_token_secret \u2014 Twilio needs the auth token.");
+      const channel = await channels.createChannel({
+        name,
+        channel_type: "twilio",
+        realtime_agent_definition: agentId,
+        is_enabled: enabled
+      });
+      try {
+        await channels.createTwilioChannel({
+          channel: channel.id,
+          account_sid,
+          auth_token_secret_id: authTokenSecretId,
+          phone_number: phone_number ?? null,
+          webhook_trigger: webhook_trigger ?? null
+        });
+      } catch (error2) {
+        throw new Error(
+          `Voice channel "${name}" was created (id ${channel.id}) but its Twilio settings were refused: ${errorText(error2)} Fix them with update_voice_channel(channel: ${channel.id}, \u2026) or remove it with delete_voice_channel.`
+        );
+      }
+      const webhook = configure_webhook && phone_number !== void 0 && webhook_trigger !== void 0 ? await configureWebhook(channel, account_sid, authTokenSecretId, phone_number, warnings) : { configured: false };
+      if (webhook_trigger === void 0) warnings.push("No webhook_trigger: Twilio cannot reach this channel until one is set.");
+      const [saved, agentNames] = await Promise.all([channels.getChannel(channel.id), loadAgentNames()]);
+      return {
+        channel: describeChannel(saved, agentNames),
+        webhook,
+        ...warnings.length > 0 ? { warnings } : {}
+      };
+    })
+  );
+  server.registerTool(
+    "update_voice_channel",
+    {
+      title: "Update a voice channel",
+      description: "Change a voice channel (only what you pass): name, destination agent (null = none), enabled, and its Twilio settings. When a Twilio setting changes, the number's webhook is pointed at the channel again (configure_webhook, default on in that case).",
+      inputSchema: {
+        channel: idOrName.describe("The channel: backend id or exact name (list_voice_channels)."),
+        name: external_exports.string().min(1).max(250).optional(),
+        agent: idOrName.nullable().optional().describe("Agent whose voice answers the calls; null removes the destination."),
+        enabled: external_exports.boolean().optional(),
+        account_sid: accountSidSchema.optional(),
+        auth_token_env: authTokenEnvSchema.optional(),
+        auth_token_secret: authTokenSecretSchema.optional(),
+        phone_number: phoneNumberSchema.nullable().optional(),
+        webhook_trigger: webhookTriggerSchema.nullable().optional(),
+        configure_webhook: external_exports.boolean().optional().describe("Point the number's webhook at the channel. Default: on when a Twilio setting changes.")
+      }
+    },
+    async ({ channel, name, agent, enabled, account_sid, auth_token_env, auth_token_secret, phone_number, webhook_trigger, configure_webhook }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const warnings = [];
+      const channelId = await resolveChannel(channel);
+      const current = await channels.getChannel(channelId);
+      const channelRequest = {
+        ...name !== void 0 ? { name } : {},
+        ...enabled !== void 0 ? { is_enabled: enabled } : {},
+        ...agent !== void 0 ? { realtime_agent_definition: agent === null ? null : await resolveVoiceAgent(agent, warnings) } : {}
+      };
+      const authTokenSecretId = await resolveCredential(secrets, auth_token_env, auth_token_secret, AUTH_TOKEN_INPUTS);
+      const twilioRequest = {
+        ...account_sid !== void 0 ? { account_sid } : {},
+        ...authTokenSecretId != null ? { auth_token_secret_id: authTokenSecretId } : {},
+        ...phone_number !== void 0 ? { phone_number } : {},
+        ...webhook_trigger !== void 0 ? { webhook_trigger } : {}
+      };
+      const twilioChanged = Object.keys(twilioRequest).length > 0;
+      if (Object.keys(channelRequest).length === 0 && !twilioChanged && configure_webhook !== true) {
+        throw new Error("Nothing to change \u2014 pass at least one field (or configure_webhook: true to re-point the number).");
+      }
+      let twilioCreate;
+      if (twilioChanged && !current.twilio) {
+        if (account_sid === void 0 || authTokenSecretId == null) {
+          throw new Error("The channel has no Twilio settings yet: pass account_sid and auth_token_env / auth_token_secret.");
+        }
+        twilioCreate = {
+          channel: channelId,
+          account_sid,
+          auth_token_secret_id: authTokenSecretId,
+          phone_number: phone_number ?? null,
+          webhook_trigger: webhook_trigger ?? null
+        };
+      }
+      if (Object.keys(channelRequest).length > 0) await channels.updateChannel(channelId, channelRequest);
+      if (twilioCreate) await channels.createTwilioChannel(twilioCreate);
+      else if (twilioChanged) await channels.updateTwilioChannel(channelId, twilioRequest);
+      const saved = await channels.getChannel(channelId);
+      const twilio = saved.twilio;
+      let webhook = { configured: false };
+      if (configure_webhook ?? twilioChanged) {
+        if (!twilio) {
+          warnings.push("The webhook was not configured: the channel has no Twilio settings.");
+        } else if (twilio.phone_number && twilio.webhook_trigger && twilio.auth_token_secret_id != null) {
+          webhook = await configureWebhook(saved, twilio.account_sid, twilio.auth_token_secret_id, twilio.phone_number, warnings);
+        } else {
+          warnings.push("The webhook was not configured: the channel needs a phone number, a webhook trigger and an auth token.");
+        }
+      }
+      return {
+        channel: describeChannel(saved, await loadAgentNames()),
+        webhook,
+        ...warnings.length > 0 ? { warnings } : {}
+      };
+    })
+  );
+  server.registerTool(
+    "delete_voice_channel",
+    {
+      title: "Delete a voice channel",
+      description: 'Delete a voice channel: it moves to the recycle bin (restorable with restore_from_recycle_bin kind "realtime_channel") and stops taking calls. The Twilio number keeps pointing at it until reconfigured.',
+      inputSchema: {
+        channel: idOrName.describe("The channel: backend id or exact name.")
+      }
+    },
+    async ({ channel }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const channelId = await resolveChannel(channel);
+      const current = await channels.getChannel(channelId);
+      await channels.deleteChannel(channelId);
+      return { deleted: { id: channelId, name: current.name }, next: recycleBinHint("realtime_channel", channelId) };
+    })
+  );
+  server.registerTool(
+    "list_twilio_phone_numbers",
+    {
+      title: "List Twilio phone numbers",
+      description: "List the incoming phone numbers of a Twilio account (sid, number, friendly name, where its voice webhook points) \u2014 of an existing channel's account, or of account_sid with its auth token (auth_token_env stores the token as an org secret first).",
+      inputSchema: {
+        channel: idOrName.optional().describe("Use this channel's Twilio account: backend id or exact name."),
+        account_sid: accountSidSchema.optional(),
+        auth_token_env: authTokenEnvSchema.optional(),
+        auth_token_secret: authTokenSecretSchema.optional()
+      }
+    },
+    async ({ channel, account_sid, auth_token_env, auth_token_secret }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      let accountSid;
+      let authTokenSecretId;
+      if (channel !== void 0) {
+        if (account_sid !== void 0 || auth_token_env !== void 0 || auth_token_secret !== void 0) {
+          throw new Error("Pass either channel or account_sid + auth token, not both.");
+        }
+        const twilio = (await channels.getChannel(await resolveChannel(channel))).twilio;
+        if (!twilio) throw new Error("That channel has no Twilio settings.");
+        accountSid = twilio.account_sid;
+        authTokenSecretId = twilio.auth_token_secret_id;
+      } else {
+        if (account_sid === void 0) throw new Error("Pass channel, or account_sid with auth_token_env / auth_token_secret.");
+        accountSid = account_sid;
+        authTokenSecretId = await resolveCredential(secrets, auth_token_env, auth_token_secret, AUTH_TOKEN_INPUTS);
+      }
+      if (authTokenSecretId == null) throw new Error("No Twilio auth token: pass auth_token_env or auth_token_secret.");
+      const [numbers, orgChannels] = await Promise.all([
+        channels.getPhoneNumbers(accountSid, authTokenSecretId),
+        channels.listChannels()
+      ]);
+      const channelByToken = new Map(orgChannels.map((row) => [row.token.toLowerCase(), row]));
+      return {
+        account_sid: accountSid,
+        numbers: numbers.map((number3) => {
+          const routed = number3.voice_url ? channelByToken.get(channelTokenOf(number3.voice_url) ?? "") : void 0;
+          return {
+            sid: number3.sid,
+            phone_number: number3.phone_number,
+            friendly_name: number3.friendly_name,
+            voice_url: number3.voice_url === null ? null : redactChannelToken(number3.voice_url),
+            routed_to_channel: routed ? { id: routed.id, name: routed.name } : null
+          };
+        })
+      };
+    })
+  );
+}
+function describeChannel(channel, agentNames) {
+  const twilio = channel.twilio;
+  const trigger = twilio?.webhook_trigger ?? null;
+  return {
+    id: channel.id,
+    name: channel.name,
+    channel_type: channel.channel_type,
+    enabled: channel.is_enabled,
+    agent: channel.realtime_agent_definition === null ? null : { id: channel.realtime_agent_definition, name: agentNames.get(channel.realtime_agent_definition) ?? null },
+    ...channel.realtime_agent !== null ? {
+      legacy_realtime_agent: channel.realtime_agent,
+      legacy_note: "Still routed to a removed staff agent: set agent (update_voice_channel) to repair it."
+    } : {},
+    twilio: twilio ? {
+      account_sid: twilio.account_sid,
+      phone_number: twilio.phone_number,
+      has_auth_token: twilio.auth_token_secret_id != null,
+      webhook_trigger: trigger ? {
+        id: trigger.id ?? null,
+        path: trigger.path,
+        provider_type: trigger.provider_type,
+        live_url: trigger.live_url ?? null
+      } : null
+    } : null,
+    created_by: describeUser(channel.created_by),
+    created_at: channel.created_at,
+    last_edited_by: describeUser(channel.last_edited_by),
+    last_edited_at: channel.last_edited_at ?? null
+  };
+}
+var VOICE_WEBHOOK_TOKEN = /\/voice\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+function channelTokenOf(url) {
+  return VOICE_WEBHOOK_TOKEN.exec(url)?.[1]?.toLowerCase();
+}
+function redactChannelToken(url) {
+  return url.replace(VOICE_WEBHOOK_TOKEN, "/voice/<channel token>");
+}
+function errorText(error2) {
+  if (error2 instanceof ApiError) {
+    return error2.validationErrors?.length ? error2.message : `${error2.message}${error2.bodyExcerpt ? ` \u2014 ${error2.bodyExcerpt}` : ""}`;
+  }
+  return error2 instanceof Error ? error2.message : String(error2);
+}
+
 // src/tools/registry.ts
 function registerAllTools(server, context) {
   registerAuthOrgTools(server, context);
@@ -38039,6 +41338,15 @@ function registerAllTools(server, context) {
   registerUiTools(server, context);
   registerKnowledgeTools(server, context);
   registerCatalogTools(server, context);
+  registerToolCatalogTools(server, context);
+  registerVenvTools(server, context);
+  registerConfigTools(server, context);
+  registerOrgDataTools(server, context);
+  registerFlowHistoryTools(server, context);
+  registerRecycleBinTools(server, context);
+  registerVoiceConfigTools(server, context);
+  registerVoiceAgentTools(server, context);
+  registerVoiceChannelTools(server, context);
 }
 
 // src/index.ts
@@ -38058,12 +41366,17 @@ var EPICSTAFF_INSTRUCTIONS = [
   "Invariants: agent nodes need at least one task (tasks:); no parallel fan-out \u2014 one active path,",
   "branch with a decision-table (conditional edges were removed from EpicStaff); never use node types",
   '"llm", "code-agent" or "crew" (removed from EpicStaff \u2014 use agent/task nodes). Python `libraries`',
-  "are not installed any more: code runs in a venv selected in the editor. A key-value node writes its read entries",
+  'are not installed any more: code runs in a virtual environment named with `venv: "<name>"` (list_venvs /',
+  "create_venv). A key-value node writes its read entries",
   "to their own state paths, not output_variable_path. Credentials come from env vars",
   "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source;",
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
   "llm_configs follow the backend bounds: temperature 0\u20132, max_tokens >= 500.",
   "Call describe_node_types for the full node catalog (fields + runtime caveats).",
+  "Deleted flows, agents, surfaces, tools, collections, tables and secrets go to the recycle bin",
+  "(list_recycle_bin / restore_from_recycle_bin); snapshot a flow before risky edits (create_graph_version).",
+  "Voice is not flow source: an agent gets a voice with set_agent_voice (a voice config from",
+  "create_voice_config) and a phone number with create_voice_channel (Twilio) \u2014 see the es-voice skill.",
   "",
   "Build flows with the es-* skills (front door: es-deliver \u2192 es-write-flow \u2192 build \u2192 push \u2192 test)."
 ].join("\n");
@@ -38085,7 +41398,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.5.0-dev.1"
+      version: "1.5.0-dev.3"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
