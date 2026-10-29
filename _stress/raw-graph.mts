@@ -10,7 +10,6 @@ for (const id of process.argv.slice(2).map(Number)) {
   }
   console.log('nodes:', JSON.stringify(idToName));
   console.log('EDGES raw:', JSON.stringify(g.edge_list ?? g.edges, null, 0));
-  console.log('CONDITIONAL raw:', JSON.stringify(g.conditional_edge_list ?? g.conditional_edges, null, 0));
   for (const d of g.decision_table_node_list ?? []) {
     console.log(`DT ${d.node_name}:`, JSON.stringify({ default_next_node: d.default_next_node, next_error_node: d.next_error_node, condition_groups: d.condition_groups }));
   }

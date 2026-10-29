@@ -71,7 +71,14 @@ class MockBackend {
     if (key === 'POST /api/auth/login/')
       return { status: 200, body: { access: MOCK_JWT }, setCookie: 'auth.refresh=r; HttpOnly; Path=/api/auth/' };
     if (key === 'POST /api/auth/refresh/') {
-      if (headers.get('Cookie') !== 'auth.refresh=r') return { status: 401, body: { detail: 'No refresh token.' } };
+      // An http server reads only `auth.refresh`, and only when it appears exactly once.
+      const refreshValues = (headers.get('Cookie') ?? '')
+        .split(';')
+        .map((chunk) => chunk.trim().split('='))
+        .filter(([name]) => name === 'auth.refresh');
+      if (refreshValues.length !== 1 || refreshValues[0]?.[1] !== 'r') {
+        return { status: 401, body: { detail: 'No refresh token.' } };
+      }
       return { status: 200, body: { access: MOCK_JWT } };
     }
     if (key === 'POST /api/profile/api-keys/')
@@ -231,11 +238,6 @@ class MockBackend {
       if (this.lastSavedDto?.id === graphId) this.lastSavedDto = { ...this.lastSavedDto, name, save_version: this.graphSaveVersion };
       return { status: 200, body: { id: graphId, name, save_version: this.graphSaveVersion } };
     }
-    if (key === 'POST /api/conditionaledges/') {
-      const edge = { ...(body as Record<string, unknown>), id: this.id() };
-      this.conditionalEdges.push(edge);
-      return { status: 201, body: edge };
-    }
     if (/^POST \/api\/graphs\/\d+\/save\/$/.test(key)) {
       const graphId = Number(path.split('/')[3]);
       if (this.deletedGraphs.has(graphId)) return { status: 404, body: { detail: 'Not found.' } };
@@ -249,7 +251,8 @@ class MockBackend {
   }
 
   lastSavedDto: Record<string, unknown> | null = null;
-  conditionalEdges: Array<Record<string, unknown>> = [];
+  /** The graph's node counter (`node_number_seq`). */
+  nodeNumberSeq = 0;
   takenGraphNames = new Set<string>();
   /** Remote graph names that differ from the fixture's (foreign graphs, editor renames). */
   graphNames = new Map<number, string>();
@@ -272,8 +275,10 @@ class MockBackend {
       save_version: this.graphSaveVersion,
       metadata: { nodes: [], connections: [] },
       edge_list: [],
-      conditional_edge_list: previous?.conditional_edge_list ?? [],
     };
+    // The server numbers this save's new nodes of numbered types consecutively from the graph's
+    // counter, ordered by their node_number_hint; the hint itself is never persisted.
+    const createdNumbered: Array<{ row: Record<string, unknown>; hint: number }> = [];
     const deleted = (payload.deleted ?? {}) as Record<string, number[]>;
     const deletedIds = new Set(Object.values(deleted).flat());
     const tempToId = new Map<string, number>();
@@ -301,8 +306,11 @@ class MockBackend {
       );
       const sent = Array.isArray(payload[listKey]) ? (payload[listKey] as Array<Record<string, unknown>>) : [];
       for (const item of sent) {
-        const { temp_id: tempId, ...rest } = item;
+        const { temp_id: tempId, node_number_hint: hint, ...rest } = item;
         const row: Record<string, unknown> = { ...rest, id: item.id ?? this.id() };
+        if (item.id == null && !['start_node_list', 'end_node_list', 'graph_note_list'].includes(listKey)) {
+          createdNumbered.push({ row, hint: typeof hint === 'number' ? hint : Number.MAX_SAFE_INTEGER });
+        }
         if (Array.isArray(row.tasks)) {
           row.tasks = (row.tasks as Array<Record<string, unknown>>).map(({ temp_id: _taskTemp, ...task }) => ({
             ...task,
@@ -333,6 +341,11 @@ class MockBackend {
       else keptEdges.push(row);
     }
     dto.edge_list = keptEdges;
+    for (const { row } of createdNumbered.sort((left, right) => left.hint - right.hint)) {
+      this.nodeNumberSeq += 1;
+      row.node_number = this.nodeNumberSeq;
+    }
+    dto.node_number_seq = this.nodeNumberSeq;
     return dto;
   }
 }
@@ -419,6 +432,11 @@ describe('push pipeline (mock backend)', () => {
     expect(typeof agentBody.llm_config).toBe('number');
     expect(agentBody.fcm_llm_config).toBe(55); // the existing config
     expect(typeof agentBody.default_surfaces[0]!.surface).toBe('number');
+    // The backend refuses the old single `instructions` text: it travels as one named document.
+    expect(agentCreate.body).not.toHaveProperty('instructions');
+    expect((agentCreate.body as { instruction_list: unknown }).instruction_list).toEqual([
+      { name: 'Instruction_1.md', content: 'You are a meticulous researcher. Verify claims across sources.' },
+    ]);
 
     // Surface knowledge got the collection id; python tool ref resolved.
     const surfaceCreate = backend.received.find((r) => r.path === '/api/surfaces/' && r.method === 'POST')!;
@@ -443,6 +461,20 @@ describe('push pipeline (mock backend)', () => {
     const agentList = saved.agent_node_list as Array<Record<string, unknown>>;
     expect(typeof agentList[0]!.agent_definition).toBe('number');
     expect((saved.edge_list as unknown[]).length).toBe(3);
+
+    // Node numbers: numbered types send an authoring-order hint; Start/End/Note send none; the
+    // badge never travels in metadata any more.
+    const nodeItems = Object.entries(saved)
+      .filter(([key, value]) => key.endsWith('_list') && key !== 'edge_list' && Array.isArray(value))
+      .flatMap(([key, value]) => (value as Array<Record<string, unknown>>).map((item) => ({ key, item })));
+    for (const { key, item } of nodeItems) {
+      expect((item.metadata as Record<string, unknown>).nodeNumber).toBeUndefined();
+      if (['start_node_list', 'end_node_list', 'graph_note_list'].includes(key)) {
+        expect(item).not.toHaveProperty('node_number_hint');
+      } else {
+        expect(typeof item.node_number_hint).toBe('number');
+      }
+    }
 
     // Lockfile: graph id + node ids recorded.
     const lock = (await readLock(flowDir))!;

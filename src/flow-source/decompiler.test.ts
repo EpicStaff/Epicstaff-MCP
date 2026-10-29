@@ -13,22 +13,21 @@ import { contentHash, readLock } from './lockfile.js';
 
 // ---------------------------------------------------------------------------
 // Fixture: a small remote graph — start → agent → task → end, one detached
-// python node with an illegal node name, one plain-edge chain and one
-// conditional edge out of the task node.
+// python node with an illegal node name and one plain-edge chain. The python
+// node holds the lowest #N badge (node_number), so authoring order is not the
+// wire-list order.
 // ---------------------------------------------------------------------------
 
-function nodeMetadata(x: number, y: number, nodeNumber: number): Record<string, unknown> {
+function nodeMetadata(x: number, y: number): Record<string, unknown> {
   return {
     position: { x, y },
     color: '#685fff',
     icon: 'ti ti-robot',
     size: { width: 320, height: 80 },
-    nodeNumber,
   };
 }
 
 const PYTHON_CODE = 'def main(x):\n    return x\n';
-const CONDITION_CODE = 'def main(research):\n    return "end"\n';
 
 function buildGraphDto(): GraphDto {
   return {
@@ -38,19 +37,25 @@ function buildGraphDto(): GraphDto {
     description: 'A flow pulled from the backend',
     save_version: 7,
     metadata: {},
+    created_by: null,
+    created_at: '2026-01-01T00:00:00Z',
+    last_edited_by: null,
+    last_edited_at: null,
+    node_number_seq: 3,
     start_node_list: [
       {
         id: 1,
         graph: 42,
         node_name: 'start',
         variables: { topic: 'ai' },
-        metadata: nodeMetadata(100, 200, 1),
+        metadata: nodeMetadata(100, 200),
       },
     ],
     agent_node_list: [
       {
         id: 2,
-        metadata: nodeMetadata(500, 200, 2),
+        node_number: 2,
+        metadata: nodeMetadata(500, 200),
         node_name: 'research',
         graph: 42,
         input_map: { query: 'variables.topic' },
@@ -75,7 +80,8 @@ function buildGraphDto(): GraphDto {
         id: 3,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
-        metadata: nodeMetadata(900, 200, 3),
+        node_number: 3,
+        metadata: nodeMetadata(900, 200),
         node_name: 'write',
         graph: 42,
         input_map: {},
@@ -93,7 +99,7 @@ function buildGraphDto(): GraphDto {
         id: 4,
         graph: 42,
         output_map: {},
-        metadata: nodeMetadata(1300, 200, 4),
+        metadata: nodeMetadata(1300, 200),
       },
     ],
     python_node_list: [
@@ -101,27 +107,18 @@ function buildGraphDto(): GraphDto {
         id: 5,
         node_name: 'My Node!',
         graph: 42,
-        python_code: { id: 51, libraries: [], code: PYTHON_CODE, entrypoint: 'main' },
+        node_number: 1,
+        python_code: { id: 51, code: PYTHON_CODE, entrypoint: 'main' },
         input_map: {},
         test_input: {},
         output_variable_path: null,
-        metadata: nodeMetadata(100, 600, 5),
+        metadata: nodeMetadata(100, 600),
       },
     ],
     edge_list: [
       { id: 11, start_node_id: 1, end_node_id: 2, graph: 42, metadata: {} },
       { id: 12, start_node_id: 2, end_node_id: 3, graph: 42, metadata: {} },
       { id: 13, start_node_id: 3, end_node_id: 4, graph: 42, metadata: {} },
-    ],
-    conditional_edge_list: [
-      {
-        id: 21,
-        graph: 42,
-        source_node_id: 3,
-        python_code: { id: 52, libraries: [], code: CONDITION_CODE, entrypoint: 'main' },
-        input_map: { research: 'variables.research' },
-        metadata: {},
-      },
     ],
     file_extractor_node_list: [],
     webhook_trigger_node_list: [],
@@ -151,9 +148,10 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
         expect(id).toBe(77);
         return {
           id: 77,
-          organization: 1,
+          org: 1,
           name: 'researcher',
           description: '',
+          instruction_list: [{ name: 'Instruction_1.md', content: 'Research things.' }],
           instructions: 'Research things.',
           llm_config: 55,
           fcm_llm_config: null,
@@ -165,6 +163,10 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
           cache: true,
           max_retry_limit: 2,
           default_temperature: 0,
+          created_at: null,
+          created_by: null,
+          last_edited_by: null,
+          last_edited_at: null,
         };
       },
     },
@@ -173,7 +175,7 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
         expect(id).toBe(88);
         return {
           id: 88,
-          organization: 1,
+          org: 1,
           name: 'web-tools',
           description: '',
           instructions: '',
@@ -183,6 +185,9 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
           mcp_tools: [],
           storage_items: [],
           knowledge: [],
+          created_by: null,
+          last_edited_by: null,
+          last_edited_at: null,
         };
       },
     },
@@ -223,8 +228,8 @@ describe('decompileFlow', () => {
     const flow = source!;
     expect(flow.meta.name).toBe('pulled-flow');
     expect(flow.meta.description).toBe('A flow pulled from the backend');
-    // Nodes come out in nodeNumber order under sanitized symbolic names.
-    expect(Object.keys(flow.flow.nodes)).toEqual(['start', 'research', 'write', 'end', 'My_Node']);
+    // Authoring order: start first, then the #N badge (node_number), then the unnumbered end.
+    expect(Object.keys(flow.flow.nodes)).toEqual(['start', 'My_Node', 'research', 'write', 'end']);
 
     const start = flow.flow.nodes['start']!;
     expect(start).toMatchObject({ type: 'start' });
@@ -251,23 +256,27 @@ describe('decompileFlow', () => {
     const pythonNode = flow.flow.nodes['My_Node']!;
     expect(pythonNode).toMatchObject({ type: 'python', code: PYTHON_CODE, entrypoint: 'main' });
 
-    // Three plain edges plus the conditional edge out of the task node.
-    expect(flow.flow.edges).toHaveLength(4);
-    expect(flow.flow.edges.slice(0, 3)).toEqual([
-      expect.objectContaining({ from: 'start', to: 'research' }),
-      expect.objectContaining({ from: 'research', to: 'write' }),
-      expect.objectContaining({ from: 'write', to: 'end' }),
+    expect(flow.flow.edges).toEqual([
+      { from: 'start', to: 'research' },
+      { from: 'research', to: 'write' },
+      { from: 'write', to: 'end' },
     ]);
-    const conditional = flow.flow.edges[3]!;
-    expect(conditional.from).toBe('write');
-    expect(conditional.condition).toMatchObject({
-      code: CONDITION_CODE,
-      entrypoint: 'main',
-      input_map: { research: 'variables.research' },
-    });
   });
 
-  it('seeds the lockfile with graph identity, node backend ids and conditional-edge hashes', async () => {
+  it('warns that a python node\'s virtual environment is kept, not written to flow source', async () => {
+    const dto = buildGraphDto();
+    dto.python_node_list[0]!.python_code.venv_id = 4;
+    const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
+
+    expect(result.warnings).toContain(
+      'flow.nodes.My_Node: the virtual environment (venv #4) is not representable in flow source — it is kept on the next push',
+    );
+    const { source, diagnostics } = await loadFlowDirectory(targetDir);
+    expect(diagnostics).toEqual([]);
+    expect(source!.flow.nodes['My_Node']).not.toHaveProperty('venv_id');
+  });
+
+  it('seeds the lockfile with graph identity and node backend ids', async () => {
     const dto = buildGraphDto();
     const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
 
@@ -286,22 +295,8 @@ describe('decompileFlow', () => {
     expect(lock.entities['nodes.end']).toEqual({ backendId: 4, contentHash: emptyHash });
     expect(lock.entities['nodes.My_Node']).toEqual({ backendId: 5, contentHash: emptyHash });
 
-    // Conditional-edge hash matches the body the pusher will build from the
-    // next compile (emit always sets libraries: [] on edge conditions).
-    expect(lock.entities['conditional_edges.write']).toEqual({
-      backendId: 21,
-      contentHash: contentHash({
-        graph: 42,
-        source_node_id: 3,
-        python_code: { code: CONDITION_CODE, entrypoint: 'main', libraries: [] },
-        input_map: { research: 'variables.research' },
-      }),
-    });
-
     // Shallow pull: no entity sections were materialized, so no entity entries.
-    const entityKeys = Object.keys(lock.entities).filter(
-      (key) => !key.startsWith('nodes.') && !key.startsWith('conditional_edges.'),
-    );
+    const entityKeys = Object.keys(lock.entities).filter((key) => !key.startsWith('nodes.'));
     expect(entityKeys).toEqual([]);
   });
 
@@ -320,19 +315,6 @@ describe('decompileFlow', () => {
     expect(positionByName.get('write')).toEqual({ x: 900, y: 200 });
     expect(positionByName.get('end')).toEqual({ x: 1300, y: 200 });
     expect(positionByName.get('My_Node')).toEqual({ x: 100, y: 600 });
-
-    // The conditional edge survives the round trip into the push plan.
-    const conditionalEdges = artifact.summary['conditionalEdges'] as Array<{
-      sourceNodeName: string;
-      python_code: { code: string; entrypoint: string; libraries: string[] };
-    }>;
-    expect(conditionalEdges).toHaveLength(1);
-    expect(conditionalEdges[0]!.sourceNodeName).toBe('write');
-    expect(conditionalEdges[0]!.python_code).toEqual({
-      code: CONDITION_CODE,
-      entrypoint: 'main',
-      libraries: [],
-    });
   });
 
   it('pulls knowledge-retriever and key-value nodes and recompiles them with zero errors', async () => {
@@ -346,7 +328,7 @@ describe('decompileFlow', () => {
         node_name: 'retrieve',
         source_collection: 8,
         search_configs: { graph: { search_method: 'local', basic: null, local: { top_k_entities: 5 } } },
-        metadata: nodeMetadata(500, 600, 6),
+        metadata: nodeMetadata(500, 600),
         input_map: { question: 'variables.topic' },
         output_variable_path: 'variables.docs',
         query: '{question}',
@@ -364,7 +346,7 @@ describe('decompileFlow', () => {
         key_value_table: 4,
         mode: 'write',
         entries: [{ key: 'last_{variables.topic}', value: 'variables.research' }],
-        metadata: nodeMetadata(900, 600, 7),
+        metadata: nodeMetadata(900, 600),
       },
     ];
     const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
@@ -406,7 +388,7 @@ describe('decompileFlow', () => {
         subgraph: null,
         input_map: {},
         output_variable_path: null,
-        metadata: nodeMetadata(100, 900, 9),
+        metadata: nodeMetadata(100, 900),
       },
     ];
     const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);

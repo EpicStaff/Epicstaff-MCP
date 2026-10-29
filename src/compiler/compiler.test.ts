@@ -263,7 +263,7 @@ flow:
     ).toBe(true);
   });
 
-  it('routes a condition edge into summary.conditionalEdges, not graph edges', async () => {
+  it('rejects a conditional edge: EpicStaff removed them, the error names the replacement', async () => {
     writeFlow(`
 meta: { name: conditional }
 llm_configs:
@@ -282,15 +282,59 @@ flow:
         code: |
           def main(state):
               return "finish"
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.path).toBe('flow.edges[1].condition');
+    expect(errors[0]!.message).toMatch(/conditional edges were removed from EpicStaff.*decision-table/);
+  });
+
+  it('warns that python libraries are not installed (EpicStaff replaced them with venvs) and does not send them', async () => {
+    writeFlow(`
+meta: { name: libraries }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: python, code: "def main():\\n    return 1", libraries: [requests] }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
     - { from: work, to: finish }
 `);
     const artifact = await compileFlow(flowDir);
     expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
-    const conditionalEdges = artifact.summary.conditionalEdges as Array<{ sourceNodeName: string }>;
-    expect(conditionalEdges.length).toBe(1);
-    expect(conditionalEdges[0]!.sourceNodeName).toBe('work');
-    // The plain edges: start→work and work→finish only.
-    expect(artifact.graph.edges.length).toBe(2);
+    const warning = artifact.diagnostics.find((diagnostic) => diagnostic.path === 'flow.nodes.work.libraries');
+    expect(warning?.severity).toBe('warning');
+    expect(warning?.message).toMatch(/virtual environment/);
+    const python = artifact.graph.nodes.find((node) => node.type === 'python');
+    expect(python?.type === 'python' ? python.data : undefined).not.toHaveProperty('libraries');
+  });
+
+  it('numbers new nodes of numbered types in authoring order; start, end and notes get no number', async () => {
+    writeFlow(`
+meta: { name: numbering }
+flow:
+  nodes:
+    start: { type: start }
+    first: { type: python, code: "def main():\\n    return 1" }
+    memo: { type: note, text: remember }
+    second: { type: python, code: "def main():\\n    return 2" }
+    finish: { type: end }
+  edges:
+    - { from: start, to: first }
+    - { from: first, to: second }
+    - { from: second, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const numberOf = (name: string) => artifact.graph.nodes.find((node) => node.node_name === name)?.nodeNumber;
+    expect([numberOf('start'), numberOf('first'), numberOf('memo'), numberOf('second'), numberOf('finish')]).toEqual([
+      undefined,
+      1,
+      undefined,
+      2,
+      undefined,
+    ]);
   });
 
   it('lays out every node on the grid with type-specific colors/icons', async () => {

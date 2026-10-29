@@ -1,7 +1,7 @@
 # Regression core flow. __RUN__ / __MODEL__ / __PROVIDER__ / __KEY_ENV__ are substituted per run.
 meta:
   name: reg-core-__RUN__
-  description: Regression - python, decision-table, conditional edge, key-value, agent+task, note.
+  description: Regression - python, decision-tables, key-value, agent+task, note.
 variables:
   amount: { default: 0 }
   customer: { default: "anon" }
@@ -68,6 +68,11 @@ flow:
           instructions: 'Customer tier is {tier}. Say "Tier is {tier}." exactly.'
       input_map: { tier: variables.loaded.tier }
       output_variable_path: variables.verdict
+    TierRoute:
+      type: decision-table
+      rules:
+        - { name: gold, condition: "variables['loaded']['tier'] == 'gold'", next_node: Gold }
+      default_next_node: Basic
     Gold: { type: python, code: "def main():\n    return 'gold-path'", output_variable_path: variables.path }
     Basic: { type: python, code: "def main():\n    return 'basic-path'", output_variable_path: variables.path }
     __end__: { type: end }
@@ -78,11 +83,6 @@ flow:
     - { from: Low, to: Save }
     - { from: Save, to: Load }
     - { from: Load, to: Verdict }
-    - from: Verdict
-      condition:
-        code: |-
-          def main(t):
-              return "Gold" if t == "gold" else "Basic"
-        input_map: { t: variables.loaded.tier }
+    - { from: Verdict, to: TierRoute }
     - { from: Gold, to: __end__ }
     - { from: Basic, to: __end__ }

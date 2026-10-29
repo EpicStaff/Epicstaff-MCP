@@ -5,6 +5,7 @@
  * `visual-programming/utils/save/payload.ts` (which always sends `output_variable_path: null`).
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
 export type KeyValueMode = 'read' | 'write' | 'delete';
@@ -31,8 +32,9 @@ export interface KeyValueNodeData {
   entries: KeyValueEntry[];
 }
 
-export interface KeyValueNodeDto extends KeyValueNodeData {
+export interface KeyValueNodeDto extends KeyValueNodeData, AuthorshipFields, NumberedNodeDto {
   id: number;
+  created_at: string;
   graph: number;
   node_name: string;
   input_map: Record<string, unknown>;

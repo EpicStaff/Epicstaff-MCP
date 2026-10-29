@@ -63,7 +63,6 @@ function summarizeGraph(graph: GraphDto): Record<string, unknown> {
       start_node_id: edge.start_node_id,
       end_node_id: edge.end_node_id,
     })),
-    conditional_edges: (graph.conditional_edge_list ?? []).length,
   };
 }
 

@@ -9,6 +9,5 @@ export function toNodeMetadata(node: GraphNodeBase): NodeDtoMetadata {
     color: node.color,
     icon: node.icon,
     size: node.size,
-    ...(node.nodeNumber != null ? { nodeNumber: node.nodeNumber } : {}),
   };
 }

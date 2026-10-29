@@ -51,7 +51,10 @@ export const pythonCodeToolSchema = z
     libraries: z
       .array(z.string())
       .default([])
-      .describe('pip packages installed into the tool sandbox before execution.'),
+      .describe(
+        'DEPRECATED — not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). ' +
+          'The tool runs in the default venv unless one is selected for it in the editor (a repush keeps that selection).',
+      ),
   })
   .superRefine((tool, ctx) => {
     const hasCode = tool.code !== undefined;

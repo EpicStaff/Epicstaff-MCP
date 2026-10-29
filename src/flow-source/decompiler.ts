@@ -18,7 +18,8 @@
  *
  * Known lossy pulls (each emits a warning; none affect graph topology):
  *  - agent-node sub-tasks; task-node output_schema / remember_output;
- *  - python-node test_input / use_storage; declared python secrets (kept on repush);
+ *  - python-node test_input / use_storage; declared python secrets, virtual environment
+ *    and execution timeout (all three kept on repush);
  *  - webhook-trigger python code + input map; telegram-trigger field mappings; the
  *    attached webhook trigger and telegram bot-token secret are not representable
  *    but are kept on repush (see `inheritUnrepresentableFields` in pusher/graph.ts);
@@ -32,9 +33,7 @@
  *
  * Lock seeding matches what the pusher writes (src/pusher/graph.ts): node
  * entries under `nodes.<node_name>` carry the backend id and `contentHash({})`
- * (the pusher never hashes node content), and conditional-edge entries under
- * `conditional_edges.<source_node_name>` hash the exact request body the next
- * compile + push would produce.
+ * (the pusher never hashes node content).
  */
 import { existsSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
@@ -153,7 +152,6 @@ export async function decompileFlow(
   }
 
   const plainEdges = buildPlainEdges(dto, registry, warnings);
-  const conditional = buildConditionalEdges(dto, registry, warnings);
 
   // Surface the start node's seeded values as a top-level `variables:` section
   // (bare value = default). Round-trips: the compiler re-seeds them into the start
@@ -191,7 +189,7 @@ export async function decompileFlow(
     ...(Object.keys(startVariables).length > 0 ? { variables: startVariables } : {}),
     flow: {
       nodes,
-      edges: [...plainEdges, ...conditional.map((edge) => edge.edge)],
+      edges: plainEdges,
     },
   };
 
@@ -209,9 +207,6 @@ export async function decompileFlow(
       // every saved node (src/pusher/graph.ts), so the seed must match.
       contentHash: contentHash({}),
     });
-  }
-  for (const edge of conditional) {
-    lock = setEntity(lock, 'conditional_edges', edge.lockName, edge.lockEntry);
   }
 
   await fs.mkdir(targetDir, { recursive: true });
@@ -388,8 +383,13 @@ function positionOf(metadata: Record<string, unknown>): { x: number; y: number }
   };
 }
 
-function nodeNumberOf(metadata: Record<string, unknown>): number {
-  const nodeNumber = metadata['nodeNumber'];
+/**
+ * Authoring-order key: the start node first, then numbered nodes by their server-issued #N badge
+ * (`node_number`), then everything unnumbered (end, notes) in wire-list order.
+ */
+function authoringOrderOf(entry: NodeDtoEntry): number {
+  if (entry.type === 'start') return 0;
+  const nodeNumber = 'node_number' in entry.dto ? entry.dto.node_number : null;
   return typeof nodeNumber === 'number' ? nodeNumber : Number.MAX_SAFE_INTEGER;
 }
 
@@ -406,7 +406,7 @@ function sanitizeSymbolicName(raw: string, fallback: string): string {
 
 /**
  * Collect every node in canonical wire-list order, sorted by the #N badge
- * (`metadata.nodeNumber`) so the YAML reads in authoring order, with unique
+ * (`node_number`, see `authoringOrderOf`) so the YAML reads in authoring order, with unique
  * schema-legal symbolic names. Backend node ids are assumed unique across node
  * types — the same assumption `buildRemoteState` documents.
  */
@@ -446,9 +446,7 @@ function collectNodes(dto: GraphDto, warnings: string[]): NodeRegistry {
     ...(dto.key_value_node_list ?? []).map((node): NodeDtoEntry => ({ type: 'key-value', dto: node })),
   ];
 
-  const sorted = [...entries].sort(
-    (a, b) => nodeNumberOf(metadataOf(a.dto)) - nodeNumberOf(metadataOf(b.dto)),
-  );
+  const sorted = [...entries].sort((a, b) => authoringOrderOf(a) - authoringOrderOf(b));
 
   const usedLowercase = new Set<string>();
   const nodes: CollectedNode[] = [];
@@ -704,12 +702,16 @@ function buildNodeBody(
         warnings.push(`${atPath}: test_input is not representable in flow source and resets on the next push`);
       }
       const code = entry.dto.python_code;
+      if (code.venv_id != null) {
+        warnings.push(
+          `${atPath}: the virtual environment (venv #${code.venv_id}) is not representable in flow source — it is kept on the next push`,
+        );
+      }
       return {
         type: 'python',
         position,
         code: code.code,
         ...(code.entrypoint !== 'main' ? { entrypoint: code.entrypoint } : {}),
-        ...(code.libraries.length > 0 ? { libraries: code.libraries } : {}),
         ...inputMapField(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField(entry.dto.output_variable_path),
       };
@@ -1048,72 +1050,4 @@ function buildPlainEdges(dto: GraphDto, registry: NodeRegistry, warnings: string
     warnings.push('flow.edges: user-adjusted edge waypoints are not representable in flow source and reset on the next push');
   }
   return edges;
-}
-
-interface ConditionalEdgeBuild {
-  edge: YamlObject;
-  lockName: string;
-  lockEntry: { backendId: number; contentHash: string };
-}
-
-function buildConditionalEdges(
-  dto: GraphDto,
-  registry: NodeRegistry,
-  warnings: string[],
-): ConditionalEdgeBuild[] {
-  const builds: ConditionalEdgeBuild[] = [];
-  const seenSources = new Set<string>();
-
-  for (const conditionalEdge of dto.conditional_edge_list) {
-    const from = registry.nameByBackendId.get(conditionalEdge.source_node_id);
-    if (from === undefined) {
-      warnings.push(
-        `flow.edges: conditional edge #${conditionalEdge.id} references a node that is not part of the graph payload and was dropped`,
-      );
-      continue;
-    }
-    if (seenSources.has(from)) {
-      warnings.push(
-        `flow.edges: node '${from}' has more than one conditional edge — the pusher tracks one per source node, extra ones will be recreated on every push`,
-      );
-    }
-    seenSources.add(from);
-
-    const code = conditionalEdge.python_code;
-    if ((code.libraries ?? []).length > 0) {
-      warnings.push(
-        `flow.edges: conditional edge from '${from}' uses python libraries — flow-source edge conditions cannot declare libraries; they reset on the next push`,
-      );
-    }
-    const inputMap = coerceInputMap(
-      conditionalEdge.input_map,
-      `flow.edges (conditional from '${from}')`,
-      warnings,
-    );
-
-    builds.push({
-      edge: {
-        from,
-        condition: {
-          code: code.code,
-          ...(code.entrypoint !== 'main' ? { entrypoint: code.entrypoint } : {}),
-          ...(Object.keys(inputMap).length > 0 ? { input_map: inputMap } : {}),
-        },
-      },
-      lockName: from,
-      lockEntry: {
-        backendId: conditionalEdge.id,
-        // Must equal the hash the pusher computes for the body the NEXT
-        // compile emits: emit.ts always sets libraries: [] on edge conditions.
-        contentHash: contentHash({
-          graph: dto.id,
-          source_node_id: conditionalEdge.source_node_id,
-          python_code: { code: code.code, entrypoint: code.entrypoint, libraries: [] },
-          input_map: inputMap,
-        }),
-      },
-    });
-  }
-
-  return builds;
 }

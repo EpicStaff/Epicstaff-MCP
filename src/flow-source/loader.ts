@@ -465,13 +465,6 @@ async function collectLocalFileDiagnostics(
     }
   }
 
-  for (const [index, edge] of source.flow.edges.entries()) {
-    if (edge.condition?.code_file !== undefined) {
-      const file = lookupProvenance(provenance, ['flow', 'edges', index]);
-      await check(edge.condition.code_file, `flow.edges[${index}].condition.code_file`, file);
-    }
-  }
-
   return diagnostics;
 }
 

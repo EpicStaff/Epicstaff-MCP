@@ -127,8 +127,6 @@ export function applySaveResponse(
     response.classification_decision_table_node_list ?? [],
     existingIdsByType('classification-decision-table')
   );
-  // Divergence: the frontend's buildCreatedNodeIdMap has no knowledge-retriever entry (it
-  // reloads the graph after save); the pusher needs every created id for the lockfile.
   mapByNewIds(
     nodeDiff.knowledgeRetrieverNodes.toCreate,
     response.knowledge_node_list ?? [],

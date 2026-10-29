@@ -3,6 +3,7 @@
  * in `visual-programming/utils/save/payload.ts` (which adds the `*_temp_id` cross-node reference variants).
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
 export interface ConditionDto {
@@ -24,8 +25,9 @@ export interface ConditionGroupDto {
   order: number;
 }
 
-export interface DecisionTableNodeDto {
+export interface DecisionTableNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  created_at: string;
   graph: number;
   node_name: string;
   condition_groups: ConditionGroupDto[];

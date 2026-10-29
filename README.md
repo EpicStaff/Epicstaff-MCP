@@ -49,7 +49,7 @@ latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tra
 
 | EpicStaff | Plugin |
 |---|---|
-| 1.3 (`developer`, unreleased) | `1.3.0-dev.N` (`main`) |
+| 1.5 (`developer`, unreleased — `release/v1.4.x` was cut from it) | `1.5.0-dev.N` (`main`) |
 | 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
 
 **How to pick:** check your EpicStaff version (release tag, or `developer`) and install the newest
@@ -68,7 +68,7 @@ Each plugin release records the exact EpicStaff commit it was verified against i
 | `release_line` | EpicStaff MAJOR.MINOR this version targets (equals the plugin's MAJOR.MINOR) |
 | `status` | `dev` — tracks an unreleased branch; `release` — verified against a release tag |
 
-**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. `1.3.0-dev.1` is numerically
+**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. Every `1.x` version is numerically
 *lower* than `3.1.0`, so uninstall and reinstall instead of updating:
 `claude plugin uninstall epicstaff-mcp@epicstaff` then `claude plugin install epicstaff-mcp@epicstaff`.
 
@@ -110,7 +110,8 @@ dashboard, batch runner, …) against the same run-session contract — which is
 A flow is a directory with `flow.yaml` (splittable into `*.flow.yaml` parts) plus any
 knowledge documents. Entities are keyed by symbolic name and reference each other by name;
 `{ existing: "<name>" }` reuses a remote entity instead of defining one. No coordinates —
-layout is computed at build time with the same algorithm as the EpicStaff editor.
+layout is computed at build time (the editor's former auto-arrange; its **Arrange** button re-lays a
+pushed flow with the current editor layout).
 
 ```yaml
 meta:
@@ -145,7 +146,7 @@ surfaces:                                 # what an agent may touch
 
 agents:                                   # AgentDefinitions (the new model)
   researcher:
-    instructions: You are a meticulous researcher.
+    instructions: You are a meticulous researcher.   # stored as the agent's one instruction document
     llm_config: default
     fcm_llm_config: { existing: "org-default-fcm" }
     default_surfaces: [{ surface: web_research, place: all }]
@@ -159,14 +160,21 @@ flow:
   edges:
     - { from: start, to: research }
     - { from: research, to: write }
-    - { from: write, to: finish }        # conditional: { from: X, condition: { code: ... } }
+    - { from: write, to: finish }        # branch with a decision-table node, not on an edge
 ```
 
 Node types: `start`, `agent`, `task`, `python`, `end`, `note`, `file-extractor`, `subgraph`,
 `webhook-trigger`, `telegram-trigger`, `schedule-trigger`, `decision-table`,
 `classification-decision-table`, `audio-to-text`, `knowledge-retriever`, `key-value`.
 `llm`, `code-agent` and `crew` node types are rejected with an error (removed from EpicStaff —
-rewrite a `crew` node as an `agent` node or `task` nodes).
+rewrite a `crew` node as an `agent` node or `task` nodes). So is an edge `condition:` — EpicStaff
+removed conditional edges; branch with a `decision-table` node.
+
+Python code no longer declares `libraries`: EpicStaff runs code in a virtual environment (venv)
+chosen per code block. A `libraries:` list in flow source is not sent (the build warns); create a
+venv with those libraries in the EpicStaff editor and select it for the node or tool there — a
+repush keeps that selection, as it keeps a node's execution timeout, a trigger's test payload and a
+classification table's generated explanations.
 
 ```yaml
     lookup:                               # search one RAG of a collection; results → output path

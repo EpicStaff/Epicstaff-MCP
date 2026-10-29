@@ -24,7 +24,7 @@ export * from './artifact.js';
 export * from './layout.js';
 export * from './template-refs.js';
 export { validateFlow, TRIGGER_NODE_TYPES } from './validate.js';
-export { emitFlow, type ConditionalEdgePlan, type EmitResult } from './emit.js';
+export { emitFlow, type EmitResult } from './emit.js';
 
 function diagnosticsOnlyArtifact(
   flowName: string,

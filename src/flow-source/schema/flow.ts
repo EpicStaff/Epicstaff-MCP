@@ -5,6 +5,7 @@
  * Node types `llm`, `code-agent` and `crew` are parsed loosely (so the rest of
  * the file can still be validated) but always rejected with an ERROR diagnostic
  * by the loader — EpicStaff no longer has them (`crew` was removed in EST-3849).
+ * The same goes for an edge `condition`: EpicStaff removed conditional edges.
  */
 import { z } from 'zod';
 
@@ -145,7 +146,10 @@ export const pythonNodeSchema = z.strictObject({
   libraries: z
     .array(z.string())
     .default([])
-    .describe('pip packages installed into the sandbox venv before execution.'),
+    .describe(
+      'DEPRECATED — not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). ' +
+        'Code runs in the default venv unless one is selected for it in the editor (a repush keeps that selection).',
+    ),
   input_map: inputMapField,
   output_variable_path: outputVariablePathField,
 });
@@ -373,58 +377,33 @@ export function isWritableNode(node: NodeSource): node is WritableNodeSource {
   return !isForbiddenNodeType(node.type);
 }
 
-export const edgeConditionSchema = z
-  .strictObject({
-    code: z
-      .string()
-      .optional()
-      .describe(
-        'Inline Python decision code: the entrypoint receives the mapped inputs and returns the name of the next node. Provide exactly one of code / code_file.',
-      ),
-    code_file: z
-      .string()
-      .optional()
-      .describe(
-        'Path to a Python file relative to the flow directory. Provide exactly one of code / code_file.',
-      ),
-    entrypoint: z.string().default('main').describe('Name of the Python decision function.'),
-    input_map: inputMapField,
-  })
-  .superRefine((condition, ctx) => {
-    const hasCode = condition.code !== undefined;
-    const hasCodeFile = condition.code_file !== undefined;
-    if (hasCode === hasCodeFile) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'provide exactly one of code / code_file',
-      });
-    }
-  })
-  .describe('Conditional routing: Python code that returns the name of the next node.');
-
-export type EdgeConditionSource = z.infer<typeof edgeConditionSchema>;
+/**
+ * Message of the ERROR an edge `condition` produces. Kept next to the schema so the loader, the
+ * tests and the docs name the same replacement.
+ */
+export const REMOVED_EDGE_CONDITION_MESSAGE =
+  "conditional edges were removed from EpicStaff — branch with a 'decision-table' node instead " +
+  '(rules over flow state, each routing to one node; default_next_node for the rest)';
 
 export const edgeSchema = z
   .strictObject({
     from: symbolicNameSchema.describe('Source node symbolic name.'),
-    to: symbolicNameSchema
-      .optional()
-      .describe('Target node symbolic name. Provide exactly one of to / condition.'),
-    condition: edgeConditionSchema
-      .optional()
-      .describe('Conditional edge body. Provide exactly one of to / condition.'),
+    to: symbolicNameSchema.optional().describe('Target node symbolic name.'),
+    /** Removed upstream — parsed loosely only so the error can name the replacement. */
+    condition: z.unknown().optional(),
   })
-  .superRefine((edge, ctx) => {
-    const hasTo = edge.to !== undefined;
-    const hasCondition = edge.condition !== undefined;
-    if (hasTo === hasCondition) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'an edge needs exactly one of to / condition',
-      });
+  .transform((edge, ctx) => {
+    if (edge.condition !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['condition'], message: REMOVED_EDGE_CONDITION_MESSAGE });
+      return z.NEVER;
     }
+    if (edge.to === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['to'], message: "an edge needs 'to' — the target node's symbolic name" });
+      return z.NEVER;
+    }
+    return { from: edge.from, to: edge.to };
   })
-  .describe('A directed edge between nodes, plain ({from, to}) or conditional ({from, condition}).');
+  .describe('A directed edge between two nodes: {from, to}.');
 
 export type EdgeSource = z.infer<typeof edgeSchema>;
 

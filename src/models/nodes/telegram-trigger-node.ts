@@ -1,5 +1,6 @@
 /** Ported from frontend `visual-programming/core/models/telegram-trigger.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 import type { WebhookTriggerRef } from './webhook-trigger-node.js';
 
@@ -23,8 +24,9 @@ export interface TelegramTriggerFieldWrite {
   variable_path: string;
 }
 
-export interface TelegramTriggerNodeDto {
+export interface TelegramTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  created_at: string;
   node_name: string;
   graph: number;
   /** The bot token lives in an org Secret; the node only references it. */
@@ -32,6 +34,8 @@ export interface TelegramTriggerNodeDto {
   fields: TelegramTriggerNodeFieldDto[];
   metadata: Record<string, unknown>;
   webhook_trigger: WebhookTriggerRef | null;
+  /** Payload used by "Run with test payload": `{[parent]: {[field_name]: value}}`, `{}` when unset. */
+  test_payload: Record<string, unknown>;
 }
 
 export interface TelegramTriggerNodeWrite {
@@ -40,5 +44,6 @@ export interface TelegramTriggerNodeWrite {
   telegram_bot_api_key_secret_id: number | null;
   webhook_trigger: WebhookTriggerRef | null;
   fields: TelegramTriggerFieldWrite[];
+  test_payload: Record<string, unknown>;
   metadata: NodeDtoMetadata;
 }

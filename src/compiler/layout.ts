@@ -1,14 +1,16 @@
 /**
- * Standalone port of the EpicStaff frontend auto-layout algorithm.
+ * Standalone port of the EpicStaff frontend's former auto-layout algorithm.
  *
- * Source of truth:
- *   frontend/src/app/visual-programming/core/helpers/auto-arrange.util.ts
- *   frontend/src/app/visual-programming/core/helpers/node-placement.utils.ts (snapToGrid)
- *   frontend/src/app/shared/models/node/node-type.ts (NodeType enum values)
+ * Ported from:
+ *   frontend `visual-programming/core/helpers/auto-arrange.util.ts` — REMOVED upstream (EpicStaff
+ *     e45e16f210), replaced by the layered layout in `visual-programming/core/layout/compute-layout.ts`
+ *     and its grid router. This file keeps the last ported version; it is no longer an upstream mirror.
+ *   frontend `visual-programming/core/helpers/node-placement.utils.ts` (snapToGrid — still upstream)
+ *   frontend `shared/models/node/node-type.ts` (NodeType enum values)
  *
  * The logic — tie-breaking, sort orders, rounding, and grid snapping — is a
- * faithful copy of the frontend implementation, with Angular/foblex types
- * replaced by minimal structural input types.
+ * faithful copy of that implementation, with Angular/foblex types replaced by
+ * minimal structural input types.
  */
 
 // ── Input types ─────────────────────────────────────────────────────────────
@@ -48,9 +50,7 @@ export const LAYOUT_NODE_TYPES = {
     AGENT: 'agent',
     TASK: 'task',
     TOOL: 'tool',
-    LLM: 'llm',
     PYTHON: 'python',
-    EDGE: 'edge',
     START: 'start',
     TABLE: 'table',
     CLASSIFICATION_TABLE: 'classification-decision-table',

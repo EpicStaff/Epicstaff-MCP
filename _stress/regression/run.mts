@@ -360,12 +360,6 @@ await step(server, '#3 ...and no entity churn', 'diff_flow', { flow_dir: flow('r
 
 const lastVariables = new Map<string, Record<string, any>>();
 
-/**
- * Note on conditional edges: EpicStaff (developer e310ee3) names runtime graph nodes "<name> #<id>",
- * so a condition returning the bare node name ("Gold") does not route — the run ends after the
- * edge's source. That is a known upstream/runtime gap (see the PR report), so these checks assert
- * what the platform delivers today and, for restore, that the copy behaves exactly like the original.
- */
 async function runAndVerify(label: string, graphId: number, initialState: Record<string, unknown>, verify: (variables: Record<string, any>) => true | string) {
   const started = await step(server, `${label}: run`, 'run_flow', { graph_id: graphId, initial_state: initialState }, (response) =>
     (response.ok && typeof response.data.session_id === 'number') || failure(response),
@@ -380,7 +374,8 @@ async function runAndVerify(label: string, graphId: number, initialState: Record
 }
 
 const goldSession = await runAndVerify('core gold path (amount=150)', coreId, { amount: 150, customer: 'c_gold' }, (variables) =>
-  (variables.tier?.tier === 'gold' && variables.loaded?.tier === 'gold' && typeof variables.verdict === 'string' && /gold/i.test(variables.verdict)) ||
+  (variables.tier?.tier === 'gold' && variables.loaded?.tier === 'gold' && typeof variables.verdict === 'string' && /gold/i.test(variables.verdict) &&
+    variables.path === 'gold-path') ||
   json(variables).slice(0, 300),
 );
 await step(server, 'session updates', 'get_session_updates', { session_id: goldSession }, (response) =>
@@ -391,7 +386,8 @@ await step(server, 'list sessions for graph', 'list_sessions', { graph_id: coreI
   (response.ok && json(response.data).includes(`"id":${goldSession}`)) || failure(response),
 );
 await runAndVerify('core basic path (amount=10)', coreId, { amount: 10, customer: 'c_basic' }, (variables) =>
-  (variables.tier?.tier === 'basic' && variables.loaded?.tier === 'basic' && typeof variables.verdict === 'string') ||
+  (variables.tier?.tier === 'basic' && variables.loaded?.tier === 'basic' && typeof variables.verdict === 'string' &&
+    variables.path === 'basic-path') ||
   json(variables).slice(0, 300),
 );
 
@@ -490,12 +486,10 @@ trackGraph(await step(server, 'file-extractor + audio-to-text push', 'push_flow'
   );
   const dumpPath = join(RUN_DIR, 'core-dump.json');
   await step(server, 'dump core', 'dump_graph', { graph_id: coreId, output_path: dumpPath }, (response) =>
-    (response.ok && existsSync(dumpPath) && response.data.conditional_edges === 1) || failure(response),
+    (response.ok && existsSync(dumpPath)) || failure(response),
   );
-  const restored = await step(server, '#9 restore as copy keeps conditional edges', 'restore_graph', { dump_path: dumpPath, name: `reg-core-copy-${RUN}` }, (response) =>
-    (response.ok && response.data.graphId !== coreId && response.data.conditionalEdges === 1 &&
-      !/conditional edge/i.test(json(response.data.warnings))) ||
-    json(response.data ?? response.error).slice(0, 300),
+  const restored = await step(server, '#9 restore as copy', 'restore_graph', { dump_path: dumpPath, name: `reg-core-copy-${RUN}` }, (response) =>
+    (response.ok && response.data.graphId !== coreId) || json(response.data ?? response.error).slice(0, 300),
   );
   trackGraph(restored);
   await step(server, 'describe restored', 'describe_graph', { graph_id: restored.data?.graphId ?? -1 });
@@ -504,27 +498,6 @@ trackGraph(await step(server, 'file-extractor + audio-to-text push', 'push_flow'
     const comparable = (vars: Record<string, any>) => json({ tier: vars.tier, loaded: vars.loaded, score: vars.score, path: vars.path });
     return (variables.tier?.edited === true && comparable(variables) === comparable(original)) ||
       `copy ${comparable(variables)} vs original ${comparable(original)}`;
-  });
-  const copyDump = join(RUN_DIR, 'copy-dump.json');
-  await step(server, '#9 restored conditional edge matches the original', 'dump_graph', { graph_id: restored.data?.graphId ?? -1, output_path: copyDump }, (response) => {
-    if (!response.ok) return failure(response);
-    const nameById = (graph: any): Map<number, string> => {
-      const names = new Map<number, string>();
-      for (const [key, list] of Object.entries(graph)) {
-        if (key.endsWith('_list') && Array.isArray(list)) for (const node of list as any[]) if (node?.node_name) names.set(node.id, node.node_name);
-      }
-      return names;
-    };
-    const describe = (graph: any) =>
-      json((graph.conditional_edge_list ?? []).map((edge: any) => ({
-        source: nameById(graph).get(edge.source_node_id),
-        code: edge.python_code?.code,
-        input_map: edge.input_map,
-      })));
-    const original = JSON.parse(readFileSync(dumpPath, 'utf8'));
-    const copy = JSON.parse(readFileSync(copyDump, 'utf8'));
-    return (describe(copy) === describe(original) && (copy.conditional_edge_list ?? []).length === 1) ||
-      `copy ${describe(copy)} vs original ${describe(original)}`;
   });
 }
 

@@ -1,4 +1,5 @@
 import type { ApiClient } from '../http/client.js';
+import type { AuthorshipFields } from '../models/authorship.js';
 
 /**
  * Surface API — ported from features/agent-definitions/services/surfaces-api.service.ts
@@ -54,9 +55,9 @@ export interface SurfaceKnowledge {
   graph_local_search_config?: SurfaceGraphLocalSearchConfig | null;
 }
 
-export interface Surface {
+export interface Surface extends AuthorshipFields {
   id: number;
-  organization: number;
+  org: number;
   name: string;
   description: string;
   instructions: string;
@@ -104,8 +105,9 @@ export class SurfacesApi {
     return this.client.post('surfaces/', { body: request });
   }
 
-  async update(id: number, request: CreateSurfaceRequest): Promise<Surface> {
-    return this.client.put(`surfaces/${id}/`, { body: request });
+  /** PATCH — the backend has no PUT for surfaces; list fields sent replace the current lists. */
+  async update(id: number, request: Partial<CreateSurfaceRequest>): Promise<Surface> {
+    return this.client.patch(`surfaces/${id}/`, { body: request });
   }
 
   /** Delete a catalog surface. Backend responds 204 (SurfaceViewSet is a plain ModelViewSet). */

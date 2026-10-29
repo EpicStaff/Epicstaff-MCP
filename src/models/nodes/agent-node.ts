@@ -3,6 +3,7 @@
  * Ported from frontend `visual-programming/core/models/agent-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`.
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 import type { InlineSurface } from './task-node.js';
 
@@ -46,9 +47,9 @@ export interface AgentNodeTaskUi {
   contextRefs: Array<{ id?: number; tempId?: string }>;
 }
 
-export interface AgentNodeDto {
+export interface AgentNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
-  created_at?: string;
+  created_at: string;
   updated_at?: string;
   metadata: Record<string, unknown>;
   node_name: string;

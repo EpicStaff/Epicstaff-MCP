@@ -8,13 +8,15 @@ import { createContext } from '../src/context.js';
 import { connectTools, type ToolCallResult } from './helpers/mcp-harness.js';
 
 /**
- * restore_graph used to drop conditional edges with a "recreate them by hand" warning, so a
- * restored copy did not route like the original. They are now recreated through
- * conditionaledges/ (the endpoint push_flow uses), addressed by the copy's new node ids.
+ * restore_graph materializes a dump_graph snapshot as a new graph. EpicStaff removed conditional
+ * edges, so a dump taken before that still lists them: they cannot be recreated and the restore
+ * says so instead of dropping them silently. A classification table's sections have
+ * client-generated primary keys, so the copy gets fresh section ids (the original's would clash).
  */
 const ENV = { EPICSTAFF_BASE_URL: 'http://es.mock', EPICSTAFF_USERNAME: 'dev@example.com', EPICSTAFF_PASSWORD: 'pw' };
 const metadata = (x: number) => ({ position: { x, y: 0 }, color: '#fff', icon: 'ti', size: { width: 320, height: 80 } });
-const code = (id: number, body: string) => ({ id, code: body, entrypoint: 'main', libraries: [], secrets: [] });
+const code = (id: number, body: string) => ({ id, code: body, entrypoint: 'main', secrets: [] });
+const SECTION_ID = '0b7a9c1e-4c55-4d0e-9a54-3f1b2c3d4e5f';
 
 function dumpedGraph(): Record<string, unknown> {
   return {
@@ -26,23 +28,60 @@ function dumpedGraph(): Record<string, unknown> {
     start_node_list: [{ id: 10, graph: 7, variables: { variables: { tier: null } }, metadata: metadata(0) }],
     python_node_list: [
       { id: 11, node_name: 'Verdict', graph: 7, python_code: code(101, 'def main():\n    return 1'), input_map: {}, test_input: {}, output_variable_path: null, metadata: metadata(1) },
-      { id: 12, node_name: 'Gold', graph: 7, python_code: code(102, "def main():\n    return 'gold'"), input_map: {}, test_input: {}, output_variable_path: 'variables.path', metadata: metadata(2) },
-      { id: 13, node_name: 'Basic', graph: 7, python_code: code(103, "def main():\n    return 'basic'"), input_map: {}, test_input: {}, output_variable_path: 'variables.path', metadata: metadata(3) },
+    ],
+    classification_decision_table_node_list: [
+      {
+        id: 15,
+        graph: 7,
+        node_name: 'Classifier',
+        pre_python_code: null,
+        pre_input_map: {},
+        pre_output_variable_path: null,
+        pre_use_storage: false,
+        post_python_code: null,
+        post_input_map: {},
+        post_output_variable_path: null,
+        post_use_storage: false,
+        prompt_configs: [],
+        default_llm_config: null,
+        default_next_node_id: 14,
+        next_error_node_id: null,
+        condition_groups: [
+          {
+            id: 40,
+            classification_decision_table_node: 15,
+            group_name: 'gold',
+            order: 1,
+            expression: 'tier == "gold"',
+            prompt: null,
+            manipulation: null,
+            continue_flag: false,
+            route_code: 'Gold',
+            dock_visible: true,
+            field_expressions: {},
+            field_manipulations: {},
+            next_node_id: 14,
+            section: SECTION_ID,
+          },
+        ],
+        sections: [{ id: SECTION_ID, name: 'Tiers', metadata: { color: '#685FFF' } }],
+        metadata: metadata(5),
+      },
     ],
     end_node_list: [{ id: 14, graph: 7, output_map: { context: 'variables.context' }, metadata: metadata(4) }],
     edge_list: [
       { id: 20, graph: 7, start_node_id: 10, end_node_id: 11, metadata: {} },
-      { id: 21, graph: 7, start_node_id: 12, end_node_id: 14, metadata: {} },
-      { id: 22, graph: 7, start_node_id: 13, end_node_id: 14, metadata: {} },
+      { id: 21, graph: 7, start_node_id: 11, end_node_id: 15, metadata: {} },
     ],
+    // A dump taken while EpicStaff still had conditional edges.
     conditional_edge_list: [
       {
         id: 30,
         graph: 7,
         source_node_id: 11,
-        python_code: { ...code(130, 'def main(t):\n    return "Gold" if t == "gold" else "Basic"'), global_kwargs: { k: 1 }, secrets: [{ id: 5, name: 'S' }] },
+        python_code: code(130, 'def main(t):\n    return "Gold"'),
         input_map: { t: 'variables.tier' },
-        metadata: { label: 'route' },
+        metadata: {},
       },
     ],
   };
@@ -54,14 +93,12 @@ describe('restore_graph', () => {
   let call: (name: string, args?: Record<string, unknown>) => Promise<ToolCallResult>;
   let received: Array<{ method: string; path: string; body: unknown }>;
   let nextId: number;
-  let targetGraph: Record<string, unknown> | null;
 
   beforeEach(async () => {
     scratchDir = mkdtempSync(join(tmpdir(), 'es-mcp-restore-'));
     process.env.ES_MCP_STATE_DIR = scratchDir;
     received = [];
     nextId = 500;
-    targetGraph = null;
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input));
       const method = init?.method ?? 'GET';
@@ -73,19 +110,16 @@ describe('restore_graph', () => {
       if (key === 'GET /api/auth/api-key/validate/') return reply(200, { active: true });
       if (key === 'GET /api/profile/') return reply(200, { memberships: [{ organization: { id: 1, name: 'Org', is_active: true } }] });
       if (key === 'POST /api/graphs/') return reply(201, { id: 900, name: body.name, save_version: 1 });
-      if (key === 'GET /api/graphs/901/' && targetGraph) return reply(200, targetGraph);
       if (/^POST \/api\/graphs\/\d+\/save\/$/.test(key)) {
         // Echo the save: every created node gets a fresh id (listed in creation order).
         const graphId = Number(url.pathname.split('/')[3]);
-        const echoed: Record<string, unknown> = { id: graphId, save_version: 2, edge_list: [], conditional_edge_list: [] };
+        const echoed: Record<string, unknown> = { id: graphId, save_version: 2, edge_list: [] };
         for (const [listKey, items] of Object.entries(body as Record<string, unknown>)) {
           if (!listKey.endsWith('_list') || listKey === 'edge_list' || !Array.isArray(items)) continue;
           echoed[listKey] = items.map((item: Record<string, unknown>) => ({ ...item, id: item.id ?? (nextId += 1) }));
         }
         return reply(200, echoed);
       }
-      if (key === 'POST /api/conditionaledges/') return reply(201, { ...body, id: (nextId += 1) });
-      if (/^DELETE \/api\/conditionaledges\/\d+\/$/.test(key)) return new Response(null, { status: 204 });
       return reply(404, { detail: `no mock for ${key}` });
     });
 
@@ -107,47 +141,30 @@ describe('restore_graph', () => {
     return call('restore_graph', { dump_path: dumpPath, ...args });
   }
 
-  it('recreates conditional edges on the new graph, addressed by the new source node id', async () => {
+  it('reports the conditional edges of an old dump instead of recreating them', async () => {
     const { isError, body } = await restore({ name: 'routed-copy' });
     expect(isError, JSON.stringify(body)).toBe(false);
-    expect(body.data.conditionalEdges).toBe(1);
-    expect(JSON.stringify(body.data.warnings)).not.toMatch(/conditional edge/i);
-
-    const posted = received.filter((call) => call.method === 'POST' && call.path === '/api/conditionaledges/');
-    expect(posted).toHaveLength(1);
-    const edge = posted[0]!.body as Record<string, unknown>;
-    expect(edge).toMatchObject({
-      graph: 900,
-      input_map: { t: 'variables.tier' },
-      metadata: { label: 'route' },
-      python_code: {
-        code: 'def main(t):\n    return "Gold" if t == "gold" else "Basic"',
-        entrypoint: 'main',
-        libraries: [],
-        global_kwargs: { k: 1 },
-        secret_ids: [5],
-      },
-    });
-    // A fresh python_code row — never the original's id.
-    expect(edge.python_code).not.toHaveProperty('id');
-    // The source is the copy of "Verdict" (not the dumped id 11).
-    expect(edge.source_node_id).not.toBe(11);
-    const save = received.find((call) => call.path === '/api/graphs/900/save/')!;
-    const pythonSent = (save.body as { python_node_list: Array<{ node_name: string }> }).python_node_list;
-    expect(pythonSent.map((node) => node.node_name)).toContain('Verdict');
-    // Echo ids: start node first (501), then python nodes in order.
-    const verdictIndex = pythonSent.findIndex((node) => node.node_name === 'Verdict');
-    expect(edge.source_node_id).toBe(502 + verdictIndex);
+    expect(JSON.stringify(body.data.warnings)).toMatch(/1 conditional edge\(s\).*NOT restored.*decision-table/);
+    expect(received.some((request) => request.path.includes('conditionaledges'))).toBe(false);
+    expect(body.data).not.toHaveProperty('conditionalEdges');
   });
 
-  it('overwrite mode drops the target conditional edges before recreating the dump ones', async () => {
-    targetGraph = { ...dumpedGraph(), id: 901, name: 'target', save_version: 9, conditional_edge_list: [{ ...(dumpedGraph().conditional_edge_list as Array<Record<string, unknown>>)[0]!, id: 77 }] };
-    const { isError, body } = await restore({ target_graph_id: 901 });
+  it('gives the copy fresh CDT section ids and points its rows at them', async () => {
+    const { isError, body } = await restore({ name: 'routed-copy' });
     expect(isError, JSON.stringify(body)).toBe(false);
-    const deleteIndex = received.findIndex((call) => call.method === 'DELETE' && call.path === '/api/conditionaledges/77/');
-    const createIndex = received.findIndex((call) => call.method === 'POST' && call.path === '/api/conditionaledges/');
-    expect(deleteIndex).toBeGreaterThan(-1);
-    expect(createIndex).toBeGreaterThan(deleteIndex);
-    expect(body.data.conditionalEdges).toBe(1);
+
+    const save = received.find((request) => request.path === '/api/graphs/900/save/')!;
+    const [table] = (save.body as {
+      classification_decision_table_node_list: Array<{
+        sections: Array<{ id: string; name: string }>;
+        condition_groups: Array<{ section: string | null }>;
+      }>;
+    }).classification_decision_table_node_list;
+    expect(table!.sections).toHaveLength(1);
+    const freshId = table!.sections[0]!.id;
+    expect(freshId).not.toBe(SECTION_ID);
+    expect(freshId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(table!.sections[0]!.name).toBe('Tiers');
+    expect(table!.condition_groups[0]!.section).toBe(freshId);
   });
 });

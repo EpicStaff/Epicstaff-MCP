@@ -3,6 +3,7 @@
  * Ported from frontend `visual-programming/core/models/task-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`.
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
 /** Write-shape entries used by `InlineSurface`'s tool/storage/knowledge lists. */
@@ -42,7 +43,7 @@ export interface InlineSurface {
   updated_at?: string;
 }
 
-export interface TaskNodeDto {
+export interface TaskNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
   created_at: string;
   updated_at: string;

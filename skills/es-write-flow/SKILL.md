@@ -32,7 +32,7 @@ authoring mistakes come from getting this wrong.
   variables carried across sessions. Exactly two scopes — `user` and `organization` — nothing else.
 
 **Edges carry control; the Domain carries data.** This is the one that trips agents up. An edge only
-decides *what runs next* (a plain edge = sequence; a `condition:` edge = branch). **No data rides on
+decides *what runs next* (a plain edge = sequence; branching is a `decision-table` node). **No data rides on
 an edge.** A node reads its inputs from `variables` via `input_map` and writes its outputs back via
 `output_variable_path`. A downstream node sees a value because it *reads a path an earlier node
 wrote* — not because an edge connects them. Connecting `A → B` does **not** hand A's output to B; the
@@ -102,9 +102,16 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
        (`naive_config` / `graph_local_search_config`).
    - `surfaces` — what each agent may touch: tools, knowledge, instructions. One-off needs
      go as `inline_surface` on the node instead of polluting the catalog.
-   - `agents` — AgentDefinitions: `instructions`, `llm_config`, `default_surfaces`.
+   - `agents` — AgentDefinitions: `instructions` (stored as the agent's single instruction
+     document), `llm_config`, `default_surfaces`.
    - `flow.nodes` / `flow.edges` — the graph. Never write coordinates; layout is computed.
-     Conditional routing = edge with `condition:` (python code) instead of `to:`.
+     Edges are always `{ from, to }`. Branching = a `decision-table` node (rules over flow state,
+     each routing to one node) — EpicStaff removed conditional edges, and an edge `condition:`
+     is a load error.
+     - Python code (nodes, `python_code_tools`): don't write `libraries:` — EpicStaff runs code in a
+       virtual environment chosen in the editor and no longer installs per-code libraries (the
+       build warns and drops them). Tell the user which packages the code needs so they can pick
+       or create a venv for it; repushes keep that choice.
      - Explicit retrieval step → `knowledge-retriever` (`collection`, `query` template with
        `{name}` placeholders filled from `input_map`, results to `output_variable_path`). For an
        `{ existing: ... }` collection also set `rag: naive|graph`.

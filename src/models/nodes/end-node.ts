@@ -1,9 +1,11 @@
 /** Ported from frontend `visual-programming/core/models/end-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
+import type { AuthorshipFields } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
-export interface EndNodeDto {
+export interface EndNodeDto extends AuthorshipFields {
   id: number;
+  created_at: string;
   graph: number;
   output_map: Record<string, unknown>;
   metadata: Record<string, unknown>;

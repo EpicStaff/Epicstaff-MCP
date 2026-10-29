@@ -110,14 +110,15 @@ re-indexes), not a new collection.
 Create tools are **org-unique by name**: a name clash returns a message telling you to use
 the matching `update_*` (or pick a new name) — it is never silently swallowed.
 
-## Deletes are irreversible and NOT flow-aware
+## Deletes go to the recycle bin and are NOT flow-aware
 
-`delete_surface`, `delete_agent`, and `delete_collection` remove the entity immediately:
+`delete_surface`, `delete_agent`, and `delete_collection` move the entity to the EpicStaff
+**recycle bin** at once (a user can restore it in the editor until it is purged):
 
-- Any flow referencing the deleted entity via `{ existing: "<name>" }` will **fail its next
+- While it is binned, any flow referencing it via `{ existing: "<name>" }` will **fail its next
   `push_flow`**. Verify no flow depends on it first.
-- `delete_agent` **cascade-deletes** surfaces owned by that agent.
-- `delete_collection` drops the documents, attached RAG strategies, and the **pgvector index**
-  permanently; retrieval stops at once.
+- `delete_agent` takes the surfaces owned by that agent into the bin with it.
+- `delete_collection` bins the documents and attached RAG strategies with it; retrieval stops at
+  once, and purging the bin drops the index for good.
 
 The tool responses restate these warnings — read the `next` field before moving on.

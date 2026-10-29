@@ -1,11 +1,16 @@
 import type { ApiClient } from '../http/client.js';
-import type { BulkSavePayload, CreateGraphDtoRequest, GetGraphLightRequest, GraphDto } from '../models/graph.js';
+import type {
+  BulkSavePayload,
+  CreateGraphDtoRequest,
+  GetGraphLightRequest,
+  GraphDto,
+  PatchGraphDtoRequest,
+} from '../models/graph.js';
 
 /**
  * Graph API — ported from features/flows/services/flows-api.service.ts.
  * Create the graph shell with POST graphs/, persist nodes+edges with the
  * bulk-save endpoint POST graphs/{id}/save/ (save_version optimistic lock).
- * Conditional edges are NOT part of bulk-save — they use conditionaledges/.
  */
 interface Paginated<T> {
   count: number;
@@ -43,23 +48,15 @@ export class GraphsApi {
 
   /** Rename a graph. PATCH is optimistically locked like bulk-save — save_version is mandatory. */
   async rename(graphId: number, name: string, saveVersion: number): Promise<GraphDto> {
-    return this.client.patch(`graphs/${graphId}/`, { body: { name, save_version: saveVersion } });
+    return this.patch(graphId, { name, save_version: saveVersion });
+  }
+
+  /** PATCH graphs/{id}/ — only the writable graph metadata; the read-only authorship is never sent. */
+  async patch(graphId: number, request: PatchGraphDtoRequest): Promise<GraphDto> {
+    return this.client.patch(`graphs/${graphId}/`, { body: request });
   }
 
   async delete(graphId: number): Promise<void> {
     await this.client.delete(`graphs/${graphId}/`);
-  }
-
-  // Conditional edges — dedicated endpoints (not in bulk-save, mirroring the frontend).
-  async createConditionalEdge(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.client.post('conditionaledges/', { body });
-  }
-
-  async updateConditionalEdge(id: number, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.client.put(`conditionaledges/${id}/`, { body });
-  }
-
-  async deleteConditionalEdge(id: number): Promise<void> {
-    await this.client.delete(`conditionaledges/${id}/`);
   }
 }

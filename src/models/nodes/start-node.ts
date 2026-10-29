@@ -1,9 +1,11 @@
 /** Ported from frontend `visual-programming/core/models/start-node.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
+import type { AuthorshipFields } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
-export interface StartNodeDto {
+export interface StartNodeDto extends AuthorshipFields {
   id: number;
+  created_at: string;
   graph: number;
   node_name: string;
   variables: Record<string, unknown>;

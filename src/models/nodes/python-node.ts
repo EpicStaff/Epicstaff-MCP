@@ -4,6 +4,7 @@
  * `visual-programming/utils/save/payload.ts` (which sends `python_code` = node data minus `use_storage`).
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
 /** A secret a python code block may read, by name (`DeclaredSecretRef`). Never carries the value. */
@@ -12,13 +13,19 @@ export interface DeclaredSecretRef {
   name: string;
 }
 
-/** Read shape of a python code row (`GetPythonCodeRequest`). `secrets` is the read side of `secret_ids`. */
+/**
+ * Read shape of a python code row (`GetPythonCodeRequest`). `secrets` is the read side of `secret_ids`.
+ * EpicStaff replaced per-code `libraries` with virtual environments: `venv_id` names the venv the
+ * code runs in (null = the sandbox's default one).
+ */
 export interface GetPythonCodeDto {
   id: number;
-  libraries: string[];
   code: string;
   entrypoint: string;
+  venv_id?: number | null;
   secrets?: DeclaredSecretRef[];
+  /** Seconds one run of the code may take. Absent in flow versions saved before code had a timeout. */
+  execution_timeout?: number;
 }
 
 /**
@@ -29,19 +36,22 @@ export interface GetPythonCodeDto {
 export interface CustomPythonCode {
   id?: number | null;
   name: string;
-  libraries: string[];
   code: string;
   entrypoint: string;
   use_storage?: boolean;
   /** Secrets this code may read (write side of `GetPythonCodeDto.secrets`). */
   secret_ids?: number[];
+  venv_id?: number | null;
+  /** Seconds one run of the code may take; absent until set, then the backend applies its default. */
+  execution_timeout?: number;
 }
 
 /** `python_code` as emitted inside a python-node bulk-save item: `CustomPythonCode` minus `use_storage`. */
 export type PythonNodeCodeWrite = Omit<CustomPythonCode, 'use_storage'>;
 
-export interface PythonNodeDto {
+export interface PythonNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  created_at: string;
   node_name: string;
   graph: number;
   python_code: GetPythonCodeDto;

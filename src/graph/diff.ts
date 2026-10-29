@@ -1,9 +1,9 @@
 /**
  * Node / connection diffing between the persisted (remote) graph state and the
- * desired local state. Faithful port of frontend `visual-programming/utils/save/diff.ts`
- * (minus the excluded legacy `llm` node type).
+ * desired local state. Faithful port of frontend `visual-programming/utils/save/diff.ts`.
  */
 
+import { normalizeCdtSectionColor } from '../models/nodes/classification-decision-table-node.js';
 import { hasPersistedWaypoints, waypointsChanged } from './edge-waypoints.js';
 import type {
   AgentGraphNode,
@@ -258,6 +258,8 @@ function toWebhookComparable(node: WebhookTriggerGraphNode): unknown {
     output_variable_path: node.output_variable_path || null,
     webhook_trigger_path: '',
     webhook_trigger: node.data.webhook_trigger,
+    test_payload: node.data.test_payload ?? {},
+    use_storage: node.data.use_storage ?? false,
     metadata: toNodeMetadata(node),
   };
 }
@@ -268,6 +270,7 @@ function toTelegramComparable(node: TelegramTriggerGraphNode): unknown {
     telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
     webhook_trigger: node.data.webhook_trigger,
     fields: node.data.fields,
+    test_payload: node.data.test_payload ?? {},
     metadata: toNodeMetadata(node),
   };
 }
@@ -372,15 +375,25 @@ function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: G
     pre_input_map: tableData?.pre_computation?.input_map || tableData?.pre_input_map || {},
     pre_output_variable_path:
       tableData?.pre_computation?.output_variable_path || tableData?.pre_output_variable_path || null,
+    pre_use_storage: tableData?.pre_use_storage ?? false,
     post_computation_code: postCode,
     post_input_map: tableData?.post_computation?.input_map || tableData?.post_input_map || {},
     post_output_variable_path:
       tableData?.post_computation?.output_variable_path || tableData?.post_output_variable_path || null,
-    pre_libraries: tableData?.pre_computation?.libraries || [],
-    post_libraries: tableData?.post_computation?.libraries || [],
+    post_use_storage: tableData?.post_use_storage ?? false,
     pre_secret_ids: [...(tableData?.pre_computation?.secret_ids || [])].sort(),
     post_secret_ids: [...(tableData?.post_computation?.secret_ids || [])].sort(),
-    metadata: toNodeMetadata(node),
+    pre_execution_timeout: tableData?.pre_computation?.execution_timeout,
+    post_execution_timeout: tableData?.post_computation?.execution_timeout,
+    sections: [...(tableData?.sections || [])]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((section) => ({
+        id: section.id,
+        name: section.name,
+        color: normalizeCdtSectionColor(section.metadata?.color),
+      })),
+    // Mirrors bulk-save.ts. Without it a node whose only change is its explanations never reaches toUpdate.
+    metadata: { ...toNodeMetadata(node), explanations: node.explanations ?? {} },
   };
 }
 

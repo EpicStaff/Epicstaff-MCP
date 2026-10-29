@@ -4,7 +4,7 @@
  * reference position either resolved or already produced an error.
  *
  * Mirrors the backend `SurfaceValidator`
- * (src/django_app/tables/validators/surface_validator.py) for the checks that
+ * (src/django_app/agents/validators/surface_validator.py) for the checks that
  * are decidable locally:
  *  - no duplicate tool / knowledge-collection references within one surface;
  *  - a knowledge search config must match the collection's RAG strategy
@@ -375,10 +375,9 @@ function validateTopology(source: FlowSource, diagnostics: Diagnostic[]): void {
   // receive only one value per step"). Fan-out from the start node additionally has its
   // extra edges silently dropped by the Django converter (only the first becomes the
   // entrypoint). Either way the flow's variables do not wire up. Branch with a
-  // decision-table / conditional edge (which route to a single node) instead.
+  // decision-table (which routes to a single node) instead.
   const plainOutgoing = new Map<string, string[]>();
   for (const edge of source.flow.edges) {
-    if (edge.to === undefined) continue; // conditional edge — routes to one node at run time
     const targets = plainOutgoing.get(edge.from) ?? [];
     targets.push(edge.to);
     plainOutgoing.set(edge.from, targets);
@@ -392,7 +391,7 @@ function validateTopology(source: FlowSource, diagnostics: Diagnostic[]): void {
           `node '${fromNode}' has ${targets.length} outgoing edges (to ${targets.map((t) => `'${t}'`).join(', ')}) — ` +
             `parallel fan-out is not supported: the runtime runs one active path and concurrent branches ` +
             `crash on shared state${isStart ? ' (and the start node keeps only its first edge)' : ''}. ` +
-            `Sequence the work into one path, or branch with a decision-table / conditional edge (each routes to a single node).`,
+            `Sequence the work into one path, or branch with a decision-table (it routes to a single node).`,
         ),
       );
     }
@@ -440,10 +439,6 @@ function validateTopology(source: FlowSource, diagnostics: Diagnostic[]): void {
           makeError(`${edgePath}.from`, `'${edge.from}' is a note — notes are not connectable`),
         );
       }
-    }
-
-    if (edge.to === undefined) {
-      return; // conditional edge — target is decided by its Python code at run time
     }
 
     if (edge.to === edge.from) {

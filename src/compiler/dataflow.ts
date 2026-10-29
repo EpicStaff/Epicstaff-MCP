@@ -54,27 +54,14 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
 
   const ancestors = buildAncestors(source);
 
-  // --- consumers (node reads + conditional-edge condition input_map) ---
+  // --- consumers (node reads) ---
   for (const [nodeName, node] of Object.entries(nodes)) {
     checkReads(nodeReadPaths(node, `flow.nodes.${nodeName}`), nodeName);
   }
-  source.flow.edges.forEach((edge, index) => {
-    if (edge.condition?.input_map) {
-      const basePath = `flow.edges[${index}].condition.input_map`;
-      // The condition runs AFTER its source node has written its output, so — unlike the
-      // node's own input_map — the source's writes count as produced for it.
-      checkReads(
-        Object.entries(edge.condition.input_map).map(([key, path]) => ({ at: `${basePath}.${key}`, path })),
-        edge.from,
-        { readerHasWritten: true },
-      );
-    }
-  });
 
   return diagnostics;
 
-  function checkReads(reads: NodeReadPath[], readerNode: string, options: { readerHasWritten?: boolean } = {}): void {
-    const ownWrites = options.readerHasWritten ? (producedByNode.get(readerNode) ?? []) : [];
+  function checkReads(reads: NodeReadPath[], readerNode: string): void {
     for (const { at: readPath, path: rawValue } of reads) {
       if (rawValue === '__all__') continue; // whole-state read
       const parsed = parseVarPath(rawValue);
@@ -85,7 +72,7 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
       if (parsed.isShared || parsed.hasDefault) continue;
 
       const read = parsed.segments;
-      const reaching = [...declared, ...ownWrites, ...ancestorProduced(readerNode)];
+      const reaching = [...declared, ...ancestorProduced(readerNode)];
       if (reaching.some((produced) => sharesPrefix(read, produced))) {
         continue; // may-reach: produced on some reaching path (or declared)
       }
@@ -134,11 +121,8 @@ function startInitialStateKeys(source: FlowSource): string[] {
 
 /**
  * ancestors[N] = every node that can reach N. Forward edges come from plain edges plus
- * decision-table / CDT routes. A node with an outgoing conditional edge routes to a
- * runtime-decided target we cannot know, so it is treated as able to reach every node
- * (over-approximation → keeps may-reach false positives near zero). A node never counts
- * as its own ancestor: a node's own output does not satisfy its own input (its outgoing
- * condition is the exception — handled by `readerHasWritten` in checkReads).
+ * decision-table / CDT routes. A node never counts as its own ancestor: a node's own
+ * output does not satisfy its own input.
  */
 function buildAncestors(source: FlowSource): Map<string, Set<string>> {
   const nodeNames = Object.keys(source.flow.nodes);
@@ -149,12 +133,7 @@ function buildAncestors(source: FlowSource): Map<string, Set<string>> {
   };
 
   for (const edge of source.flow.edges) {
-    if (edge.to !== undefined) {
-      add(edge.from, edge.to);
-    } else {
-      // conditional edge — dynamic target: over-approximate to all nodes.
-      for (const target of nodeNames) if (target !== edge.from) add(edge.from, target);
-    }
+    add(edge.from, edge.to);
   }
   for (const [name, node] of Object.entries(source.flow.nodes)) {
     if (node.type === 'decision-table') {
