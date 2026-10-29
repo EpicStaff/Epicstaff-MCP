@@ -10,12 +10,14 @@
 import { z } from 'zod';
 
 import {
+  LIBRARIES_DEPRECATION_NOTE,
   entityRef,
   credentialEnvName,
   entityRefSchema,
   inputMapSchema,
   positionSchema,
   symbolicNameSchema,
+  venvRefSchema,
 } from './common.js';
 import { inlineSurfaceSchema } from './surfaces.js';
 
@@ -143,13 +145,8 @@ export const pythonNodeSchema = z.strictObject({
     .string()
     .default('main')
     .describe('Name of the Python function executed by the sandbox.'),
-  libraries: z
-    .array(z.string())
-    .default([])
-    .describe(
-      'DEPRECATED — not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). ' +
-        'Code runs in the default venv unless one is selected for it in the editor (a repush keeps that selection).',
-    ),
+  venv: venvRefSchema.optional(),
+  libraries: z.array(z.string()).default([]).describe(LIBRARIES_DEPRECATION_NOTE),
   input_map: inputMapField,
   output_variable_path: outputVariablePathField,
 });

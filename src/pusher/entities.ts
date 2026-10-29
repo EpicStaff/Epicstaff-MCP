@@ -6,10 +6,11 @@ import { StorageApi } from '../api/storage.js';
 import { AgentDefinitionsApi } from '../api/agent-definitions.js';
 import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { KnowledgeApi } from '../api/knowledge.js';
-import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
-import { SecretsApi, secretTail } from '../api/secrets.js';
+import { LlmApi, buildModelIndex, lookupModelId, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
+import { SecretsApi } from '../api/secrets.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
+import { BUILDING_STATUSES, type Venv, VenvsApi } from '../api/venvs.js';
 import {
   type FlowLock,
   contentHash,
@@ -22,12 +23,12 @@ import {
 } from '../flow-source/lockfile.js';
 import { logger } from '../util/logger.js';
 import { readFileSync } from 'node:fs';
-import { isReservedEnvName, readEnv } from '../config.js';
 import { ApiError } from '../http/errors.js';
+import { ensureSecretFromEnv } from './env-secrets.js';
 
 /**
  * Entity pusher — materializes the dependency tree of a BuildArtifact in order
- * (secrets + key-value tables → llm-configs → tools → knowledge → surfaces →
+ * (secrets + key-value tables + venvs → llm-configs → tools → knowledge → surfaces →
  * agent-definitions), following the reuse-first policy:
  *   lockfile hit + clean hash → reuse id;
  *   lockfile hit + dirty hash → update in place;
@@ -61,7 +62,10 @@ export class EntityPusher {
   private readonly storage;
   private readonly secrets;
   private readonly keyValueTables;
-  private modelIdByName: Map<string, number> | null = null;
+  private readonly venvs;
+  /** Venvs seen while resolving `venv:` references — their build status feeds push warnings. */
+  private readonly venvById = new Map<number, Venv>();
+  private modelIndex: Map<string, number> | null = null;
   private builtinToolIdByName: Map<string, number> | null = null;
 
   constructor(private readonly context: AppContext) {
@@ -73,6 +77,7 @@ export class EntityPusher {
     this.storage = new StorageApi(context.client);
     this.secrets = new SecretsApi(context.client, context.auth);
     this.keyValueTables = new KeyValueTablesApi(context.client);
+    this.venvs = new VenvsApi(context.client);
   }
 
   /**
@@ -120,6 +125,10 @@ export class EntityPusher {
         const backendId = await this.resolveExisting(plan);
         idMap.set(plan.key, backendId);
         actions.push({ key: plan.key, kind: plan.kind, action: 'resolved-existing', backendId });
+        if (plan.kind === 'venv') {
+          const venvWarning = venvStatusWarning(this.venvById.get(backendId));
+          if (venvWarning !== null) warnings.push(`${plan.key}: ${venvWarning}`);
+        }
         continue;
       }
 
@@ -260,51 +269,13 @@ export class EntityPusher {
     }
   }
 
-  /**
-   * Store the value of the plan's environment variable as the org Secret `name`.
-   * Secrets are immutable, so an existing secret is reused only when its visible tail
-   * matches the current value; a mismatch means the env value was rotated and the user
-   * must delete the old secret (it may still be referenced elsewhere). The value is
-   * never logged, echoed, or written to the lockfile.
-   */
+  /** Store the plan's environment variable as the org Secret `name` (see ensureSecretFromEnv). */
   private async ensureSecret(plan: EntityPlan, name: string): Promise<{ backendId: number; created: boolean }> {
-    const payload = plan.payload ?? {};
-    const envRef = payload['value'];
+    const envRef = (plan.payload ?? {})['value'];
     if (!isEnvRef(envRef)) {
       throw new Error(`Secret plan "${plan.key}" carries no {$env} value — compiler bug.`);
     }
-    const value = this.readEnv(envRef.$env);
-    const existing = await this.secrets.findByName(name);
-    if (existing) {
-      if (existing.tail !== secretTail(value)) {
-        throw new Error(
-          `Org secret "${name}" already exists but holds a different value than ${envRef.$env} ` +
-            `(tail ${existing.tail ? `…${existing.tail}` : 'hidden'}). EpicStaff secrets are immutable — delete ` +
-            `"${name}" in EpicStaff (Settings → Secrets) and push again, or restore the previous value of ${envRef.$env}.`,
-        );
-      }
-      return { backendId: existing.id, created: false };
-    }
-    logger.info(`Creating org secret "${name}" from ${envRef.$env}`);
-    return { backendId: (await this.secrets.create(name, value)).id, created: true };
-  }
-
-  private readEnv(envName: string): string {
-    // Defense in depth — the flow-source schema already rejects these names.
-    if (isReservedEnvName(envName)) {
-      throw new Error(
-        `Environment variable "${envName}" belongs to the MCP server's own configuration and cannot be stored ` +
-          'as a flow credential. Export the provider key under its own name and reference that instead.',
-      );
-    }
-    const resolved = readEnv(process.env, envName);
-    if (resolved === undefined) {
-      throw new Error(
-        `Environment variable "${envName}" is not set for the MCP server. ` +
-          'Secrets referenced in flow source must be provided in the plugin environment.',
-      );
-    }
-    return resolved;
+    return ensureSecretFromEnv(this.secrets, name, envRef.$env);
   }
 
   private async resolveBuiltinToolId(toolName: string): Promise<number> {
@@ -325,33 +296,19 @@ export class EntityPusher {
   }
 
   private async resolveModelId(modelName: string, providerHint?: string): Promise<number> {
-    if (!this.modelIdByName) {
-      const [models, providers] = await Promise.all([this.llm.listModels(), this.llm.listProviders()]);
-      const providerName = new Map(providers.map((provider) => [provider.id, provider.name.toLowerCase()]));
-      this.modelIdByName = new Map();
-      for (const model of models) {
-        const key = model.name.toLowerCase();
-        // Provider-qualified key wins on cross-provider name collisions.
-        this.modelIdByName.set(`${providerName.get(model.llm_provider) ?? ''}/${key}`, model.id);
-        if (!this.modelIdByName.has(key)) this.modelIdByName.set(key, model.id);
-      }
-    }
-    const id =
-      (providerHint ? this.modelIdByName.get(`${providerHint.toLowerCase()}/${modelName.toLowerCase()}`) : undefined) ??
-      this.modelIdByName.get(modelName.toLowerCase());
-    if (id === undefined) {
-      const available = [...this.modelIdByName.keys()].filter((key) => !key.includes('/')).slice(0, 20).join(', ');
-      throw new Error(
-        `LLM model "${modelName}" not found on the backend. Available models include: ${available}. ` +
-          'Use list_llm_models to see all options.',
-      );
-    }
-    return id;
+    this.modelIndex ??= buildModelIndex(...(await Promise.all([this.llm.listModels(), this.llm.listProviders()])));
+    return lookupModelId(this.modelIndex, 'LLM model', modelName, providerHint, 'list_llm_models');
   }
 
   private async resolveExisting(plan: EntityPlan): Promise<number> {
     const remoteName = plan.remoteName ?? plan.name;
     const found = await this.lookupByName(plan, remoteName);
+    if (found === undefined && plan.kind === 'venv') {
+      throw new Error(
+        `venv: "${remoteName}" — no virtual environment with that name in the active organization. ` +
+          'Check the name with list_venvs, or create it with create_venv.',
+      );
+    }
     if (found === undefined) {
       throw new Error(
         `existing: "${remoteName}" (${plan.kind}) was not found in the active organization. ` +
@@ -393,9 +350,26 @@ export class EntityPusher {
         return (await this.surfaces.list()).find(nameMatches)?.id;
       case 'agent_definition':
         return (await this.agentDefinitions.list()).find(nameMatches)?.id;
+      case 'venv':
+        return this.lookupVenv(remoteName);
       default:
         return undefined;
     }
+  }
+
+  /** Venv names are not unique upstream, so an ambiguous `venv:` name is refused, not guessed. */
+  private async lookupVenv(name: string): Promise<number | undefined> {
+    const matches = await this.venvs.findByName(name);
+    if (matches.length > 1) {
+      throw new Error(
+        `venv: "${name}" is ambiguous — ${matches.length} virtual environments carry that name ` +
+          `(ids ${matches.map((venv) => venv.id).join(', ')}). Rename one (update_venv) so the reference is unique.`,
+      );
+    }
+    const match = matches[0];
+    if (match === undefined) return undefined;
+    this.venvById.set(match.id, match);
+    return match.id;
   }
 
   private async createEntity(plan: EntityPlan, payload: Record<string, unknown>): Promise<number> {
@@ -574,11 +548,11 @@ export class EntityPusher {
       }
       const configs = await this.llm.listEmbeddingConfigs();
       const named = configs.find(
-        (config) => String(config.custom_name ?? config.name ?? '').toLowerCase() === embedderName.toLowerCase(),
+        (config) => config.custom_name.toLowerCase() === embedderName.toLowerCase(),
       );
-      if (named) return named.id as number;
+      if (named) return named.id;
       const available = configs
-        .map((config) => String(config.custom_name ?? config.name ?? ''))
+        .map((config) => config.custom_name)
         .filter(Boolean)
         .join(', ');
       throw new Error(
@@ -590,6 +564,18 @@ export class EntityPusher {
 
     throw new Error(`RAG config references "${ref.$ref}" which has not been pushed.`);
   }
+}
+
+/** A venv that is not ready yet, or whose build failed, is worth a push warning. */
+export function venvStatusWarning(venv: Venv | undefined): string | null {
+  if (venv === undefined || venv.status === 'completed') return null;
+  if (BUILDING_STATUSES.has(venv.status)) {
+    return `venv "${venv.name}" is still being built (${venv.status}) — code that runs in it waits for the build.`;
+  }
+  return (
+    `venv "${venv.name}" failed to build${venv.error ? `: ${venv.error}` : ''} — code that runs in it will fail. ` +
+    'Fix its libraries with update_venv.'
+  );
 }
 
 /** Actionable error for a same-named org entity that flow.lock.json does not point at. */

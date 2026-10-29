@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import type { UserSession } from '../api/secrets.js';
+import type { UserSession } from '../api/user-session.js';
 import type { Config } from '../config.js';
 import type { StateStore } from '../state/store.js';
 import { logger } from '../util/logger.js';

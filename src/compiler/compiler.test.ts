@@ -311,6 +311,79 @@ flow:
     expect(python?.type === 'python' ? python.data : undefined).not.toHaveProperty('libraries');
   });
 
+  it('emits venv: as a resolve-existing venv ref on python nodes and python tools; null = default; omitted = unstated', async () => {
+    writeFlow(`
+meta: { name: venvs }
+tools:
+  python_code_tools:
+    fetcher:
+      description: Fetch a page.
+      code: "def main():\\n    return 1"
+      venv: Data Science
+    plain:
+      description: No venv stated.
+      code: "def main():\\n    return 1"
+flow:
+  nodes:
+    start: { type: start }
+    named: { type: python, code: "def main():\\n    return 1", venv: Data Science, libraries: [pandas] }
+    reset: { type: python, code: "def main():\\n    return 2", venv: null }
+    keep: { type: python, code: "def main():\\n    return 3" }
+    finish: { type: end }
+  edges:
+    - { from: start, to: named }
+    - { from: named, to: reset }
+    - { from: reset, to: keep }
+    - { from: keep, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    expect(artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    const dataOf = (name: string) => {
+      const node = artifact.graph.nodes.find((candidate) => candidate.node_name === name);
+      return node?.type === 'python' ? node.data : undefined;
+    };
+    expect(dataOf('named')?.venv_id).toEqual({ $ref: 'venvs.existing:Data Science' });
+    expect(dataOf('reset')).toHaveProperty('venv_id', null);
+    expect(dataOf('keep')).not.toHaveProperty('venv_id');
+
+    // One plan per venv name, a leaf ahead of the tools that reference it.
+    const venvPlans = artifact.entities.filter((plan) => plan.kind === 'venv');
+    expect(venvPlans).toEqual([
+      expect.objectContaining({ key: 'venvs.existing:Data Science', action: 'resolve-existing', remoteName: 'Data Science' }),
+    ]);
+    const keys = artifact.entities.map((plan) => plan.key);
+    expect(keys.indexOf('venvs.existing:Data Science')).toBeLessThan(keys.indexOf('tools.python_code_tools.fetcher'));
+    const fetcher = artifact.entities.find((plan) => plan.key === 'tools.python_code_tools.fetcher');
+    expect(fetcher?.payload?.python_code).toEqual({
+      code: 'def main():\n    return 1',
+      entrypoint: 'main',
+      venv_id: { $ref: 'venvs.existing:Data Science' },
+    });
+    const plain = artifact.entities.find((plan) => plan.key === 'tools.python_code_tools.plain');
+    expect(plain?.payload?.python_code).not.toHaveProperty('venv_id');
+
+    // With a venv stated, the libraries warning points at that venv instead of create_venv.
+    const warning = artifact.diagnostics.find((diagnostic) => diagnostic.path === 'flow.nodes.named.libraries');
+    expect(warning?.message).toMatch(/venv named in `venv:`/);
+  });
+
+  it('rejects a venv name the sandbox would refuse', async () => {
+    writeFlow(`
+meta: { name: bad-venv }
+flow:
+  nodes:
+    start: { type: start }
+    work: { type: python, code: "def main():\\n    return 1", venv: "data/science" }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.some((diagnostic) => diagnostic.path.includes('venv') && /venv names/.test(diagnostic.message))).toBe(true);
+  });
+
   it('numbers new nodes of numbered types in authoring order; start, end and notes get no number', async () => {
     writeFlow(`
 meta: { name: numbering }

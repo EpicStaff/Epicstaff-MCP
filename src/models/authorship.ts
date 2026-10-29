@@ -12,6 +12,15 @@ export interface UserSummary {
   avatar_url: string | null;
 }
 
+/**
+ * How MCP output names a person: the display name, else the user id. Like the frontend, there is
+ * no email fallback — the backend does not send one.
+ */
+export function describeUser(user: UserSummary | null | undefined): string | null {
+  if (user == null) return null;
+  return user.display_name ?? `user #${user.id}`;
+}
+
 /** Last edit of a resource whose edits the backend tracks. Both null until an edit is recorded. */
 export interface LastEditFields {
   last_edited_by: UserSummary | null;

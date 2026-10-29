@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { compileFlow } from '../compiler/index.js';
+import type { Venv } from '../api/venvs.js';
 import type { GraphDto } from '../models/graph.js';
 import { decompileFlow, type DecompilerDeps } from './decompiler.js';
 import { hasErrors } from './diagnostics.js';
@@ -195,7 +196,18 @@ function buildStubDeps(dto: GraphDto): DecompilerDeps {
     tools: { listPythonCodeTools: async () => [], listMcpTools: async () => [] },
     knowledge: { listCollections: async () => [{ collection_id: 8, collection_name: 'Handbook' }] },
     keyValueTables: { list: async () => [{ id: 4, name: 'User Profiles' }] },
+    venvs: {
+      list: async () => [
+        venvFixture(4, 'data-science'),
+        venvFixture(5, 'twin'),
+        venvFixture(6, 'twin'),
+      ],
+    },
   };
+}
+
+function venvFixture(id: number, name: string): Venv {
+  return { id, name, libs: [], status: 'completed', error: null, owner: null, created_at: null, is_favorite: false };
 }
 
 describe('decompileFlow', () => {
@@ -263,17 +275,60 @@ describe('decompileFlow', () => {
     ]);
   });
 
-  it('warns that a python node\'s virtual environment is kept, not written to flow source', async () => {
+  it('writes a python node\'s virtual environment as venv: <name>, and it compiles back to the same id ref', async () => {
     const dto = buildGraphDto();
     dto.python_node_list[0]!.python_code.venv_id = 4;
     const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
 
-    expect(result.warnings).toContain(
-      'flow.nodes.My_Node: the virtual environment (venv #4) is not representable in flow source — it is kept on the next push',
-    );
+    expect(result.warnings.some((warning) => warning.includes('venv'))).toBe(false);
     const { source, diagnostics } = await loadFlowDirectory(targetDir);
     expect(diagnostics).toEqual([]);
-    expect(source!.flow.nodes['My_Node']).not.toHaveProperty('venv_id');
+    expect(source!.flow.nodes['My_Node']).toMatchObject({ type: 'python', venv: 'data-science' });
+
+    const artifact = await compileFlow(targetDir);
+    const python = artifact.graph.nodes.find((node) => node.type === 'python');
+    expect(python?.type === 'python' && python.data.venv_id).toEqual({ $ref: 'venvs.existing:data-science' });
+    expect(artifact.entities).toContainEqual(
+      expect.objectContaining({ key: 'venvs.existing:data-science', kind: 'venv', action: 'resolve-existing' }),
+    );
+  });
+
+  it('leaves out a venv it cannot name unambiguously — the next push keeps it', async () => {
+    const dto = buildGraphDto();
+    dto.python_node_list[0]!.python_code.venv_id = 5; // "twin" — two venvs share the name
+    const ambiguous = await decompileFlow(buildStubDeps(dto), 42, targetDir);
+    expect(ambiguous.warnings.join('\n')).toMatch(/shares its name with another venv/);
+    const { source } = await loadFlowDirectory(targetDir);
+    expect(source!.flow.nodes['My_Node']).not.toHaveProperty('venv');
+
+    rmSync(targetDir, { recursive: true, force: true });
+    dto.python_node_list[0]!.python_code.venv_id = 99; // gone
+    const missing = await decompileFlow(buildStubDeps(dto), 42, targetDir);
+    expect(missing.warnings.join('\n')).toMatch(/venv #99\) was not found/);
+  });
+
+  it('reports who created and last edited the graph and each node, and writes the graph authors as a comment', async () => {
+    const dto = buildGraphDto();
+    dto.created_by = { id: 3, display_name: 'Ada', avatar_url: null };
+    dto.last_edited_by = { id: 4, display_name: null, avatar_url: null };
+    dto.last_edited_at = '2026-02-02T00:00:00Z';
+    dto.python_node_list[0]!.created_by = { id: 3, display_name: 'Ada', avatar_url: null };
+    const result = await decompileFlow(buildStubDeps(dto), 42, targetDir);
+
+    expect(result.authorship).toMatchObject({
+      created_by: 'Ada',
+      last_edited_by: 'user #4',
+      last_edited_at: '2026-02-02T00:00:00Z',
+    });
+    expect(result.authorship.nodes).toContainEqual(
+      expect.objectContaining({ name: 'My_Node', type: 'python', node_number: 1, created_by: 'Ada' }),
+    );
+    expect(result.authorship.nodes.find((node) => node.type === 'start')?.node_number).toBeNull();
+    const yaml = readFileSync(path.join(targetDir, 'flow.yaml'), 'utf8');
+    expect(yaml).toContain('# Created by Ada at 2026-01-01T00:00:00Z.');
+    expect(yaml).toContain('# Last edited by user #4 at 2026-02-02T00:00:00Z.');
+    const { diagnostics } = await loadFlowDirectory(targetDir);
+    expect(diagnostics).toEqual([]);
   });
 
   it('seeds the lockfile with graph identity and node backend ids', async () => {

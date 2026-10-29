@@ -9,6 +9,7 @@ import { KnowledgeApi } from '../api/knowledge.js';
 import { LlmApi } from '../api/llm.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
+import { VenvsApi } from '../api/venvs.js';
 import { compileFlow } from '../compiler/index.js';
 import { decompileFlow } from '../flow-source/decompiler.js';
 import { hasErrors } from '../flow-source/diagnostics.js';
@@ -641,7 +642,9 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         'Import an existing EpicStaff flow (graph) into a local flow-source directory so it can be edited and ' +
         'repushed: writes flow.yaml with every node, edge and pinned canvas position, plus a seeded flow.lock.json ' +
         'so push_flow updates the same graph in place. Referenced entities (agents, surfaces, llm configs, tools, ' +
-        'knowledge collections) are written as {existing: "<name>"} references — they stay owned by the backend. ' +
+        'knowledge collections) are written as {existing: "<name>"} references — they stay owned by the backend; ' +
+        'a python node\'s virtual environment as venv: "<name>". The result also reports who created and last ' +
+        'edited the flow and each node (with its #N number) — read-only, so it is not part of flow source. ' +
         'Refuses to overwrite an existing flow source.',
       inputSchema: {
         graph_id: z.number().int().describe('Backend id of the graph to pull (see list output of graph-light)'),
@@ -655,7 +658,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
 
-        const { files, warnings } = await decompileFlow(
+        const { files, warnings, authorship } = await decompileFlow(
           {
             graphs: new GraphsApi(context.client),
             agentDefinitions: new AgentDefinitionsApi(context.client),
@@ -664,6 +667,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
             tools: new ToolsApi(context.client),
             knowledge: new KnowledgeApi(context.client),
             keyValueTables: new KeyValueTablesApi(context.client),
+            venvs: new VenvsApi(context.client),
           },
           graph_id,
           target_dir,
@@ -672,6 +676,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         return {
           files,
           warnings,
+          authorship,
           next: 'Run diff_flow to verify a no-op baseline, then edit with es-write-flow.',
         };
       }),

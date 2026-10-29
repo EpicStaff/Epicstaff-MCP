@@ -1,6 +1,6 @@
 ---
 name: es-catalog
-description: Manage the reusable org catalog — agents, surfaces, knowledge collections — standalone, without authoring a flow. Use to create/update/delete catalog entities that flows then reference via existing:, or to seed shared building blocks before writing flows.
+description: Manage the reusable org catalog and configuration — agents, surfaces, knowledge collections, python/MCP tools, venvs, LLM/embedding configs and defaults, secrets, key-value tables, labels — standalone, without authoring a flow; plus the recycle bin, flow versions, copy, delete and import/export. Use to create/update/delete org entities that flows then reference, or to seed shared building blocks before writing flows.
 ---
 
 # Manage the catalog (standalone entities)
@@ -106,14 +106,53 @@ re-indexes), not a new collection.
 - **Knowledge:** `create_collection`, `attach_rag`, `delete_collection`
   (plus `list_source_collections`, `upload_documents`, `wait_for_collections` from the
   knowledge/run tools)
+- **Tools:** `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`,
+  `update_mcp_tool`, `delete_mcp_tool` (list with `list_tools`). A python tool names its `venv`,
+  the `secrets` its code may read, and its `execution_timeout`; an MCP tool is one tool of a
+  remote http(s)/SSE server (stdio servers cannot be registered).
+- **Venvs:** `list_venvs`, `create_venv`, `update_venv`, `delete_venv` — the virtual environments
+  python code runs in (flow source `venv: "<name>"`). Libraries are requirement strings
+  (`"requests>=2.31"`); a build runs asynchronously (status declared → processing → completed |
+  failed). A venv still used by any code — binned code included — cannot be deleted.
+- **Model configuration:** `create_llm_config`, `update_llm_config`, `delete_llm_config`,
+  `list_embedding_configs`, `create_embedding_config`, `update_embedding_config`,
+  `delete_embedding_config`, `get_settings` (org default models, python execution-timeout bounds,
+  recycle-bin retention, quickstart status), `update_default_models`, `run_quickstart` (one provider
+  key → ready LLM + embedding configs). LLM and embedding configs are deleted **for good**, and what
+  used them loses the reference (agents, flows and collections; the org default slots) — run
+  `dry_run: true` first to see that usage. Only a config used by something you cannot see is skipped.
+- **Secrets:** `list_secrets`, `create_secret`, `delete_secret`. A secret value never travels
+  through a tool call: `create_secret` (and `api_key_env` on the config tools) read it from an
+  environment variable of the MCP server; nothing ever returns it. Secrets are immutable — to
+  rotate, delete and create again. They need a signed-in session (`EPICSTAFF_USERNAME` /
+  `EPICSTAFF_PASSWORD`), not `EPICSTAFF_API_TOKEN`.
+- **Key-value tables:** `list_key_value_tables`, `create_key_value_table`, `update_key_value_table`,
+  `delete_key_value_table`, `list_key_value_entries`, `write_key_value_entries` (hand-edit entries
+  that key-value nodes read).
+- **Labels:** `list_labels`, `create_label`, `update_label`, `delete_label` (scope `flow` or `tool`);
+  tag a flow with `set_flow_labels`, a tool with the `labels` field of its create/update tool.
+- **Flows:** `copy_flow`, `delete_flow`, `list_graph_versions`, `create_graph_version`,
+  `restore_graph_version` (overwrite in place with a backup version, or `mode: new_flow`),
+  `export_entities` / `import_entities` (EpicStaff export documents of flows, python tools or MCP
+  tools — `inspect_only` first; export writes a new `.json` file and replaces an existing one only
+  with `overwrite: true`), `get_flow_persistent_state` (read-only persistent variables).
+- **Recycle bin:** `list_recycle_bin`, `restore_from_recycle_bin`, `purge_from_recycle_bin`.
+- **Voice:** voice configs, an agent's voice settings, Twilio voice channels and voice chat history
+  have their own skill — `es-voice`. `update_default_models` also sets the legacy
+  `voice_llm_config` / `transcription_llm_config` slots (`list_voice_configs include_legacy`).
 
 Create tools are **org-unique by name**: a name clash returns a message telling you to use
 the matching `update_*` (or pick a new name) — it is never silently swallowed.
 
 ## Deletes go to the recycle bin and are NOT flow-aware
 
-`delete_surface`, `delete_agent`, and `delete_collection` move the entity to the EpicStaff
-**recycle bin** at once (a user can restore it in the editor until it is purged):
+`delete_surface`, `delete_agent`, `delete_collection`, `delete_python_tool`, `delete_mcp_tool`,
+`delete_secret`, `delete_key_value_table` and `delete_flow` move the item to the EpicStaff
+**recycle bin** at once — `list_recycle_bin` shows it with the days left, and
+`restore_from_recycle_bin(kind, ids)` brings it back (renamed when its name was taken meanwhile;
+`all: true` instead of `ids` restores every item of that kind — only when the user asks for the whole bin).
+`purge_from_recycle_bin` deletes for good: superadmin-only, needs `confirm: true` — use it only when
+the user explicitly names the items; everything expires on its own after the retention period.
 
 - While it is binned, any flow referencing it via `{ existing: "<name>" }` will **fail its next
   `push_flow`**. Verify no flow depends on it first.

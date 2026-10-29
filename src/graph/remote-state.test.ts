@@ -51,6 +51,31 @@ function expectEmptyNodeDiff(nodeDiff: NodeDiffByType, except?: keyof NodeDiffBy
   }
 }
 
+/**
+ * The desired state as GraphPusher holds it: every node keeps a compiler-minted uuid (here
+ * `compiled-<n>`) and only its backend id matches the remote node. Route refs (decision-table and
+ * classification-table targets) and edge endpoints are rewritten to the new uuids.
+ */
+function withCompiledUuids(state: GraphState): GraphState {
+  const uuidByOld = new Map(state.nodes.map((node, index) => [node.id, `compiled-${index}`]));
+  const rekey = (uuid: string | null | undefined): string | null =>
+    uuid == null ? null : (uuidByOld.get(uuid) ?? uuid);
+  for (const node of state.nodes) {
+    if (node.type === 'decision-table' || node.type === 'classification-decision-table') {
+      const table = node.data.table;
+      for (const group of table.condition_groups ?? []) group.next_node = rekey(group.next_node);
+      table.default_next_node = rekey(table.default_next_node);
+      table.next_error_node = rekey(table.next_error_node);
+    }
+    node.id = rekey(node.id) ?? node.id;
+  }
+  for (const edge of state.edges) {
+    edge.sourceNodeId = rekey(edge.sourceNodeId) ?? edge.sourceNodeId;
+    edge.targetNodeId = rekey(edge.targetNodeId) ?? edge.targetNodeId;
+  }
+  return state;
+}
+
 // ── Shared fixture: a fully persisted graph + the desired state a pusher would hold ─
 
 const mStart = meta(0, 0);
@@ -595,6 +620,59 @@ describe('buildRemoteState', () => {
     expect(connectionDiff.toCreate).toStrictEqual([]);
     expect(connectionDiff.toDelete).toStrictEqual([]);
     expect(connectionDiff.toUpdate).toStrictEqual([]);
+  });
+
+  it('round-trips with the pusher\'s uuids: a compiled state keeps its own node uuids, only backend ids match', () => {
+    // A push binds compiled nodes to backend ids but never adopts the remote-<type>-<id> uuids, so
+    // every route ref in a comparable must be resolved to a backend id, not compared as a uuid.
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+
+    expectEmptyNodeDiff(getNodeDiff(remote, desired));
+    const connectionDiff = getConnectionDiff(remote, desired, buildUuidToBackendIdMap(desired.nodes));
+    expect(connectionDiff.toCreate).toStrictEqual([]);
+    expect(connectionDiff.toDelete).toStrictEqual([]);
+    expect(connectionDiff.toUpdate).toStrictEqual([]);
+  });
+
+  it('python code that ends with a newline matches the stripped text the server returns', () => {
+    // PythonCodeSerializer stores `code.strip()`: the source block's final newline never comes back.
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+    for (const node of desired.nodes) {
+      if (node.type === 'python') node.data.code = `${node.data.code}\n`;
+      if (node.type === 'webhook-trigger') node.data.python_code.code = `\n${node.data.python_code.code}\n\n`;
+      if (node.type === 'classification-decision-table' && node.data.table.pre_computation) {
+        node.data.table.pre_computation.code = `${node.data.table.pre_computation.code}\n`;
+      }
+    }
+
+    expectEmptyNodeDiff(getNodeDiff(remote, desired));
+  });
+
+  it('an edit inside python code is still an update', () => {
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+    const python = desired.nodes.find((node) => node.type === 'python');
+    if (python?.type !== 'python') return expect.unreachable('python node missing');
+    python.data.code = python.data.code.replace('return x', 'return  x');
+
+    const nodeDiff = getNodeDiff(remote, desired);
+    expectEmptyNodeDiff(nodeDiff, 'pythonNodes');
+    expect(nodeDiff.pythonNodes.toUpdate.map((update) => update.changedFields)).toEqual([['python_code.code']]);
+  });
+
+  it('a CDT whose default route really moved is an update, with compiled uuids', () => {
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+    const cdt = desired.nodes.find((node) => node.type === 'classification-decision-table');
+    const agent = desired.nodes.find((node) => node.type === 'agent');
+    if (cdt?.type !== 'classification-decision-table' || agent === undefined) return expect.unreachable('nodes missing');
+    cdt.data.table.default_next_node = agent.id;
+
+    const nodeDiff = getNodeDiff(remote, desired);
+    expectEmptyNodeDiff(nodeDiff, 'classificationDecisionTableNodes');
+    expect(nodeDiff.classificationDecisionTableNodes.toUpdate).toHaveLength(1);
   });
 
   it('reconstructs branch refs in node state, never as edges', () => {

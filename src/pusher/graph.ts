@@ -7,6 +7,7 @@ import type { GraphNode, GraphState } from '../graph/graph-state.js';
 import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import type { CustomPythonCode } from '../models/nodes/python-node.js';
 import { buildBulkSavePayload } from '../graph/bulk-save.js';
+import { getNodeDiff } from '../graph/diff.js';
 import { buildRemoteState, collectOrphanEdgeIds } from '../graph/remote-state.js';
 import { applySaveResponse } from '../graph/temp-id.js';
 import type { BulkSavePayload, GraphDto } from '../models/graph.js';
@@ -33,7 +34,14 @@ export interface GraphPushResult {
   createdGraph: boolean;
   /** False when the computed diff was empty and the bulk save was skipped (save_version unchanged). */
   changed: boolean;
-  nodeActions: { created: number; updated: number; deleted: number; updatedNodes: string[] };
+  nodeActions: {
+    created: number;
+    updated: number;
+    deleted: number;
+    updatedNodes: string[];
+    /** Per rewritten node, the fields that differed from the remote graph (only when some did). */
+    changedFields?: Record<string, string[]>;
+  };
   warnings: string[];
 }
 
@@ -344,6 +352,12 @@ export class GraphPusher {
       saveVersion: remoteDto.save_version,
     });
 
+    // Why each persisted node is rewritten — the same diff the payload was built from.
+    const changedFields: Record<string, string[]> = {};
+    for (const bucket of Object.values(getNodeDiff(remote, desired))) {
+      for (const { current, changedFields: fields } of bucket.toUpdate) changedFields[current.node_name] = fields;
+    }
+
     // Reap edges whose endpoints no longer resolve to a node. buildRemoteState cannot
     // represent them, so the edge differ never sees them and they would otherwise stay
     // on the graph forever (see collectOrphanEdgeIds).
@@ -411,7 +425,13 @@ export class GraphPusher {
       lock: currentLock,
       createdGraph,
       changed,
-      nodeActions: { created, updated, deleted, updatedNodes },
+      nodeActions: {
+        created,
+        updated,
+        deleted,
+        updatedNodes,
+        ...(Object.keys(changedFields).length > 0 ? { changedFields } : {}),
+      },
       warnings,
     };
   }
@@ -442,7 +462,7 @@ export class GraphPusher {
  * Keep node settings flow source cannot express, so a repush does not wipe what a user
  * attached in the EpicStaff editor: a trigger node's `webhook_trigger` (path / provider
  * live in `webhook-triggers/`), test payload and storage access, a telegram node's
- * bot-token secret when the source sets no `bot_token_env`, the secrets, virtual
+ * bot-token secret when the source sets no `bot_token_env` and its fields, the secrets, virtual
  * environment and execution timeout of python code, and a classification table's
  * generated step explanations. Only nodes matched to a persisted node (same backend id
  * and type) inherit; the source still wins wherever it states a value.
@@ -470,6 +490,9 @@ export function inheritUnrepresentableFields(desired: GraphState, remote: GraphS
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
       node.data.test_payload ??= previous.data.test_payload;
+      // Flow source cannot list a telegram node's fields (it compiles []): keep the editor's, ids
+      // included — otherwise every repush rewrote the node and dropped them.
+      if (node.data.fields.length === 0) node.data.fields = previous.data.fields;
     } else if (node.type === 'python' && previous.type === 'python') {
       inheritPythonCodeSettings(node.data, previous.data);
       // Flow source cannot set use_storage; the wire default is false (bulk-save `?? false`).

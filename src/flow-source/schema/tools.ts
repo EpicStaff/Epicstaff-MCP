@@ -6,7 +6,7 @@
  */
 import { z } from 'zod';
 
-import { symbolicNameSchema } from './common.js';
+import { LIBRARIES_DEPRECATION_NOTE, symbolicNameSchema, venvRefSchema } from './common.js';
 
 export const toolConfigSchema = z
   .strictObject({
@@ -48,13 +48,8 @@ export const pythonCodeToolSchema = z
       .string()
       .default('main')
       .describe('Name of the Python function called as the tool entrypoint.'),
-    libraries: z
-      .array(z.string())
-      .default([])
-      .describe(
-        'DEPRECATED — not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). ' +
-          'The tool runs in the default venv unless one is selected for it in the editor (a repush keeps that selection).',
-      ),
+    venv: venvRefSchema.optional(),
+    libraries: z.array(z.string()).default([]).describe(LIBRARIES_DEPRECATION_NOTE),
   })
   .superRefine((tool, ctx) => {
     const hasCode = tool.code !== undefined;

@@ -36,6 +36,10 @@
  *    plan per table name a key-value node uses (found by name, created if missing).
  *  - collection RAGs:    `{$ref: "<collection ref>#rag:<naive|graph>"}` (see
  *    `ragRefKey` in artifact.ts) — the RAG a knowledge-retriever node searches.
+ *  - venvs:              `{$ref: "venvs.existing:<venv name>"}` — the `venv:` of a python node
+ *    or python tool, sitting in `python_code.venv_id`. Venvs are never defined in flow
+ *    source, so every one is a `resolve-existing` plan (kind `venv`); `venv: null` emits a
+ *    literal `venv_id: null` (the default venv) and an omitted `venv:` emits no `venv_id`.
  *
  * Numeric GraphState fields that carry refs (`agent_definition`, `surface_list`
  * entries, subgraph `data.id`, `default_llm_config`, inline-surface tool /
@@ -60,7 +64,7 @@
  *  - classification category descriptions — the CDT table state has no
  *    description field.
  *  - python `libraries` (nodes and python tools) — EpicStaff replaced per-code
- *    libraries with virtual environments (venvs); the list is not sent.
+ *    libraries with virtual environments (venvs, the `venv:` key); the list is not sent.
  *
  * Cross-section cycle: `surfaces[].owner_agent` points forward to the agents
  * section while `agents[].default_surfaces` points back at surfaces. The plan
@@ -226,6 +230,17 @@ class RefRegistry {
     }));
   }
 
+  /**
+   * `python_code.venv_id` for a source `venv:` value: a `{$ref}` to the named venv, `null` for the
+   * default venv, or no field at all when the source leaves the venv unstated.
+   */
+  venvField(venv: string | null | undefined): { venv_id?: number | null } {
+    if (venv === undefined) return {};
+    if (venv === null) return { venv_id: null };
+    // SymbolicRef in a numeric position — substituted by the pusher (artifact.ts).
+    return { venv_id: this.ref('venvs', { existing: venv }) as unknown as number };
+  }
+
   keyValueTablePlans(): EntityPlan[] {
     return [...this.keyValueTableNames].sort().map((tableName) => ({
       key: entityKey('key_value_tables', tableName),
@@ -341,24 +356,27 @@ function buildToolConfigPlans(source: FlowSource): EntityPlan[] {
  * EpicStaff no longer installs per-code `libraries`: code runs in a virtual environment (venv),
  * chosen per code block. The list in flow source is not sent, so say so instead of dropping it.
  */
-function librariesNotInstalledWarning(atPath: string): Diagnostic {
+function librariesNotInstalledWarning(atPath: string, hasVenv: boolean): Diagnostic {
   return makeWarning(
     atPath,
     'EpicStaff no longer installs per-code libraries — code runs in a virtual environment (venv). ' +
-      'These libraries are NOT sent: create a venv holding them in the EpicStaff editor and select it ' +
-      'for this code there (a repush keeps that selection), or remove `libraries`.',
+      (hasVenv
+        ? 'These libraries are NOT sent: make sure the venv named in `venv:` holds them, then remove `libraries`.'
+        : 'These libraries are NOT sent: create a venv holding them (create_venv) and reference it with ' +
+          '`venv: "<name>"`, then remove `libraries`.'),
   );
 }
 
 /**
  * Payload template shaped like `CreatePythonCodeToolRequest` (src/api/tools.ts). Divergence: the
- * frontend always sends `python_code.venv_id`; it is left out here, so a new tool runs in the
- * default venv and an update keeps the venv a user selected in the editor (the backend applies
- * only the python-code fields it receives).
+ * frontend always sends `python_code.venv_id`; here it is sent only when the source states `venv:`,
+ * so a new tool without one runs in the default venv and an update keeps the venv a user selected
+ * in the editor (the backend applies only the python-code fields it receives).
  */
 async function buildPythonToolPlans(
   source: FlowSource,
   flowDir: string,
+  registry: RefRegistry,
   diagnostics: Diagnostic[],
 ): Promise<EntityPlan[]> {
   const plans: EntityPlan[] = [];
@@ -373,14 +391,16 @@ async function buildPythonToolPlans(
       );
     }
     if (tool.libraries.length > 0) {
-      diagnostics.push(librariesNotInstalledWarning(`tools.python_code_tools.${name}.libraries`));
+      diagnostics.push(
+        librariesNotInstalledWarning(`tools.python_code_tools.${name}.libraries`, typeof tool.venv === 'string'),
+      );
     }
     plans.push(
       upsertPlan('tools.python_code_tools', name, 'python_code_tool', tool, {
         name,
         description: tool.description,
         variables: [],
-        python_code: { code, entrypoint: tool.entrypoint },
+        python_code: { code, entrypoint: tool.entrypoint, ...registry.venvField(tool.venv) },
       }),
     );
   }
@@ -743,12 +763,12 @@ async function buildGraph(
       case 'python': {
         const code = node.code ?? (await readFlowFile(flowDir, node.code_file as string));
         if (node.libraries.length > 0) {
-          diagnostics.push(librariesNotInstalledWarning(`${nodePath}.libraries`));
+          diagnostics.push(librariesNotInstalledWarning(`${nodePath}.libraries`, typeof node.venv === 'string'));
         }
         nodes.push({
           ...base,
           type: 'python',
-          data: { name: nodeName, code, entrypoint: node.entrypoint },
+          data: { name: nodeName, code, entrypoint: node.entrypoint, ...registry.venvField(node.venv) },
           test_input: {},
         });
         break;
@@ -1100,7 +1120,7 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
 
   const llmPlans = buildLlmConfigPlans(source, registry);
   const toolConfigPlans = buildToolConfigPlans(source);
-  const pythonToolPlans = await buildPythonToolPlans(source, flowDir, diagnostics);
+  const pythonToolPlans = await buildPythonToolPlans(source, flowDir, registry, diagnostics);
   const mcpToolPlans = buildMcpToolPlans(source, diagnostics);
   const knowledgePlans = buildKnowledgePlans(source, flowDir, registry);
   const surfacePlans = buildSurfacePlans(source, registry);
@@ -1117,9 +1137,10 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
   // Dependency order per the artifact contract; every section's
   // resolve-existing plans precede its local upserts.
   const entities: EntityPlan[] = [
-    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    // Secrets, key-value tables and venvs are leaves: nothing they hold references another entity.
     ...registry.secretPlans(),
     ...registry.keyValueTablePlans(),
+    ...registry.existingPlans('venvs', 'venv'),
     ...registry.existingPlans('llm_configs', 'llm_config'),
     ...llmPlans,
     ...registry.existingPlans('tools.tool_configs', 'tool_config'),

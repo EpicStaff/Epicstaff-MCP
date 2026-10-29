@@ -109,9 +109,13 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
      each routing to one node) — EpicStaff removed conditional edges, and an edge `condition:`
      is a load error.
      - Python code (nodes, `python_code_tools`): don't write `libraries:` — EpicStaff runs code in a
-       virtual environment chosen in the editor and no longer installs per-code libraries (the
-       build warns and drops them). Tell the user which packages the code needs so they can pick
-       or create a venv for it; repushes keep that choice.
+       virtual environment (venv) and no longer installs per-code libraries (the build warns and
+       drops them). Put third-party packages in a venv and name it: `venv: "<name>"`. Reuse one
+       from `list_venvs`, or `create_venv({ name, libraries: ["pandas", "requests>=2.31"] })` —
+       it builds asynchronously; code waits for a venv still building, and fails in one whose
+       build failed (push warns about both). `venv: null` = the default venv; leaving `venv` out
+       keeps whatever venv the code already runs in (new code gets the default). Venv names are
+       not unique in EpicStaff — a name two venvs share is refused at push; rename one.
      - Explicit retrieval step → `knowledge-retriever` (`collection`, `query` template with
        `{name}` placeholders filled from `input_map`, results to `output_variable_path`). For an
        `{ existing: ... }` collection also set `rag: naive|graph`.

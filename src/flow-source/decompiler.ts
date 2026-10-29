@@ -8,7 +8,7 @@
  * Strategy — SHALLOW PULL: every referenced entity (agent definition, surface,
  * llm config, python/MCP tool, knowledge collection, subgraph flow) is
  * written as an `{existing: "<remote name>"}` reference; a key-value node names its
- * table directly. Those entities exist
+ * table directly and a python node its virtual environment (`venv:`). Those entities exist
  * remotely by definition, so referencing them is both simpler and safer than
  * re-authoring: the next push resolves them by name, never re-creates them,
  * and no entity content hashes have to be reconstructed — which guarantees an
@@ -18,8 +18,8 @@
  *
  * Known lossy pulls (each emits a warning; none affect graph topology):
  *  - agent-node sub-tasks; task-node output_schema / remember_output;
- *  - python-node test_input / use_storage; declared python secrets, virtual environment
- *    and execution timeout (all three kept on repush);
+ *  - python-node test_input / use_storage; declared python secrets and execution
+ *    timeout (both kept on repush);
  *  - webhook-trigger python code + input map; telegram-trigger field mappings; the
  *    attached webhook trigger and telegram bot-token secret are not representable
  *    but are kept on repush (see `inheritUnrepresentableFields` in pusher/graph.ts);
@@ -64,6 +64,8 @@ import type { LlmConfig } from '../api/llm.js';
 import type { SourceCollection } from '../api/knowledge.js';
 import type { Surface } from '../api/surfaces.js';
 import type { McpTool, PythonCodeTool } from '../api/tools.js';
+import type { Venv } from '../api/venvs.js';
+import { describeUser, type UserSummary } from '../models/authorship.js';
 import { contentHash, setEntity, writeLock, LOCKFILE_NAME, type FlowLock } from './lockfile.js';
 import { SYMBOLIC_NAME_PATTERN } from './schema/common.js';
 
@@ -102,6 +104,10 @@ export interface DecompilerKeyValueTablesApi {
   list(): Promise<KeyValueTable[]>;
 }
 
+export interface DecompilerVenvsApi {
+  list(): Promise<Venv[]>;
+}
+
 export interface DecompilerDeps {
   graphs: DecompilerGraphsApi;
   agentDefinitions: DecompilerAgentDefinitionsApi;
@@ -110,6 +116,26 @@ export interface DecompilerDeps {
   tools: DecompilerToolsApi;
   knowledge: DecompilerKnowledgeApi;
   keyValueTables: DecompilerKeyValueTablesApi;
+  venvs: DecompilerVenvsApi;
+}
+
+/** Read-only authorship of a pulled node — not representable in flow source, reported alongside. */
+export interface PulledNodeAuthorship {
+  name: string;
+  type: string;
+  /** The server-issued #N badge; null for start / end / note nodes. */
+  node_number: number | null;
+  created_by: string | null;
+  last_edited_by: string | null;
+  last_edited_at: string | null;
+}
+
+export interface PulledAuthorship {
+  created_by: string | null;
+  created_at: string | null;
+  last_edited_by: string | null;
+  last_edited_at: string | null;
+  nodes: PulledNodeAuthorship[];
 }
 
 export interface DecompileResult {
@@ -117,6 +143,8 @@ export interface DecompileResult {
   files: string[];
   warnings: string[];
   lock: FlowLock;
+  /** Who created / last edited the graph and each node (also written as a flow.yaml header comment). */
+  authorship: PulledAuthorship;
 }
 
 export const FLOW_SOURCE_FILE_NAME = 'flow.yaml';
@@ -209,9 +237,13 @@ export async function decompileFlow(
     });
   }
 
+  const authorship = collectAuthorship(dto, registry);
+
   await fs.mkdir(targetDir, { recursive: true });
   const flowPath = path.join(targetDir, FLOW_SOURCE_FILE_NAME);
-  const header = `# Pulled from EpicStaff graph #${dto.id} — edit locally, then diff_flow / push_flow.\n`;
+  const header =
+    `# Pulled from EpicStaff graph #${dto.id} — edit locally, then diff_flow / push_flow.\n` +
+    authorshipHeader(authorship);
   await fs.writeFile(
     flowPath,
     header + stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false }),
@@ -219,7 +251,50 @@ export async function decompileFlow(
   );
   await writeLock(targetDir, lock);
 
-  return { files: [flowPath, path.join(targetDir, LOCKFILE_NAME)], warnings, lock };
+  return { files: [flowPath, path.join(targetDir, LOCKFILE_NAME)], warnings, lock, authorship };
+}
+
+// ---------------------------------------------------------------------------
+// Authorship (read-only on the backend — reported, never pushed)
+// ---------------------------------------------------------------------------
+
+function collectAuthorship(dto: GraphDto, registry: NodeRegistry): PulledAuthorship {
+  return {
+    created_by: describeUser(dto.created_by),
+    created_at: dto.created_at ?? null,
+    last_edited_by: describeUser(dto.last_edited_by),
+    last_edited_at: dto.last_edited_at ?? null,
+    nodes: registry.nodes.map(({ entry, name }) => {
+      const nodeDto = entry.dto as {
+        node_number?: number | null;
+        created_by?: UserSummary | null;
+        last_edited_by?: UserSummary | null;
+        last_edited_at?: string | null;
+      };
+      return {
+        name,
+        type: entry.type,
+        node_number: nodeDto.node_number ?? null,
+        created_by: describeUser(nodeDto.created_by),
+        last_edited_by: describeUser(nodeDto.last_edited_by),
+        last_edited_at: nodeDto.last_edited_at ?? null,
+      };
+    }),
+  };
+}
+
+/** YAML comment lines naming the graph's author and last editor (comments survive edits harmlessly). */
+function authorshipHeader(authorship: PulledAuthorship): string {
+  const lines: string[] = [];
+  if (authorship.created_by !== null) {
+    lines.push(`# Created by ${authorship.created_by}${authorship.created_at ? ` at ${authorship.created_at}` : ''}.`);
+  }
+  if (authorship.last_edited_by !== null) {
+    lines.push(
+      `# Last edited by ${authorship.last_edited_by}${authorship.last_edited_at ? ` at ${authorship.last_edited_at}` : ''}.`,
+    );
+  }
+  return lines.map((line) => `${line.replace(/[\r\n]+/g, ' ')}\n`).join('');
 }
 
 function refuseExistingFlowFiles(targetDir: string): void {
@@ -246,6 +321,7 @@ interface ReferencedEntityNames {
   collections: Map<number, string>;
   subgraphs: Map<number, string>;
   keyValueTables: Map<number, string>;
+  venvs: Map<number, string>;
 }
 
 async function fetchReferencedEntityNames(
@@ -277,9 +353,10 @@ async function fetchReferencedEntityNames(
     (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
   const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
   const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
+  const needsVenvs = dto.python_node_list.some((node) => node.python_code.venv_id != null);
 
   const emptyMap = (): Map<number, string> => new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] =
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables, venvs] =
     await Promise.all([
       mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
       mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
@@ -314,6 +391,9 @@ async function fetchReferencedEntityNames(
       needsKeyValueTables
         ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name])))
         : Promise.resolve(emptyMap()),
+      needsVenvs
+        ? deps.venvs.list().then((list) => new Map(list.map((venv) => [venv.id, venv.name])))
+        : Promise.resolve(emptyMap()),
     ]);
 
   // Nested subgraph_detail objects resolve names without the extra list call.
@@ -324,7 +404,7 @@ async function fetchReferencedEntityNames(
     }
   }
 
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables, venvs };
 }
 
 async function mapFromFetches<T>(
@@ -604,6 +684,37 @@ function inlineSurfaceField(
   return { inline_surface: body };
 }
 
+/**
+ * `venv:` of a pulled python node. The default venv (null) is left unstated, which a repush reads
+ * as "keep the current venv" — the same. A venv the name lookup cannot see (deleted, or
+ * renamed to something no longer unique) is left out too: a repush then keeps it.
+ */
+function venvField(
+  venvId: number | null | undefined,
+  names: ReferencedEntityNames,
+  atPath: string,
+  warnings: string[],
+): YamlObject {
+  if (venvId == null) return {};
+  const venvName = names.venvs.get(venvId);
+  if (venvName === undefined) {
+    warnings.push(
+      `${atPath}: its virtual environment (venv #${venvId}) was not found in the active organization — ` +
+        'left out of flow source; the next push keeps it',
+    );
+    return {};
+  }
+  const sameName = [...names.venvs.values()].filter((name) => name === venvName).length;
+  if (sameName > 1) {
+    warnings.push(
+      `${atPath}: its virtual environment "${venvName}" shares its name with another venv — left out of flow ` +
+        'source (a name would be ambiguous); the next push keeps it. Rename one with update_venv to pull it as venv:.',
+    );
+    return {};
+  }
+  return { venv: venvName };
+}
+
 function missingToolName(
   kind: 'python' | 'mcp',
   toolId: number,
@@ -702,16 +813,12 @@ function buildNodeBody(
         warnings.push(`${atPath}: test_input is not representable in flow source and resets on the next push`);
       }
       const code = entry.dto.python_code;
-      if (code.venv_id != null) {
-        warnings.push(
-          `${atPath}: the virtual environment (venv #${code.venv_id}) is not representable in flow source — it is kept on the next push`,
-        );
-      }
       return {
         type: 'python',
         position,
         code: code.code,
         ...(code.entrypoint !== 'main' ? { entrypoint: code.entrypoint } : {}),
+        ...venvField(code.venv_id, names, atPath, warnings),
         ...inputMapField(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField(entry.dto.output_variable_path),
       };

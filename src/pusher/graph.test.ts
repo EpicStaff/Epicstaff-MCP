@@ -41,7 +41,12 @@ function remoteState(): GraphState {
     {
       ...base('r-bot', 3, 'bot'),
       type: 'telegram-trigger',
-      data: { telegram_bot_api_key_secret_id: 21, webhook_trigger: 34, fields: [], test_payload: { message: { text: 'hi' } } },
+      data: {
+        telegram_bot_api_key_secret_id: 21,
+        webhook_trigger: 34,
+        fields: [{ id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
+        test_payload: { message: { text: 'hi' } },
+      },
     },
     {
       ...base('r-cdt', 4, 'classify'),
@@ -69,7 +74,7 @@ function compiledState(): GraphState {
 }
 
 describe('inheritUnrepresentableFields', () => {
-  it('keeps the venv, timeouts, test payloads, storage access and CDT explanations set in the editor', () => {
+  it('keeps the venv, timeouts, test payloads, storage access, telegram fields and CDT explanations set in the editor', () => {
     const remote = remoteState();
     const desired = compiledState();
 
@@ -84,6 +89,9 @@ describe('inheritUnrepresentableFields', () => {
       python_code: { id: 12, execution_timeout: 20 },
     });
     expect(bot?.type === 'telegram-trigger' && bot.data.test_payload).toEqual({ message: { text: 'hi' } });
+    expect(bot?.type === 'telegram-trigger' && bot.data.fields).toEqual([
+      { id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' },
+    ]);
     expect(cdt?.type === 'classification-decision-table' && cdt.explanations).toEqual({
       step: { text: 'why', fingerprint: 'f', generatedBy: 'gpt' },
     });

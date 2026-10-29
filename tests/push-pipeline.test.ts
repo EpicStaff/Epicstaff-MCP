@@ -50,6 +50,8 @@ class MockBackend {
   failAgentCreate = false;
   secrets: Array<{ id: number; name: string; tail: string }> = [];
   keyValueTables: Array<{ id: number; name: string }> = [];
+  /** SandboxVenvBindingViewSet rows (`venvs/` answers with a `result` envelope). */
+  venvs: Array<{ id: number; name: string; libs: unknown[]; status: string; error: string | null }> = [];
   availableRags = new Map<number, Array<{ rag_id: number; rag_type: string; rag_status: string; created_at: string }>>();
 
   private id(): number {
@@ -94,6 +96,11 @@ class MockBackend {
       const secret = { id: this.id(), name, tail: value.length >= 9 ? value.slice(-4) : '' };
       this.secrets.push(secret);
       return { status: 201, body: secret };
+    }
+    if (key === 'GET /api/venvs/') {
+      const search = (url.searchParams.get('search') ?? '').toLowerCase();
+      const result = this.venvs.filter((venv) => venv.name.toLowerCase().includes(search));
+      return { status: 200, body: { count: result.length, limit: 1000, offset: 0, next: null, previous: null, result } };
     }
     if (key === 'GET /api/key-value-tables/')
       return { status: 200, body: { count: this.keyValueTables.length, results: this.keyValueTables } };
@@ -319,11 +326,39 @@ class MockBackend {
           }));
         }
         if (typeof tempId === 'string') tempToId.set(tempId, row.id as number);
+        if (typeof row.python_code === 'object' && row.python_code !== null) {
+          row.python_code = readPythonCode(
+            row.python_code as Record<string, unknown>,
+            previousRow(previous, listKey, row.id),
+            () => this.id(),
+          );
+        }
+        if (listKey === 'python_node_list') {
+          row.use_storage ??= false;
+          row.test_input ??= {};
+        }
         const index = kept.findIndex((existing) => existing.id === row.id);
         if (index >= 0) kept[index] = row;
         else kept.push(row);
       }
       dto[listKey] = kept;
+    }
+    // Route refs of decision tables and classification tables: the backend resolves a `*_temp_id`
+    // to the id of the node created in the same save and stores only `*_id`.
+    const resolveRoute = (row: Record<string, unknown>, idKey: string, tempKey: string): void => {
+      const tempId = row[tempKey];
+      delete row[tempKey];
+      if (typeof tempId === 'string') row[idKey] = tempToId.get(tempId) ?? null;
+      else row[idKey] ??= null;
+    };
+    for (const listKey of ['decision_table_node_list', 'classification_decision_table_node_list']) {
+      for (const row of (dto[listKey] as Array<Record<string, unknown>> | undefined) ?? []) {
+        resolveRoute(row, 'default_next_node_id', 'default_next_node_temp_id');
+        resolveRoute(row, 'next_error_node_id', 'next_error_node_temp_id');
+        for (const group of (row.condition_groups as Array<Record<string, unknown>> | undefined) ?? []) {
+          resolveRoute(group, 'next_node_id', 'next_node_temp_id');
+        }
+      }
     }
     const keptEdges = ((previous?.edge_list as Array<Record<string, unknown>> | undefined) ?? []).filter(
       (edge) => !deletedIds.has(edge.id as number),
@@ -348,6 +383,41 @@ class MockBackend {
     dto.node_number_seq = this.nodeNumberSeq;
     return dto;
   }
+}
+
+/** The persisted row `id` of `listKey` in the previous save, if any. */
+function previousRow(
+  previous: Record<string, unknown> | null,
+  listKey: string,
+  id: unknown,
+): Record<string, unknown> | undefined {
+  return ((previous?.[listKey] as Array<Record<string, unknown>> | undefined) ?? []).find((row) => row.id === id);
+}
+
+/**
+ * A python_code block as PythonCodeSerializer stores and renders it: the code stripped of leading /
+ * trailing whitespace, its own id, the model defaults the write left out (`venv_id`, `global_kwargs`,
+ * `execution_timeout`), the secrets as `{id, name}` — and no `name` or `secret_ids` (write-only /
+ * not a column).
+ */
+function readPythonCode(
+  written: Record<string, unknown>,
+  previous: Record<string, unknown> | undefined,
+  newId: () => number,
+): Record<string, unknown> {
+  const previousCode = (previous?.python_code ?? {}) as Record<string, unknown>;
+  const { name: _name, secret_ids: secretIds, ...rest } = written;
+  return {
+    id: written.id ?? previousCode.id ?? newId(),
+    ...rest,
+    // DRF CharField(trim_whitespace=True): the code is stored and returned as `code.strip()`.
+    code: typeof rest.code === 'string' ? rest.code.replace(/^\s+|\s+$/g, '') : rest.code,
+    entrypoint: rest.entrypoint ?? 'main',
+    venv_id: rest.venv_id !== undefined ? rest.venv_id : (previousCode.venv_id ?? null),
+    global_kwargs: rest.global_kwargs ?? {},
+    secrets: ((secretIds as number[] | undefined) ?? []).map((id) => ({ id, name: `secret-${id}` })),
+    execution_timeout: rest.execution_timeout ?? previousCode.execution_timeout ?? 60,
+  };
 }
 
 describe('push pipeline (mock backend)', () => {
@@ -483,6 +553,51 @@ describe('push pipeline (mock backend)', () => {
     expect(Object.keys(lock.entities).filter((key) => key.startsWith('nodes.')).length).toBe(4);
   });
 
+  it('resolves venv: by name into python_code.venv_id of python tools and python nodes', async () => {
+    backend.venvs = [
+      { id: 31, name: 'Data Science', libs: [], status: 'completed', error: null },
+      { id: 32, name: 'scraping', libs: [], status: 'failed', error: 'No matching distribution found for nope' },
+    ];
+    const flowFile = join(flowDir, 'flow.yaml');
+    writeFileSync(
+      flowFile,
+      readFileSync(flowFile, 'utf8')
+        .replace('      code: |\n        import urllib.request', '      venv: scraping\n      code: |\n        import urllib.request')
+        .replace(
+          '    finish:\n      type: end',
+          '    crunch:\n      type: python\n      venv: Data Science\n      code: "def main():\\n    return 1"\n    finish:\n      type: end',
+        )
+        .replace('    - from: write\n      to: finish', '    - from: write\n      to: crunch\n    - from: crunch\n      to: finish'),
+    );
+
+    const { entityResult } = await pushOnce();
+
+    expect(entityResult.actions).toContainEqual(
+      expect.objectContaining({ key: 'venvs.existing:Data Science', kind: 'venv', action: 'resolved-existing', backendId: 31 }),
+    );
+    const toolCreate = backend.received.find((request) => request.method === 'POST' && request.path === '/api/python-code-tool/');
+    expect((toolCreate?.body as { python_code: { venv_id: number } }).python_code.venv_id).toBe(32);
+    const saved = backend.savedGraphPayloads.at(-1) as { python_node_list: Array<{ python_code: { venv_id?: number } }> };
+    expect(saved.python_node_list[0]?.python_code.venv_id).toBe(31);
+    // A venv whose build failed is pushed anyway, with a warning naming the build error.
+    expect(entityResult.warnings.join('\n')).toMatch(/venv "scraping" failed to build: No matching distribution/);
+  });
+
+  it('refuses an unknown or ambiguous venv: name instead of guessing', async () => {
+    const flowFile = join(flowDir, 'flow.yaml');
+    writeFileSync(
+      flowFile,
+      readFileSync(flowFile, 'utf8').replace('      code: |\n        import urllib.request', '      venv: twin\n      code: |\n        import urllib.request'),
+    );
+    await expect(pushOnce()).rejects.toThrow(/venv: "twin" — no virtual environment with that name.*create_venv/);
+
+    backend.venvs = [
+      { id: 41, name: 'twin', libs: [], status: 'completed', error: null },
+      { id: 42, name: 'twin', libs: [], status: 'completed', error: null },
+    ];
+    await expect(pushOnce()).rejects.toThrow(/venv: "twin" is ambiguous — 2 virtual environments.*41, 42/);
+  });
+
   it('repush without changes is a no-op: no creates, no bulk save, save_version unchanged', async () => {
     const first = await pushOnce();
     const receivedBefore = backend.received.length;
@@ -506,6 +621,94 @@ describe('push pipeline (mock backend)', () => {
     expect(writes).toEqual([]);
   });
 
+  it('repush of a flow with routed tables and multi-line python code is a no-op against the server read shape', async () => {
+    // Regression: the classification table comparable compared its default / error route as raw
+    // node uuids — compiler uuids against the remote baseline's — so every repush rewrote the table.
+    // The mock renders python_code as the backend does (stripped code, own id, model defaults,
+    // secrets by name) — a block ending with a newline used to come back different on every push.
+    const file = join(flowDir, 'flow.yaml');
+    writeFileSync(
+      file,
+      readFileSync(file, 'utf8')
+        .replace(
+          '    finish:\n      type: end\n',
+          [
+            '    triage:',
+            '      type: classification-decision-table',
+            '      llm_config: default',
+            '      categories:',
+            '        - { name: deep, next_node: write }',
+            '      default_next_node: finish',
+            '    tally:',
+            '      type: python',
+            '      code: |',
+            '        def main():',
+            '            total = 1',
+            '            return total',
+            '      output_variable_path: variables.tally',
+            '    gate:',
+            '      type: decision-table',
+            '      rules:',
+            "        - { name: long, condition: \"len(variables['summary']) > 10\", next_node: finish }",
+            '      default_next_node: finish',
+            '    finish:',
+            '      type: end',
+            '',
+          ].join('\n'),
+        )
+        .replace('    - from: research\n      to: write\n', '    - from: research\n      to: triage\n')
+        .replace('    - from: write\n      to: finish\n', '    - from: write\n      to: tally\n    - from: tally\n      to: gate\n'),
+    );
+    const first = await pushOnce();
+    const savedDto = backend.lastSavedDto as Record<string, Array<Record<string, unknown>>>;
+    expect(savedDto.classification_decision_table_node_list?.[0]?.default_next_node_id).toEqual(expect.any(Number));
+    expect(savedDto.python_node_list?.[0]?.python_code).toMatchObject({
+      // The source block ends with a newline; the server keeps the stripped text.
+      code: 'def main():\n    total = 1\n    return total',
+      venv_id: null,
+      execution_timeout: 60,
+      secrets: [],
+    });
+    const sentCode = (backend.savedGraphPayloads[0] as { python_node_list: Array<{ python_code: { code: string } }> })
+      .python_node_list[0]!.python_code.code;
+    expect(sentCode.endsWith('return total\n')).toBe(true);
+
+    const { graphResult } = await pushOnce();
+
+    expect(graphResult.changed).toBe(false);
+    expect(graphResult.nodeActions).toEqual({ created: 0, updated: 0, deleted: 0, updatedNodes: [] });
+    expect(backend.savedGraphPayloads).toHaveLength(1);
+    expect(graphResult.saveVersion).toBe(first.graphResult.saveVersion);
+  });
+
+  it('a real edit of multi-line python code is still pushed, and only that node is rewritten', async () => {
+    const file = join(flowDir, 'flow.yaml');
+    const withPython = (body: string) =>
+      readFileSync(file, 'utf8').replace(
+        '    finish:\n      type: end\n',
+        `    tally:\n      type: python\n      code: |\n${body}      output_variable_path: variables.tally\n    finish:\n      type: end\n`,
+      );
+    const original = readFileSync(file, 'utf8');
+    writeFileSync(file, withPython('        def main():\n            total = 1\n            return total\n'));
+    await pushOnce();
+
+    // Same code kept with trailing blank lines (`|+`): the server stores the same text — no push.
+    const unchangedFile = readFileSync(file, 'utf8')
+      .replace('      code: |\n        def main():\n            total = 1', '      code: |+\n        def main():\n            total = 1')
+      .replace('return total\n', 'return total\n\n\n');
+    writeFileSync(file, unchangedFile);
+    const keptCode = (await compileFlow(flowDir)).graph.nodes.find((node) => node.node_name === 'tally');
+    expect(keptCode?.type === 'python' && keptCode.data.code.endsWith('return total\n\n\n')).toBe(true);
+    expect((await pushOnce()).graphResult.changed).toBe(false);
+
+    // An indentation change inside the body is a real edit.
+    writeFileSync(file, original);
+    writeFileSync(file, withPython('        def main():\n            total = 1\n            if total:\n                return total\n'));
+    const { graphResult } = await pushOnce();
+    expect(graphResult.changed).toBe(true);
+    expect(graphResult.nodeActions.changedFields).toEqual({ tally: ['python_code.code'] });
+  });
+
   it('an edit after a no-op repush updates the node in place, keeping its sub-task id', async () => {
     await pushOnce();
     const savedAgent = (backend.lastSavedDto!.agent_node_list as Array<{ id: number; tasks: Array<{ id: number }> }>)[0]!;
@@ -516,6 +719,8 @@ describe('push pipeline (mock backend)', () => {
 
     expect(graphResult.changed).toBe(true);
     expect(graphResult.nodeActions).toMatchObject({ created: 0, updated: 1, deleted: 0 });
+    // The result says why the node was rewritten.
+    expect(graphResult.nodeActions.changedFields).toEqual({ research: ['tasks'] });
     const saved = backend.savedGraphPayloads[1] as Record<string, Array<Record<string, unknown>>>;
     expect(saved.agent_node_list).toHaveLength(1);
     const sentAgent = saved.agent_node_list![0] as { id: number; tasks: Array<Record<string, unknown>> };

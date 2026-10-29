@@ -7,6 +7,7 @@ import { KnowledgeApi } from '../api/knowledge.js';
 import { LlmApi } from '../api/llm.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
+import { describeUser, type UserSummary } from '../models/authorship.js';
 import type { GraphDto } from '../models/graph.js';
 import { NODE_REFERENCE } from '../reference/node-reference.js';
 import { introspectNodeSchemas } from '../reference/node-schema-introspect.js';
@@ -36,20 +37,36 @@ const NODE_LIST_KEYS = [
   'key_value_node_list',
 ] as const;
 
-function summarizeGraph(graph: GraphDto): Record<string, unknown> {
+/** The read-only author / last edit of a graph or node, users named as in the editor. */
+function authorshipSummary(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(row.created_by !== undefined && { created_by: describeUser(row.created_by as UserSummary | null) }),
+    ...(row.last_edited_by !== undefined && { last_edited_by: describeUser(row.last_edited_by as UserSummary | null) }),
+    ...(row.last_edited_at !== undefined && { last_edited_at: row.last_edited_at }),
+  };
+}
+
+export function summarizeGraph(graph: GraphDto): Record<string, unknown> {
   const raw = graph as unknown as Record<string, unknown>;
   const nodes: Record<string, Array<Record<string, unknown>>> = {};
   for (const key of NODE_LIST_KEYS) {
     const list = raw[key];
     if (Array.isArray(list) && list.length > 0) {
-      nodes[key] = list.map((node: Record<string, unknown>) => ({
-        id: node.id,
-        node_name: node.node_name,
-        ...(node.agent_definition !== undefined && { agent_definition: node.agent_definition }),
-        ...(node.surface_list !== undefined && { surface_list: node.surface_list }),
-        ...(node.source_collection !== undefined && { source_collection: node.source_collection }),
-        ...(node.key_value_table !== undefined && { key_value_table: node.key_value_table }),
-      }));
+      nodes[key] = list.map((node: Record<string, unknown>) => {
+        const pythonCode = node.python_code as { venv_id?: number | null } | undefined;
+        return {
+          id: node.id,
+          node_name: node.node_name,
+          // The server-issued #N badge; start, end and note nodes are not numbered.
+          ...(node.node_number !== undefined && { node_number: node.node_number }),
+          ...(node.agent_definition !== undefined && { agent_definition: node.agent_definition }),
+          ...(node.surface_list !== undefined && { surface_list: node.surface_list }),
+          ...(node.source_collection !== undefined && { source_collection: node.source_collection }),
+          ...(node.key_value_table !== undefined && { key_value_table: node.key_value_table }),
+          ...(key === 'python_node_list' && pythonCode?.venv_id != null && { venv_id: pythonCode.venv_id }),
+          ...authorshipSummary(node),
+        };
+      });
     }
   }
   return {
@@ -57,6 +74,9 @@ function summarizeGraph(graph: GraphDto): Record<string, unknown> {
     name: graph.name,
     description: graph.description,
     save_version: graph.save_version,
+    created_at: graph.created_at,
+    ...authorshipSummary(raw),
+    label_ids: graph.label_ids ?? [],
     nodes,
     edges: (graph.edge_list ?? []).map((edge) => ({
       id: edge.id,
@@ -291,8 +311,9 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
     {
       title: 'Describe a flow graph',
       description:
-        'Human-readable structural summary of a remote flow graph: nodes per type, edges, and the entities ' +
-        'its agent/task nodes reference. Use to inspect a flow before pulling or editing it.',
+        'Human-readable structural summary of a remote flow graph: nodes per type (with their #N node_number), ' +
+        'edges, the entities its nodes reference, and who created and last edited the flow and each node. ' +
+        'Use to inspect a flow before pulling or editing it.',
       inputSchema: {
         graph_id: z.number().int(),
       },
