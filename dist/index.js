@@ -41398,7 +41398,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.5.0-dev.3"
+      version: "1.4.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
