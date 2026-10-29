@@ -28713,19 +28713,26 @@ var EpicStaffClient = class {
 
 // src/http/auth.ts
 import { hostname as hostname2 } from "node:os";
-var REFRESH_COOKIE_NAME = "auth.refresh";
+var REFRESH_COOKIE_NAMES = ["__Host-auth.refresh", "auth.refresh"];
 var MIN_REMINT_INTERVAL_MS = 6e4;
 var ACCESS_TOKEN_EXPIRY_MARGIN_SECONDS = 30;
 function refreshTokenFromCookies(headers) {
+  const valueByName = /* @__PURE__ */ new Map();
   for (const cookie of headers.getSetCookie()) {
     const [pair] = cookie.split(";");
     const separator = pair?.indexOf("=") ?? -1;
-    if (pair !== void 0 && separator > 0 && pair.slice(0, separator).trim() === REFRESH_COOKIE_NAME) {
-      const value = pair.slice(separator + 1).trim();
-      return value === "" ? null : value;
-    }
+    if (pair === void 0 || separator <= 0) continue;
+    const value = pair.slice(separator + 1).trim();
+    if (value !== "") valueByName.set(pair.slice(0, separator).trim(), value);
+  }
+  for (const name of REFRESH_COOKIE_NAMES) {
+    const value = valueByName.get(name);
+    if (value !== void 0) return value;
   }
   return null;
+}
+function refreshCookies(refreshToken) {
+  return Object.fromEntries(REFRESH_COOKIE_NAMES.map((name) => [name, refreshToken]));
 }
 function isJwtExpired(token, nowSeconds = Date.now() / 1e3) {
   const payload = token.split(".")[1];
@@ -28856,7 +28863,7 @@ var AuthService = class {
   }
   /**
    * Exchange the refresh token for a new access token (POST auth/refresh/). Current
-   * backends read the token only from the `auth.refresh` cookie; legacy ones read the
+   * backends read the token only from the refresh cookie; legacy ones read the
    * `refresh` body field — both are sent. Returns null when the refresh token itself is
    * rejected (expired or revoked), after clearing the session.
    */
@@ -28866,7 +28873,7 @@ var AuthService = class {
     try {
       refreshed = await this.client.post("auth/refresh/", {
         skipAuth: true,
-        cookies: { [REFRESH_COOKIE_NAME]: refreshToken },
+        cookies: refreshCookies(refreshToken),
         body: { refresh: refreshToken },
         onResponseHeaders: (headers) => {
           rotatedCookie = refreshTokenFromCookies(headers);
@@ -29294,6 +29301,15 @@ import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as rea
 import { dirname, isAbsolute, join as join2, resolve } from "node:path";
 
 // src/api/agent-definitions.ts
+function nextDefaultInstructionName(list) {
+  const taken = new Set(list.map((instruction) => instruction.name.trim().toLowerCase()));
+  let number3 = list.length + 1;
+  while (taken.has(`instruction_${number3}.md`)) number3++;
+  return `Instruction_${number3}.md`;
+}
+function toInstructionList(instructions) {
+  return instructions.trim() === "" ? [] : [{ name: nextDefaultInstructionName([]), content: instructions }];
+}
 function unwrap(response) {
   return Array.isArray(response) ? response : response.results;
 }
@@ -29352,20 +29368,14 @@ var GraphsApi = class {
   }
   /** Rename a graph. PATCH is optimistically locked like bulk-save — save_version is mandatory. */
   async rename(graphId, name, saveVersion) {
-    return this.client.patch(`graphs/${graphId}/`, { body: { name, save_version: saveVersion } });
+    return this.patch(graphId, { name, save_version: saveVersion });
+  }
+  /** PATCH graphs/{id}/ — only the writable graph metadata; the read-only authorship is never sent. */
+  async patch(graphId, request) {
+    return this.client.patch(`graphs/${graphId}/`, { body: request });
   }
   async delete(graphId) {
     await this.client.delete(`graphs/${graphId}/`);
-  }
-  // Conditional edges — dedicated endpoints (not in bulk-save, mirroring the frontend).
-  async createConditionalEdge(body) {
-    return this.client.post("conditionaledges/", { body });
-  }
-  async updateConditionalEdge(id, body) {
-    return this.client.put(`conditionaledges/${id}/`, { body });
-  }
-  async deleteConditionalEdge(id) {
-    await this.client.delete(`conditionaledges/${id}/`);
   }
 };
 
@@ -29598,8 +29608,9 @@ var SurfacesApi = class {
   async create(request) {
     return this.client.post("surfaces/", { body: request });
   }
+  /** PATCH — the backend has no PUT for surfaces; list fields sent replace the current lists. */
   async update(id, request) {
-    return this.client.put(`surfaces/${id}/`, { body: request });
+    return this.client.patch(`surfaces/${id}/`, { body: request });
   }
   /** Delete a catalog surface. Backend responds 204 (SurfaceViewSet is a plain ModelViewSet). */
   async delete(id) {
@@ -29881,7 +29892,9 @@ var pythonNodeSchema = external_exports.strictObject({
     "Path to a Python file relative to the flow directory. Provide exactly one of code / code_file."
   ),
   entrypoint: external_exports.string().default("main").describe("Name of the Python function executed by the sandbox."),
-  libraries: external_exports.array(external_exports.string()).default([]).describe("pip packages installed into the sandbox venv before execution."),
+  libraries: external_exports.array(external_exports.string()).default([]).describe(
+    "DEPRECATED \u2014 not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). Code runs in the default venv unless one is selected for it in the editor (a repush keeps that selection)."
+  ),
   input_map: inputMapField,
   output_variable_path: outputVariablePathField
 });
@@ -30023,39 +30036,23 @@ var nodeSchema = external_exports.discriminatedUnion("type", [
 function isWritableNode(node) {
   return !isForbiddenNodeType(node.type);
 }
-var edgeConditionSchema = external_exports.strictObject({
-  code: external_exports.string().optional().describe(
-    "Inline Python decision code: the entrypoint receives the mapped inputs and returns the name of the next node. Provide exactly one of code / code_file."
-  ),
-  code_file: external_exports.string().optional().describe(
-    "Path to a Python file relative to the flow directory. Provide exactly one of code / code_file."
-  ),
-  entrypoint: external_exports.string().default("main").describe("Name of the Python decision function."),
-  input_map: inputMapField
-}).superRefine((condition, ctx) => {
-  const hasCode = condition.code !== void 0;
-  const hasCodeFile = condition.code_file !== void 0;
-  if (hasCode === hasCodeFile) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "provide exactly one of code / code_file"
-    });
-  }
-}).describe("Conditional routing: Python code that returns the name of the next node.");
+var REMOVED_EDGE_CONDITION_MESSAGE = "conditional edges were removed from EpicStaff \u2014 branch with a 'decision-table' node instead (rules over flow state, each routing to one node; default_next_node for the rest)";
 var edgeSchema = external_exports.strictObject({
   from: symbolicNameSchema.describe("Source node symbolic name."),
-  to: symbolicNameSchema.optional().describe("Target node symbolic name. Provide exactly one of to / condition."),
-  condition: edgeConditionSchema.optional().describe("Conditional edge body. Provide exactly one of to / condition.")
-}).superRefine((edge, ctx) => {
-  const hasTo = edge.to !== void 0;
-  const hasCondition = edge.condition !== void 0;
-  if (hasTo === hasCondition) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "an edge needs exactly one of to / condition"
-    });
+  to: symbolicNameSchema.optional().describe("Target node symbolic name."),
+  /** Removed upstream — parsed loosely only so the error can name the replacement. */
+  condition: external_exports.unknown().optional()
+}).transform((edge, ctx) => {
+  if (edge.condition !== void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["condition"], message: REMOVED_EDGE_CONDITION_MESSAGE });
+    return external_exports.NEVER;
   }
-}).describe("A directed edge between nodes, plain ({from, to}) or conditional ({from, condition}).");
+  if (edge.to === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["to"], message: "an edge needs 'to' \u2014 the target node's symbolic name" });
+    return external_exports.NEVER;
+  }
+  return { from: edge.from, to: edge.to };
+}).describe("A directed edge between two nodes: {from, to}.");
 var flowSectionSchema = external_exports.strictObject({
   nodes: external_exports.record(symbolicNameSchema, nodeSchema).default({}).describe("Flow nodes, keyed by symbolic name."),
   edges: external_exports.array(edgeSchema).default([]).describe("Directed edges between nodes.")
@@ -30157,7 +30154,9 @@ var pythonCodeToolSchema = external_exports.strictObject({
     "Path to a Python file relative to the flow directory. Provide exactly one of code / code_file."
   ),
   entrypoint: external_exports.string().default("main").describe("Name of the Python function called as the tool entrypoint."),
-  libraries: external_exports.array(external_exports.string()).default([]).describe("pip packages installed into the tool sandbox before execution.")
+  libraries: external_exports.array(external_exports.string()).default([]).describe(
+    "DEPRECATED \u2014 not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). The tool runs in the default venv unless one is selected for it in the editor (a repush keeps that selection)."
+  )
 }).superRefine((tool, ctx) => {
   const hasCode = tool.code !== void 0;
   const hasCodeFile = tool.code_file !== void 0;
@@ -30540,12 +30539,6 @@ async function collectLocalFileDiagnostics(source, provenance, flowDir) {
       await check2(node.code_file, `flow.nodes.${nodeName}.code_file`, nodeFile(provenance, nodeName));
     }
   }
-  for (const [index, edge] of source.flow.edges.entries()) {
-    if (edge.condition?.code_file !== void 0) {
-      const file = lookupProvenance(provenance, ["flow", "edges", index]);
-      await check2(edge.condition.code_file, `flow.edges[${index}].condition.code_file`, file);
-    }
-  }
   return diagnostics;
 }
 function isPlainObject3(value) {
@@ -30722,9 +30715,7 @@ function resolveFlow(source) {
   }
   source.flow.edges.forEach((edge, index) => {
     resolveNodeName(edge.from, `flow.edges[${index}].from`);
-    if (edge.to !== void 0) {
-      resolveNodeName(edge.to, `flow.edges[${index}].to`);
-    }
+    resolveNodeName(edge.to, `flow.edges[${index}].to`);
   });
   return { flowName: source.meta.name, symbols, references, diagnostics };
 }
@@ -30952,19 +30943,8 @@ function validateDataflow(source) {
   for (const [nodeName, node] of Object.entries(nodes)) {
     checkReads(nodeReadPaths(node, `flow.nodes.${nodeName}`), nodeName);
   }
-  source.flow.edges.forEach((edge, index) => {
-    if (edge.condition?.input_map) {
-      const basePath = `flow.edges[${index}].condition.input_map`;
-      checkReads(
-        Object.entries(edge.condition.input_map).map(([key, path6]) => ({ at: `${basePath}.${key}`, path: path6 })),
-        edge.from,
-        { readerHasWritten: true }
-      );
-    }
-  });
   return diagnostics;
-  function checkReads(reads, readerNode, options = {}) {
-    const ownWrites = options.readerHasWritten ? producedByNode.get(readerNode) ?? [] : [];
+  function checkReads(reads, readerNode) {
     for (const { at: readPath, path: rawValue } of reads) {
       if (rawValue === "__all__") continue;
       const parsed = parseVarPath(rawValue);
@@ -30974,7 +30954,7 @@ function validateDataflow(source) {
       }
       if (parsed.isShared || parsed.hasDefault) continue;
       const read = parsed.segments;
-      const reaching = [...declared, ...ownWrites, ...ancestorProduced(readerNode)];
+      const reaching = [...declared, ...ancestorProduced(readerNode)];
       if (reaching.some((produced) => sharesPrefix(read, produced))) {
         continue;
       }
@@ -31022,11 +31002,7 @@ function buildAncestors(source) {
     successors.get(from).add(to);
   };
   for (const edge of source.flow.edges) {
-    if (edge.to !== void 0) {
-      add(edge.from, edge.to);
-    } else {
-      for (const target of nodeNames) if (target !== edge.from) add(edge.from, target);
-    }
+    add(edge.from, edge.to);
   }
   for (const [name, node] of Object.entries(source.flow.nodes)) {
     if (node.type === "decision-table") {
@@ -31219,8 +31195,26 @@ function buildStartNodeVariables(source, startInitialState) {
   };
 }
 
+// src/graph/node-number.ts
+var UNNUMBERED_NODE_TYPES = /* @__PURE__ */ new Set(["start", "end", "note"]);
+function isNumberedNodeType(type) {
+  return !UNNUMBERED_NODE_TYPES.has(type);
+}
+
 // src/graph/temp-id.ts
 import { randomUUID } from "node:crypto";
+
+// src/models/nodes/classification-decision-table-node.ts
+var CDT_SECTION_COLOR_HEXES = ["#685FFF", "#48CBFF", "#2ABA6B", "#FF8F3F", "#F54242"];
+var CDT_SECTION_DEFAULT_COLOR = CDT_SECTION_COLOR_HEXES[0];
+var HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+function normalizeCdtSectionColor(color) {
+  if (!color) return CDT_SECTION_DEFAULT_COLOR;
+  const trimmed = color.trim();
+  if (!HEX_COLOR_PATTERN.test(trimmed)) return CDT_SECTION_DEFAULT_COLOR;
+  const match = CDT_SECTION_COLOR_HEXES.find((hex) => hex.toLowerCase() === trimmed.toLowerCase());
+  return match ?? trimmed.toUpperCase();
+}
 
 // src/graph/edge-waypoints.ts
 function hasPersistedWaypoints(edge) {
@@ -31240,8 +31234,7 @@ function toNodeMetadata(node) {
     position: node.position,
     color: node.color,
     icon: node.icon,
-    size: node.size,
-    ...node.nodeNumber != null ? { nodeNumber: node.nodeNumber } : {}
+    size: node.size
   };
 }
 
@@ -31412,6 +31405,8 @@ function toWebhookComparable(node) {
     output_variable_path: node.output_variable_path || null,
     webhook_trigger_path: "",
     webhook_trigger: node.data.webhook_trigger,
+    test_payload: node.data.test_payload ?? {},
+    use_storage: node.data.use_storage ?? false,
     metadata: toNodeMetadata(node)
   };
 }
@@ -31421,6 +31416,7 @@ function toTelegramComparable(node) {
     telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
     webhook_trigger: node.data.webhook_trigger,
     fields: node.data.fields,
+    test_payload: node.data.test_payload ?? {},
     metadata: toNodeMetadata(node)
   };
 }
@@ -31513,14 +31509,22 @@ function toCdtComparable(node, allNodes) {
     next_error_node: tableData?.next_error_node || null,
     pre_input_map: tableData?.pre_computation?.input_map || tableData?.pre_input_map || {},
     pre_output_variable_path: tableData?.pre_computation?.output_variable_path || tableData?.pre_output_variable_path || null,
+    pre_use_storage: tableData?.pre_use_storage ?? false,
     post_computation_code: postCode,
     post_input_map: tableData?.post_computation?.input_map || tableData?.post_input_map || {},
     post_output_variable_path: tableData?.post_computation?.output_variable_path || tableData?.post_output_variable_path || null,
-    pre_libraries: tableData?.pre_computation?.libraries || [],
-    post_libraries: tableData?.post_computation?.libraries || [],
+    post_use_storage: tableData?.post_use_storage ?? false,
     pre_secret_ids: [...tableData?.pre_computation?.secret_ids || []].sort(),
     post_secret_ids: [...tableData?.post_computation?.secret_ids || []].sort(),
-    metadata: toNodeMetadata(node)
+    pre_execution_timeout: tableData?.pre_computation?.execution_timeout,
+    post_execution_timeout: tableData?.post_computation?.execution_timeout,
+    sections: [...tableData?.sections || []].sort((a, b) => a.id.localeCompare(b.id)).map((section) => ({
+      id: section.id,
+      name: section.name,
+      color: normalizeCdtSectionColor(section.metadata?.color)
+    })),
+    // Mirrors bulk-save.ts. Without it a node whose only change is its explanations never reaches toUpdate.
+    metadata: { ...toNodeMetadata(node), explanations: node.explanations ?? {} }
   };
 }
 function getNodeDiff(previous, current) {
@@ -31789,9 +31793,7 @@ var LAYOUT_NODE_TYPES = {
   AGENT: "agent",
   TASK: "task",
   TOOL: "tool",
-  LLM: "llm",
   PYTHON: "python",
-  EDGE: "edge",
   START: "start",
   TABLE: "table",
   CLASSIFICATION_TABLE: "classification-decision-table",
@@ -32299,6 +32301,12 @@ function buildToolConfigPlans(source) {
     });
   });
 }
+function librariesNotInstalledWarning(atPath) {
+  return makeWarning(
+    atPath,
+    "EpicStaff no longer installs per-code libraries \u2014 code runs in a virtual environment (venv). These libraries are NOT sent: create a venv holding them in the EpicStaff editor and select it for this code there (a repush keeps that selection), or remove `libraries`."
+  );
+}
 async function buildPythonToolPlans(source, flowDir, diagnostics) {
   const plans = [];
   for (const [name, tool] of Object.entries(source.tools.python_code_tools)) {
@@ -32311,12 +32319,15 @@ async function buildPythonToolPlans(source, flowDir, diagnostics) {
         )
       );
     }
+    if (tool.libraries.length > 0) {
+      diagnostics.push(librariesNotInstalledWarning(`tools.python_code_tools.${name}.libraries`));
+    }
     plans.push(
       upsertPlan("tools.python_code_tools", name, "python_code_tool", tool, {
         name,
         description: tool.description,
         variables: [],
-        python_code: { code, entrypoint: tool.entrypoint, libraries: tool.libraries }
+        python_code: { code, entrypoint: tool.entrypoint }
       })
     );
   }
@@ -32425,7 +32436,8 @@ function buildAgentPlans(source, registry2) {
   return Object.entries(source.agents).map(
     ([name, agent]) => upsertPlan("agents", name, "agent_definition", agent, {
       name,
-      instructions: agent.instructions,
+      // The backend takes instructions as a list of named documents; flow source holds one text.
+      instruction_list: toInstructionList(agent.instructions),
       ...agent.description !== void 0 ? { description: agent.description } : {},
       llm_config: registry2.ref("llm_configs", agent.llm_config),
       ...agent.fcm_llm_config !== void 0 ? { fcm_llm_config: registry2.ref("llm_configs", agent.fcm_llm_config) } : {},
@@ -32503,7 +32515,6 @@ async function buildGraph(source, flowDir, registry2, diagnostics) {
   const nodes = [];
   const edges = [];
   const layoutConnections = [];
-  const conditionalEdges = [];
   const seenEdges = /* @__PURE__ */ new Set();
   const pushEdge = (edge, layoutSourcePortId) => {
     const dedupeKey = `${edge.sourceNodeId}|${edge.targetNodeId}|${edge.sourcePortId ?? ""}`;
@@ -32520,12 +32531,12 @@ async function buildGraph(source, flowDir, registry2, diagnostics) {
   };
   let nodeNumber = 0;
   for (const [nodeName, parsedNode] of Object.entries(source.flow.nodes)) {
-    nodeNumber += 1;
     const uuid2 = uuidOf(nodeName);
     const nodePath = `flow.nodes.${nodeName}`;
     invariant(isWritableNode(parsedNode), "forbidden node type");
     const node = parsedNode;
     const type = node.type;
+    if (isNumberedNodeType(type)) nodeNumber += 1;
     const base = {
       id: uuid2,
       backendId: null,
@@ -32535,7 +32546,7 @@ async function buildGraph(source, flowDir, registry2, diagnostics) {
       color: NODE_COLORS[type],
       icon: NODE_ICONS[type],
       size: NODE_SIZES[type] ?? { ...DEFAULT_NODE_SIZE },
-      nodeNumber,
+      ...isNumberedNodeType(type) ? { nodeNumber } : {},
       input_map: "input_map" in node ? node.input_map : {},
       output_variable_path: "output_variable_path" in node && node.output_variable_path !== void 0 ? node.output_variable_path : null
     };
@@ -32588,10 +32599,13 @@ Expected output: ${node.expected_output}` : node.task;
       }
       case "python": {
         const code = node.code ?? await readFlowFile(flowDir, node.code_file);
+        if (node.libraries.length > 0) {
+          diagnostics.push(librariesNotInstalledWarning(`${nodePath}.libraries`));
+        }
         nodes.push({
           ...base,
           type: "python",
-          data: { name: nodeName, libraries: node.libraries, code, entrypoint: node.entrypoint },
+          data: { name: nodeName, code, entrypoint: node.entrypoint },
           test_input: {}
         });
         break;
@@ -32639,7 +32653,7 @@ Expected output: ${node.expected_output}` : node.task;
           type: "webhook-trigger",
           data: {
             webhook_trigger: null,
-            python_code: { name: nodeName, libraries: [], code: "", entrypoint: "main" }
+            python_code: { name: nodeName, code: "", entrypoint: "main" }
           }
         });
         break;
@@ -32823,19 +32837,9 @@ Expected output: ${node.expected_output}` : node.task;
     }
   }
   for (const edge of source.flow.edges) {
-    if (edge.condition !== void 0) {
-      const code = edge.condition.code ?? await readFlowFile(flowDir, edge.condition.code_file);
-      conditionalEdges.push({
-        sourceNode: uuidOf(edge.from),
-        sourceNodeName: edge.from,
-        python_code: { code, entrypoint: edge.condition.entrypoint, libraries: [] },
-        input_map: edge.condition.input_map
-      });
-      continue;
-    }
     pushEdge({ sourceNodeId: uuidOf(edge.from), targetNodeId: uuidOf(edge.to) });
   }
-  return { nodes, edges, layoutConnections, conditionalEdges };
+  return { nodes, edges, layoutConnections };
 }
 function applyLayout(source, nodes, layoutConnections) {
   const layoutNodes = nodes.map((node) => ({
@@ -32902,7 +32906,7 @@ async function emitFlow(source, flowDir) {
   const knowledgePlans = buildKnowledgePlans(source, flowDir, registry2);
   const surfacePlans = buildSurfacePlans(source, registry2);
   const agentPlans = buildAgentPlans(source, registry2);
-  const { nodes, edges, layoutConnections, conditionalEdges } = await buildGraph(
+  const { nodes, edges, layoutConnections } = await buildGraph(
     source,
     flowDir,
     registry2,
@@ -32940,16 +32944,7 @@ async function emitFlow(source, flowDir) {
     nodes: nodesPerType,
     edges: edges.length,
     entities: { total: entities.length, ...plansPerAction },
-    layout: layoutBounds(nodes),
-    /**
-     * Conditional edges are NOT GraphEdgeState — the backend persists them
-     * through the dedicated conditional-edge endpoint (see
-     * `CreateConditionalEdgeRequest` in src/models/nodes/conditional-edge.ts).
-     * artifact.ts is frozen, so they travel via the summary: the pusher reads
-     * `summary.conditionalEdges`, maps each `sourceNode` uuid to its backend
-     * node id after bulk-save, and POSTs one conditional edge per entry.
-     */
-    conditionalEdges
+    layout: layoutBounds(nodes)
   };
   return { entities, graph: { nodes, edges }, summary, diagnostics };
 }
@@ -33219,7 +33214,6 @@ function validateTopology(source, diagnostics) {
   }
   const plainOutgoing = /* @__PURE__ */ new Map();
   for (const edge of source.flow.edges) {
-    if (edge.to === void 0) continue;
     const targets = plainOutgoing.get(edge.from) ?? [];
     targets.push(edge.to);
     plainOutgoing.set(edge.from, targets);
@@ -33230,7 +33224,7 @@ function validateTopology(source, diagnostics) {
       diagnostics.push(
         makeError(
           `flow.nodes.${fromNode}`,
-          `node '${fromNode}' has ${targets.length} outgoing edges (to ${targets.map((t) => `'${t}'`).join(", ")}) \u2014 parallel fan-out is not supported: the runtime runs one active path and concurrent branches crash on shared state${isStart ? " (and the start node keeps only its first edge)" : ""}. Sequence the work into one path, or branch with a decision-table / conditional edge (each routes to a single node).`
+          `node '${fromNode}' has ${targets.length} outgoing edges (to ${targets.map((t) => `'${t}'`).join(", ")}) \u2014 parallel fan-out is not supported: the runtime runs one active path and concurrent branches crash on shared state${isStart ? " (and the start node keeps only its first edge)" : ""}. Sequence the work into one path, or branch with a decision-table (it routes to a single node).`
         )
       );
     }
@@ -33271,9 +33265,6 @@ function validateTopology(source, diagnostics) {
           makeError(`${edgePath}.from`, `'${edge.from}' is a note \u2014 notes are not connectable`)
         );
       }
-    }
-    if (edge.to === void 0) {
-      return;
     }
     if (edge.to === edge.from) {
       diagnostics.push(makeError(`${edgePath}.to`, `self-loop: edge from '${edge.from}' to itself`));
@@ -33417,7 +33408,6 @@ async function decompileFlow(deps, graphId, targetDir) {
     nodes[collected.name] = buildNodeBody(collected, registry2, names, warnings);
   }
   const plainEdges = buildPlainEdges(dto, registry2, warnings);
-  const conditional = buildConditionalEdges(dto, registry2, warnings);
   const rawStartVariables = dto.start_node_list?.[0]?.variables ?? {};
   const inner = rawStartVariables["variables"];
   const domainValues = inner && typeof inner === "object" && !Array.isArray(inner) ? inner : rawStartVariables;
@@ -33438,7 +33428,7 @@ async function decompileFlow(deps, graphId, targetDir) {
     ...Object.keys(startVariables).length > 0 ? { variables: startVariables } : {},
     flow: {
       nodes,
-      edges: [...plainEdges, ...conditional.map((edge) => edge.edge)]
+      edges: plainEdges
     }
   };
   let lock = {
@@ -33455,9 +33445,6 @@ async function decompileFlow(deps, graphId, targetDir) {
       // every saved node (src/pusher/graph.ts), so the seed must match.
       contentHash: contentHash({})
     });
-  }
-  for (const edge of conditional) {
-    lock = setEntity(lock, "conditional_edges", edge.lockName, edge.lockEntry);
   }
   await fs4.mkdir(targetDir, { recursive: true });
   const flowPath = path5.join(targetDir, FLOW_SOURCE_FILE_NAME);
@@ -33540,8 +33527,9 @@ function positionOf(metadata) {
     y: typeof position?.y === "number" ? position.y : 0
   };
 }
-function nodeNumberOf(metadata) {
-  const nodeNumber = metadata["nodeNumber"];
+function authoringOrderOf(entry) {
+  if (entry.type === "start") return 0;
+  const nodeNumber = "node_number" in entry.dto ? entry.dto.node_number : null;
   return typeof nodeNumber === "number" ? nodeNumber : Number.MAX_SAFE_INTEGER;
 }
 function sanitizeSymbolicName(raw, fallback) {
@@ -33589,9 +33577,7 @@ function collectNodes(dto, warnings) {
     ),
     ...(dto.key_value_node_list ?? []).map((node) => ({ type: "key-value", dto: node }))
   ];
-  const sorted = [...entries].sort(
-    (a, b) => nodeNumberOf(metadataOf(a.dto)) - nodeNumberOf(metadataOf(b.dto))
-  );
+  const sorted = [...entries].sort((a, b) => authoringOrderOf(a) - authoringOrderOf(b));
   const usedLowercase = /* @__PURE__ */ new Set();
   const nodes = [];
   const nameByBackendId = /* @__PURE__ */ new Map();
@@ -33784,12 +33770,16 @@ function buildNodeBody(collected, registry2, names, warnings) {
         warnings.push(`${atPath}: test_input is not representable in flow source and resets on the next push`);
       }
       const code = entry.dto.python_code;
+      if (code.venv_id != null) {
+        warnings.push(
+          `${atPath}: the virtual environment (venv #${code.venv_id}) is not representable in flow source \u2014 it is kept on the next push`
+        );
+      }
       return {
         type: "python",
         position,
         code: code.code,
         ...code.entrypoint !== "main" ? { entrypoint: code.entrypoint } : {},
-        ...code.libraries.length > 0 ? { libraries: code.libraries } : {},
         ...inputMapField2(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField2(entry.dto.output_variable_path)
       };
@@ -34051,61 +34041,16 @@ function buildPlainEdges(dto, registry2, warnings) {
   }
   return edges;
 }
-function buildConditionalEdges(dto, registry2, warnings) {
-  const builds = [];
-  const seenSources = /* @__PURE__ */ new Set();
-  for (const conditionalEdge of dto.conditional_edge_list) {
-    const from = registry2.nameByBackendId.get(conditionalEdge.source_node_id);
-    if (from === void 0) {
-      warnings.push(
-        `flow.edges: conditional edge #${conditionalEdge.id} references a node that is not part of the graph payload and was dropped`
-      );
-      continue;
-    }
-    if (seenSources.has(from)) {
-      warnings.push(
-        `flow.edges: node '${from}' has more than one conditional edge \u2014 the pusher tracks one per source node, extra ones will be recreated on every push`
-      );
-    }
-    seenSources.add(from);
-    const code = conditionalEdge.python_code;
-    if ((code.libraries ?? []).length > 0) {
-      warnings.push(
-        `flow.edges: conditional edge from '${from}' uses python libraries \u2014 flow-source edge conditions cannot declare libraries; they reset on the next push`
-      );
-    }
-    const inputMap = coerceInputMap(
-      conditionalEdge.input_map,
-      `flow.edges (conditional from '${from}')`,
-      warnings
-    );
-    builds.push({
-      edge: {
-        from,
-        condition: {
-          code: code.code,
-          ...code.entrypoint !== "main" ? { entrypoint: code.entrypoint } : {},
-          ...Object.keys(inputMap).length > 0 ? { input_map: inputMap } : {}
-        }
-      },
-      lockName: from,
-      lockEntry: {
-        backendId: conditionalEdge.id,
-        // Must equal the hash the pusher computes for the body the NEXT
-        // compile emits: emit.ts always sets libraries: [] on edge conditions.
-        contentHash: contentHash({
-          graph: dto.id,
-          source_node_id: conditionalEdge.source_node_id,
-          python_code: { code: code.code, entrypoint: code.entrypoint, libraries: [] },
-          input_map: inputMap
-        })
-      }
-    });
-  }
-  return builds;
+
+// src/graph/cdt-python-code-block.ts
+function isPythonCodeBlockSaved(code, secretIds) {
+  return !!code?.trim() || !!secretIds?.length;
 }
 
 // src/graph/bulk-save.ts
+function slugifyPortName(value) {
+  return value.toLowerCase().replace(/\s+/g, "-");
+}
 function resolveNodeRef(uuid2, allNodes, idMap) {
   if (!uuid2) return { backendId: null, tempId: null };
   const fromMap = idMap.get(uuid2);
@@ -34197,8 +34142,7 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
     if (group.route_code) {
       targetUuid = group.next_node ?? null;
       if (!targetUuid) {
-        const slugified = group.route_code.toLowerCase().replace(/\s+/g, "-");
-        const routePortId = `${node.id}_decision-route-${slugified}`;
+        const routePortId = `${node.id}_decision-route-${slugifyPortName(group.route_code)}`;
         const edge = edges.find(
           (candidate) => candidate.sourceNodeId === node.id && candidate.sourcePortId === routePortId
         );
@@ -34256,24 +34200,26 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
   return {
     graph: graphId,
     node_name: node.node_name,
-    pre_python_code: preCodeValue.trim() === "" && !preSecretIds.length ? null : {
+    pre_python_code: isPythonCodeBlockSaved(preCodeValue, preSecretIds) ? {
       code: preCodeValue,
-      libraries: preComputation.libraries ?? [],
       entrypoint: "main",
       global_kwargs: {},
-      secret_ids: preSecretIds
-    },
+      secret_ids: preSecretIds,
+      execution_timeout: preComputation.execution_timeout
+    } : null,
     pre_input_map: preComputation.input_map ?? tableData?.pre_input_map ?? {},
     pre_output_variable_path: preComputation.output_variable_path || tableData?.pre_output_variable_path || null,
-    post_python_code: postCodeValue.trim() === "" && !postSecretIds.length ? null : {
+    pre_use_storage: tableData?.pre_use_storage ?? false,
+    post_python_code: isPythonCodeBlockSaved(postCodeValue, postSecretIds) ? {
       code: postCodeValue,
-      libraries: postComputation.libraries ?? [],
       entrypoint: "main",
       global_kwargs: {},
-      secret_ids: postSecretIds
-    },
+      secret_ids: postSecretIds,
+      execution_timeout: postComputation.execution_timeout
+    } : null,
     post_input_map: postComputation.input_map ?? tableData?.post_input_map ?? {},
     post_output_variable_path: postComputation.output_variable_path || tableData?.post_output_variable_path || null,
+    post_use_storage: tableData?.post_use_storage ?? false,
     prompt_configs: promptConfigs,
     default_llm_config: tableData?.default_llm_config ?? null,
     ...defaultRef.backendId != null ? { default_next_node_id: defaultRef.backendId } : {},
@@ -34281,7 +34227,15 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
     ...errorRef.backendId != null ? { next_error_node_id: errorRef.backendId } : {},
     ...errorRef.tempId != null ? { next_error_node_temp_id: errorRef.tempId } : {},
     condition_groups: conditionGroups,
-    metadata: toNodeMetadata(node)
+    sections: (tableData?.sections ?? []).map((section) => ({
+      id: section.id,
+      name: section.name,
+      metadata: { color: normalizeCdtSectionColor(section.metadata?.color) }
+    })),
+    // Divergence: the frontend runs the explanations through `toStoredCdtExplanations` (size and
+    // shape limits). Flow source never authors explanations — they only round-trip what the
+    // server already stored, which that function produced — so they pass through unchanged.
+    metadata: { ...toNodeMetadata(node), explanations: node.explanations ?? {} }
   };
 }
 function buildAgentTasksPayload(tasks) {
@@ -34315,9 +34269,13 @@ function buildAgentTasksPayload(tasks) {
     };
   });
 }
+function createdNodeItemKeys(node) {
+  const hint = isNumberedNodeType(node.type) ? node.nodeNumber : void 0;
+  return { id: null, temp_id: node.id, ...hint != null ? { node_number_hint: hint } : {} };
+}
 function nodeItems(diff, mapPayload) {
   const created = diff.toCreate.map(
-    (node) => ({ id: null, temp_id: node.id, ...mapPayload(node) })
+    (node) => ({ ...createdNodeItemKeys(node), ...mapPayload(node) })
   );
   const updated = diff.toUpdate.map(
     ({ current: node }) => ({ id: node.backendId, ...mapPayload(node) })
@@ -34355,7 +34313,6 @@ function buildBulkSavePayload(options) {
     python_node_ids: nodeDiff.pythonNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     task_node_ids: nodeDiff.taskNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     agent_node_ids: nodeDiff.agentNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
-    llm_node_ids: [],
     file_extractor_node_ids: nodeDiff.fileExtractorNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     audio_transcription_node_ids: nodeDiff.audioToTextNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
     end_node_ids: nodeDiff.endNodes.toDelete.map((node) => node.backendId).filter((id) => id != null),
@@ -34449,6 +34406,8 @@ function buildBulkSavePayload(options) {
       output_variable_path: node.output_variable_path || null,
       webhook_trigger_path: "",
       webhook_trigger: node.data.webhook_trigger,
+      test_payload: node.data.test_payload ?? {},
+      use_storage: node.data.use_storage ?? false,
       metadata: toNodeMetadata(node)
     })),
     telegram_trigger_node_list: nodeItems(nodeDiff.telegramNodes, (node) => ({
@@ -34457,6 +34416,7 @@ function buildBulkSavePayload(options) {
       telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
       webhook_trigger: node.data.webhook_trigger,
       fields: node.data.fields,
+      test_payload: node.data.test_payload ?? {},
       metadata: toNodeMetadata(node)
     })),
     schedule_trigger_node_list: nodeItems(nodeDiff.scheduleNodes, (node) => ({
@@ -34518,8 +34478,7 @@ function extractNodeMetadata(metadata) {
   const size = record2["size"] ?? { width: 0, height: 0 };
   const color = typeof record2["color"] === "string" ? record2["color"] : "";
   const icon = typeof record2["icon"] === "string" ? record2["icon"] : "";
-  const nodeNumber = typeof record2["nodeNumber"] === "number" ? record2["nodeNumber"] : void 0;
-  return { position, color, icon, size, ...nodeNumber !== void 0 ? { nodeNumber } : {} };
+  return { position, color, icon, size };
 }
 function baseNode(type, dto) {
   return {
@@ -34527,6 +34486,8 @@ function baseNode(type, dto) {
     backendId: dto.id,
     node_name: dto.node_name ?? "",
     ...extractNodeMetadata(dto.metadata),
+    // Mirrors the load mappers' `nodeNumber: dto.node_number ?? undefined`.
+    ...dto.node_number != null ? { nodeNumber: dto.node_number } : {},
     input_map: dto.input_map ?? {},
     output_variable_path: dto.output_variable_path ?? null
   };
@@ -34539,11 +34500,16 @@ function toCustomPythonCode(code, fallbackName) {
   return {
     ...withName.id !== void 0 ? { id: withName.id } : {},
     name: withName.name ?? fallbackName,
-    libraries: withName.libraries,
     code: withName.code,
     entrypoint: withName.entrypoint,
+    ...withName.venv_id !== void 0 ? { venv_id: withName.venv_id } : {},
+    ...withName.execution_timeout !== void 0 ? { execution_timeout: withName.execution_timeout } : {},
     secret_ids: toSecretIds(withName.secrets)
   };
+}
+function readCdtExplanations(metadata) {
+  const explanations = (metadata ?? {})["explanations"];
+  return explanations !== null && typeof explanations === "object" && !Array.isArray(explanations) ? explanations : {};
 }
 function toAgentTasks(dto) {
   return [...dto.tasks ?? []].sort((a, b) => a.order - b.order).map((task) => ({
@@ -34640,18 +34606,25 @@ function toCdtTableState(dto, uuidOf) {
     next_error_node: uuidOf(dto.next_error_node_id),
     pre_computation: {
       code: dto.pre_python_code?.code ?? "",
-      libraries: dto.pre_python_code?.libraries ?? [],
       input_map: dto.pre_input_map ?? {},
       output_variable_path: dto.pre_output_variable_path ?? null,
-      secret_ids: toSecretIds(dto.pre_python_code?.secrets)
+      secret_ids: toSecretIds(dto.pre_python_code?.secrets),
+      ...dto.pre_python_code?.execution_timeout !== void 0 ? { execution_timeout: dto.pre_python_code.execution_timeout } : {}
     },
     post_computation: {
       code: dto.post_python_code?.code ?? "",
-      libraries: dto.post_python_code?.libraries ?? [],
       input_map: dto.post_input_map ?? {},
       output_variable_path: dto.post_output_variable_path ?? null,
-      secret_ids: toSecretIds(dto.post_python_code?.secrets)
-    }
+      secret_ids: toSecretIds(dto.post_python_code?.secrets),
+      ...dto.post_python_code?.execution_timeout !== void 0 ? { execution_timeout: dto.post_python_code.execution_timeout } : {}
+    },
+    pre_use_storage: dto.pre_use_storage ?? false,
+    post_use_storage: dto.post_use_storage ?? false,
+    sections: (dto.sections ?? []).map((section) => ({
+      id: section.id,
+      name: section.name,
+      metadata: { color: normalizeCdtSectionColor(section.metadata?.color) }
+    }))
   };
 }
 function buildUuidByBackendId(dto) {
@@ -34764,7 +34737,9 @@ function buildRemoteState(dto) {
         type: "webhook-trigger",
         data: {
           webhook_trigger: node.webhook_trigger ?? null,
-          python_code: toCustomPythonCode(node.python_code, node.node_name)
+          python_code: toCustomPythonCode(node.python_code, node.node_name),
+          test_payload: node.test_payload ?? {},
+          use_storage: node.use_storage ?? false
         }
       })
     ),
@@ -34780,7 +34755,8 @@ function buildRemoteState(dto) {
             parent: field.parent,
             field_name: field.field_name,
             variable_path: field.variable_path
-          }))
+          })),
+          test_payload: node.test_payload ?? {}
         }
       })
     ),
@@ -34814,7 +34790,8 @@ function buildRemoteState(dto) {
       (node) => ({
         ...baseNode("classification-decision-table", node),
         type: "classification-decision-table",
-        data: { table: toCdtTableState(node, uuidOf) }
+        data: { table: toCdtTableState(node, uuidOf) },
+        explanations: readCdtExplanations(node.metadata)
       })
     ),
     ...(dto.knowledge_node_list ?? []).map(
@@ -35502,14 +35479,22 @@ async function resolveFlowRefs(artifact, flowDir, context) {
 
 // src/pusher/graph.ts
 var NODE_SECTION = "nodes";
-var CONDITIONAL_EDGE_SECTION = "conditional_edges";
+var REMOVED_CONDITIONAL_EDGE_SECTION = "conditional_edges";
 function forgetMissingGraph(lock) {
-  const entities = Object.fromEntries(
-    Object.entries(lock.entities).filter(
-      ([key]) => !key.startsWith(`${NODE_SECTION}.`) && !key.startsWith(`${CONDITIONAL_EDGE_SECTION}.`)
-    )
+  return {
+    ...lock,
+    graphId: null,
+    saveVersion: 0,
+    entities: withoutSections(lock, [NODE_SECTION, REMOVED_CONDITIONAL_EDGE_SECTION])
+  };
+}
+function dropRemovedConditionalEdges(lock) {
+  return { ...lock, entities: withoutSections(lock, [REMOVED_CONDITIONAL_EDGE_SECTION]) };
+}
+function withoutSections(lock, sections) {
+  return Object.fromEntries(
+    Object.entries(lock.entities).filter(([key]) => !sections.some((section) => key.startsWith(`${section}.`)))
   );
-  return { ...lock, graphId: null, saveVersion: 0, entities };
 }
 function missingGraphWarning(graphId, flowName) {
   return `Graph #${graphId} recorded in flow.lock.json no longer exists (deleted, or the lockfile comes from another EpicStaff instance) \u2014 created a new graph for "${flowName}" and re-verified the locked entity ids.`;
@@ -35728,9 +35713,7 @@ var GraphPusher = class {
       }
     }
     const deleted = Object.entries(payload.deleted).filter(([key]) => key !== "edge_ids").reduce((total, [, ids]) => total + (Array.isArray(ids) ? ids.length : 0), 0);
-    const conditional = await this.pushConditionalEdges(artifact, remoteDto.id, desired, currentLock);
-    currentLock = conditional.lock;
-    currentLock = { ...currentLock, saveVersion: response.save_version };
+    currentLock = { ...dropRemovedConditionalEdges(currentLock), saveVersion: response.save_version };
     const updatedNodes = [];
     for (const [key, value] of Object.entries(payload)) {
       if (key === "edge_list" || key === "deleted" || !Array.isArray(value)) continue;
@@ -35745,7 +35728,7 @@ var GraphPusher = class {
       saveVersion: response.save_version,
       lock: currentLock,
       createdGraph,
-      changed: changed || conditional.changes > 0,
+      changed,
       nodeActions: { created, updated, deleted, updatedNodes },
       warnings
     };
@@ -35766,63 +35749,6 @@ var GraphPusher = class {
       throw error2;
     }
   }
-  async pushConditionalEdges(artifact, graphId, desired, lock) {
-    let currentLock = lock;
-    let changes = 0;
-    const plans = artifact.summary.conditionalEdges ?? [];
-    const nodeIdByUuid = new Map(
-      desired.nodes.filter((node) => node.backendId != null).map((node) => [node.id, node.backendId])
-    );
-    const seenKeys = /* @__PURE__ */ new Set();
-    for (const plan of plans) {
-      const sourceNodeId = nodeIdByUuid.get(plan.sourceNode);
-      if (sourceNodeId === void 0) {
-        throw new Error(`Conditional edge source node "${plan.sourceNodeName}" has no backend id after save.`);
-      }
-      const body = {
-        graph: graphId,
-        source_node_id: sourceNodeId,
-        python_code: plan.python_code,
-        input_map: plan.input_map
-      };
-      const hash = contentHash(body);
-      const lockName = plan.sourceNodeName;
-      seenKeys.add(lockName);
-      const entry = getEntity(currentLock, CONDITIONAL_EDGE_SECTION, lockName);
-      if (!entry) {
-        const createdEdge = await this.graphs.createConditionalEdge(body);
-        currentLock = setEntity(currentLock, CONDITIONAL_EDGE_SECTION, lockName, {
-          backendId: createdEdge.id,
-          contentHash: hash
-        });
-        changes += 1;
-        logger.info(`Created conditional edge from "${plan.sourceNodeName}"`);
-      } else if (isEntityDirty(currentLock, CONDITIONAL_EDGE_SECTION, lockName, hash)) {
-        await this.graphs.updateConditionalEdge(entry.backendId, body);
-        currentLock = setEntity(currentLock, CONDITIONAL_EDGE_SECTION, lockName, {
-          backendId: entry.backendId,
-          contentHash: hash
-        });
-        changes += 1;
-        logger.info(`Updated conditional edge from "${plan.sourceNodeName}"`);
-      }
-    }
-    for (const key of Object.keys(lock.entities)) {
-      if (!key.startsWith(`${CONDITIONAL_EDGE_SECTION}.`)) continue;
-      const name = key.slice(CONDITIONAL_EDGE_SECTION.length + 1);
-      if (!seenKeys.has(name)) {
-        const entry = lock.entities[key];
-        if (entry) {
-          await this.graphs.deleteConditionalEdge(entry.backendId).catch((error2) => {
-            logger.warn(`Failed to delete conditional edge #${entry.backendId}`, error2);
-          });
-        }
-        currentLock = removeEntity(currentLock, CONDITIONAL_EDGE_SECTION, name);
-        changes += 1;
-      }
-    }
-    return { lock: currentLock, changes };
-  }
 };
 function inheritUnrepresentableFields(desired, remote) {
   const remoteById = /* @__PURE__ */ new Map();
@@ -35834,21 +35760,30 @@ function inheritUnrepresentableFields(desired, remote) {
     if (previous === void 0 || previous.type !== node.type) continue;
     if (node.type === "webhook-trigger" && previous.type === "webhook-trigger") {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
-      node.data.python_code.secret_ids ??= previous.data.python_code.secret_ids;
-      node.data.python_code.id ??= previous.data.python_code.id;
+      node.data.test_payload ??= previous.data.test_payload;
+      node.data.use_storage ??= previous.data.use_storage;
+      inheritPythonCodeSettings(node.data.python_code, previous.data.python_code);
     } else if (node.type === "telegram-trigger" && previous.type === "telegram-trigger") {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
+      node.data.test_payload ??= previous.data.test_payload;
     } else if (node.type === "python" && previous.type === "python") {
-      node.data.secret_ids ??= previous.data.secret_ids;
-      node.data.id ??= previous.data.id;
+      inheritPythonCodeSettings(node.data, previous.data);
       node.data.use_storage ??= false;
+    } else if (node.type === "classification-decision-table" && previous.type === "classification-decision-table") {
+      node.explanations ??= previous.explanations;
     } else if (node.type === "agent" && previous.type === "agent") {
       inheritAgentTaskIds(node.data.tasks ?? [], previous.data.tasks ?? []);
     } else if (node.type === "note" && previous.type === "note") {
       previous.node_name = node.node_name;
     }
   }
+}
+function inheritPythonCodeSettings(code, previous) {
+  code.id ??= previous.id;
+  code.secret_ids ??= previous.secret_ids;
+  if (code.venv_id === void 0 && previous.venv_id !== void 0) code.venv_id = previous.venv_id;
+  code.execution_timeout ??= previous.execution_timeout;
 }
 function inheritAgentTaskIds(tasks, previousTasks) {
   tasks.forEach((task, index) => {
@@ -35870,31 +35805,11 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 function prepareRestoreState(dto) {
   const state = buildRemoteState(dto);
   const warnings = [];
-  const uuidByDumpedId = /* @__PURE__ */ new Map();
-  for (const node of state.nodes) if (node.backendId != null) uuidByDumpedId.set(node.backendId, node.id);
-  const conditionalEdges = [];
-  for (const edge of dto.conditional_edge_list ?? []) {
-    const sourceUuid = uuidByDumpedId.get(edge.source_node_id);
-    if (sourceUuid === void 0) {
-      warnings.push(
-        `Conditional edge #${edge.id} starts at node #${edge.source_node_id}, which is not part of the dump \u2014 skipped.`
-      );
-      continue;
-    }
-    const code = edge.python_code;
-    conditionalEdges.push({
-      sourceNode: sourceUuid,
-      dumpedSourceNodeId: edge.source_node_id,
-      python_code: {
-        code: code.code,
-        entrypoint: code.entrypoint,
-        libraries: code.libraries ?? [],
-        ...code.global_kwargs !== void 0 && code.global_kwargs !== null ? { global_kwargs: code.global_kwargs } : {},
-        ...code.secrets?.length ? { secret_ids: code.secrets.map((secret) => secret.id) } : {}
-      },
-      input_map: edge.input_map ?? {},
-      metadata: edge.metadata ?? {}
-    });
+  const removedConditionalEdges = dto.conditional_edge_list?.length ?? 0;
+  if (removedConditionalEdges > 0) {
+    warnings.push(
+      `The dump holds ${removedConditionalEdges} conditional edge(s). EpicStaff no longer has conditional edges, so they were NOT restored and the copy does not route like the original \u2014 branch with a decision-table node instead.`
+    );
   }
   let pythonCodeRows = 0;
   let agentTasks = 0;
@@ -35938,6 +35853,9 @@ function prepareRestoreState(dto) {
     if (Array.isArray(tasks)) {
       for (const task of tasks) if (task.tempId) ids.add(task.tempId);
     }
+    if (node.type === "classification-decision-table") {
+      for (const section of node.data.table.sections ?? []) ids.add(section.id);
+    }
   }
   const ordered = [...ids].sort((left, right) => right.length - left.length);
   const fresh = new Map(ordered.map((old) => [old, randomUUID2()]));
@@ -35945,31 +35863,10 @@ function prepareRestoreState(dto) {
   for (const old of ordered) json = json.split(old).join(fresh.get(old));
   return {
     state: JSON.parse(json),
-    conditionalEdges: conditionalEdges.map((edge) => ({ ...edge, sourceNode: fresh.get(edge.sourceNode) ?? edge.sourceNode })),
     detached: { python_code_rows: pythonCodeRows, agent_tasks: agentTasks },
     remappedUuids: ordered.length,
     warnings
   };
-}
-async function restoreConditionalEdges(graphs, graphId, plans, nodeIdByUuid) {
-  let created = 0;
-  for (const plan of plans) {
-    const sourceNodeId = nodeIdByUuid.get(plan.sourceNode);
-    if (sourceNodeId === void 0) {
-      throw new Error(
-        `Conditional edge from dumped node #${plan.dumpedSourceNodeId} could not be restored: its node has no backend id in graph #${graphId} after the save.`
-      );
-    }
-    await graphs.createConditionalEdge({
-      graph: graphId,
-      source_node_id: sourceNodeId,
-      python_code: plan.python_code,
-      input_map: plan.input_map,
-      metadata: plan.metadata
-    });
-    created += 1;
-  }
-  return created;
 }
 
 // src/util/keyed-mutex.ts
@@ -36176,7 +36073,6 @@ function registerFlowTools(server, context) {
         bytes: body.length,
         nodes,
         edges: Array.isArray(dto.edge_list) ? dto.edge_list.length : 0,
-        conditional_edges: Array.isArray(dto.conditional_edge_list) ? dto.conditional_edge_list.length : 0,
         lossyFieldsCaptured: lossyFieldsCaptured.sort(),
         next: "Archival snapshot \u2014 restore by hand in the editor, or diff against a later dump. pull_flow remains the way to get an editable flow source (lossy by design)."
       };
@@ -36186,7 +36082,7 @@ function registerFlowTools(server, context) {
     "restore_graph",
     {
       title: "Restore a dump_graph JSON into a NEW graph (faithful copy)",
-      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python test_input and secrets, task output_schema, error routes and conditional edges (recreated through their dedicated endpoint, so the copy routes identically). Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
+      description: "Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source cannot express \u2014 end-node output_map, classification prompt_configs and route codes, python test_input and secrets, task output_schema and error routes. Use it to make a restorable backup, or to clone a flow when the backend copy/export endpoints mishandle classification and agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, not duplicated \u2014 but node-owned rows (python code, agent sub-tasks) are detached so editing the copy can never change the original.",
       inputSchema: {
         dump_path: external_exports.string().describe("Absolute path of a JSON file previously written by dump_graph"),
         name: external_exports.string().optional().describe("Name for the new graph (required unless target_graph_id is given)"),
@@ -36210,7 +36106,7 @@ function registerFlowTools(server, context) {
       if (dto == null || typeof dto !== "object" || !Array.isArray(dto.edge_list)) {
         throw new Error(`${dump_path} does not look like a dump_graph snapshot (no edge_list).`);
       }
-      const { state, conditionalEdges, detached, remappedUuids, warnings } = prepareRestoreState(dto);
+      const { state, detached, remappedUuids, warnings } = prepareRestoreState(dto);
       const source = dto;
       const graphs = new GraphsApi(context.client);
       let targetId;
@@ -36219,11 +36115,9 @@ function registerFlowTools(server, context) {
       let remote;
       let createdGraph = false;
       let replaced = 0;
-      let staleConditionalEdgeIds = [];
       if (target_graph_id != null) {
         const targetDto = await graphs.get(target_graph_id);
         remote = buildRemoteState(targetDto);
-        staleConditionalEdgeIds = (targetDto.conditional_edge_list ?? []).map((edge) => edge.id);
         targetId = target_graph_id;
         targetName = targetDto.name;
         baseSaveVersion = targetDto.save_version;
@@ -36259,28 +36153,11 @@ function registerFlowTools(server, context) {
           createdGraph ? `Graph shell #${targetId} ("${targetName}") was created but bulk-save failed, so it is empty \u2014 delete it and retry. Cause: ${cause}` : `Overwrite of graph #${targetId} ("${targetName}") failed; it is unchanged. Cause: ${cause}`
         );
       }
-      let conditionalEdgesRestored = 0;
-      try {
-        for (const edgeId of staleConditionalEdgeIds) await graphs.deleteConditionalEdge(edgeId);
-        conditionalEdgesRestored = await restoreConditionalEdges(
-          graphs,
-          targetId,
-          conditionalEdges,
-          applySaveResponse(state, { nodes: remote.nodes, edges: remote.edges }, saved)
-        );
-      } catch (error2) {
-        const cause = error2 instanceof Error ? error2.message : String(error2);
-        throw new Error(
-          `Graph #${targetId} ("${targetName}") was saved, but restoring its conditional edges failed after ${conditionalEdgesRestored} of ${conditionalEdges.length} \u2014 it will not route like the dump. Cause: ${cause}`
-        );
-      }
       const labelIds = source.label_ids ?? [];
       let labelsCopied = false;
       if (labelIds.length > 0 && createdGraph) {
         try {
-          await context.client.patch(`graphs/${targetId}/`, {
-            body: { save_version: saved.save_version, label_ids: labelIds }
-          });
+          await graphs.patch(targetId, { save_version: saved.save_version, label_ids: labelIds });
           labelsCopied = true;
         } catch (error2) {
           warnings.push(
@@ -36298,7 +36175,6 @@ function registerFlowTools(server, context) {
         restoredFrom: { graph_id: dto.id, graph_name: dto.name, save_version: dto.save_version, dump_path },
         nodes: state.nodes.length,
         edges: state.edges.length,
-        conditionalEdges: conditionalEdgesRestored,
         detached,
         remappedUuids,
         warnings,
@@ -36816,7 +36692,8 @@ var NODE_REFERENCE = {
     summary: "Executes Python in the sandbox; reads inputs from and writes outputs to flow state.",
     whenToUse: "Deterministic transforms, glue, list/index manipulation, calling out to libraries.",
     caveats: [
-      "Provide exactly one of `code` / `code_file`; the `entrypoint` function receives the mapped inputs."
+      "Provide exactly one of `code` / `code_file`; the `entrypoint` function receives the mapped inputs.",
+      "Third-party packages come from the virtual environment (venv) selected for the node in the editor \u2014 `libraries:` is no longer installed. Without a venv the code runs in the default one."
     ]
   },
   end: {
@@ -36973,8 +36850,7 @@ function summarizeGraph(graph) {
       id: edge.id,
       start_node_id: edge.start_node_id,
       end_node_id: edge.end_node_id
-    })),
-    conditional_edges: (graph.conditional_edge_list ?? []).length
+    }))
   };
 }
 function registerReferenceTools(server, context) {
@@ -37838,7 +37714,7 @@ function registerCatalogTools(server, context) {
     "delete_surface",
     {
       title: "Delete a catalog surface",
-      description: 'Delete a catalog surface by id or exact name. IRREVERSIBLE and NOT flow-aware: any flow that references this surface via existing: "<name>" will FAIL its next push_flow (the reference will not resolve). Verify no flow depends on it first.',
+      description: 'Delete a catalog surface by id or exact name: it moves to the EpicStaff recycle bin (restorable in the editor until purged). NOT flow-aware: while it is binned, any flow that references this surface via existing: "<name>" will FAIL its next push_flow (the reference will not resolve). Verify no flow depends on it first.',
       inputSchema: {
         surface: idOrName.describe("The surface to delete: backend id or exact name.")
       }
@@ -37851,7 +37727,7 @@ function registerCatalogTools(server, context) {
       await surfaces.delete(surfaceId);
       return {
         deleted: { id: surfaceId, name: current.name },
-        next: 'WARNING: any flow referencing this surface via existing: "' + current.name + '" will fail its next push_flow. Update or remove those references.'
+        next: 'WARNING: any flow referencing this surface via existing: "' + current.name + '" will fail its next push_flow. Update or remove those references, or restore it from the recycle bin.'
       };
     })
   );
@@ -37862,7 +37738,7 @@ function registerCatalogTools(server, context) {
       description: 'Create a reusable AgentDefinition (the first-class Agent entity) standalone \u2014 no flow needed. Reference it later from a flow agent node via existing: "<name>". Names are org-unique; on a clash use update_agent. llm_config and default_surfaces[].surface accept a backend id OR an existing name. Connect-both-ends recipe: create_surface first, then create_agent(default_surfaces:[<surface>]), then update_surface(owner_agent: <this agent>) to make the surface agent-specific.',
       inputSchema: {
         name: external_exports.string().min(1).describe("Org-unique agent name; the handle flows reference via existing:."),
-        instructions: external_exports.string().describe("Boot instructions \u2014 the agent system prompt."),
+        instructions: external_exports.string().describe("Boot instructions \u2014 the agent system prompt. Stored as the agent's single instruction document."),
         description: external_exports.string().optional().describe("One-line summary of what this agent is for."),
         llm_config: idOrName.describe("LLM config the agent thinks with: backend id or exact name (list_llm_configs)."),
         fcm_llm_config: idOrName.optional().describe("Separate LLM config for function calling: id or name."),
@@ -37903,7 +37779,9 @@ function registerCatalogTools(server, context) {
       inputSchema: {
         agent: idOrName.describe("The agent to update: backend id or exact current name."),
         name: external_exports.string().min(1).optional().describe("New name (rename)."),
-        instructions: external_exports.string().optional(),
+        instructions: external_exports.string().optional().describe(
+          "New boot instructions. REPLACES the whole instruction list with this one document (documents added in the editor are dropped); omit to keep the current instructions."
+        ),
         description: external_exports.string().optional(),
         llm_config: idOrName.optional(),
         fcm_llm_config: idOrName.optional(),
@@ -37951,7 +37829,7 @@ function registerCatalogTools(server, context) {
     "delete_agent",
     {
       title: "Delete an agent definition",
-      description: 'Delete an AgentDefinition by id or exact name. IRREVERSIBLE and NOT flow-aware: any flow that references this agent via existing: "<name>" will FAIL its next push_flow. Surfaces owned by this agent are cascade-deleted with it. Verify no flow depends on it first.',
+      description: 'Delete an AgentDefinition by id or exact name: it moves to the EpicStaff recycle bin (restorable in the editor until purged), together with the surfaces it owns. NOT flow-aware: while it is binned, any flow that references this agent via existing: "<name>" will FAIL its next push_flow. Verify no flow depends on it first.',
       inputSchema: {
         agent: idOrName.describe("The agent to delete: backend id or exact name.")
       }
@@ -37964,7 +37842,7 @@ function registerCatalogTools(server, context) {
       await agents.delete(agentId);
       return {
         deleted: { id: agentId, name: current.name },
-        next: 'WARNING: any flow referencing this agent via existing: "' + current.name + '" will fail its next push_flow. Surfaces owned by this agent were cascade-deleted.'
+        next: 'WARNING: any flow referencing this agent via existing: "' + current.name + '" will fail its next push_flow. Surfaces owned by this agent went to the recycle bin with it.'
       };
     })
   );
@@ -38043,7 +37921,7 @@ function registerCatalogTools(server, context) {
     "delete_collection",
     {
       title: "Delete a knowledge collection",
-      description: 'Delete a knowledge source collection by id. IRREVERSIBLE: its documents, attached RAG strategies, and the pgvector index are dropped permanently. NOT flow-aware: any flow whose surface references this collection via existing: "<name>" will FAIL its next push_flow, and retrieval stops immediately. Verify no surface/flow depends on it first.',
+      description: 'Delete a knowledge source collection by id: it moves to the EpicStaff recycle bin with its documents and RAG strategies (restorable in the editor until purged; purging drops the index for good). NOT flow-aware: retrieval stops immediately, and while it is binned any flow whose surface references this collection via existing: "<name>" will FAIL its next push_flow. Verify no surface/flow depends on it first.',
       inputSchema: {
         collection_id: external_exports.number().int().describe("Backend id of the source collection to delete.")
       }
@@ -38054,7 +37932,7 @@ function registerCatalogTools(server, context) {
       await knowledge.deleteCollection(collection_id);
       return {
         deleted: { collectionId: collection_id },
-        next: 'WARNING: the pgvector index was dropped irreversibly. Any surface/flow referencing this collection via existing: "<name>" will fail its next push_flow, and retrieval has stopped.'
+        next: 'WARNING: retrieval has stopped. The collection is in the recycle bin \u2014 restore it in the editor, or any surface/flow referencing it via existing: "<name>" will fail its next push_flow.'
       };
     })
   );
@@ -38067,7 +37945,7 @@ async function resolveDefaultSurfaces(entries, resolveSurface) {
 async function buildAgentRequest(name, body, resolvers) {
   const request = {
     name,
-    instructions: body.instructions,
+    instruction_list: toInstructionList(body.instructions),
     llm_config: await resolvers.resolveLlmConfig(body.llm_config)
   };
   if (body.description !== void 0) request.description = body.description;
@@ -38081,7 +37959,7 @@ async function buildAgentRequest(name, body, resolvers) {
 async function buildAgentPatch(body, resolvers) {
   const request = {};
   if (body.name !== void 0) request.name = body.name;
-  if (body.instructions !== void 0) request.instructions = body.instructions;
+  if (body.instructions !== void 0) request.instruction_list = toInstructionList(body.instructions);
   if (body.description !== void 0) request.description = body.description;
   if (body.llm_config !== void 0) request.llm_config = await resolvers.resolveLlmConfig(body.llm_config);
   if (body.fcm_llm_config !== void 0) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
@@ -38178,8 +38056,9 @@ var EPICSTAFF_INSTRUCTIONS = [
   'scoped to exactly "user" or "organization".',
   "",
   "Invariants: agent nodes need at least one task (tasks:); no parallel fan-out \u2014 one active path,",
-  'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
-  '"crew" (removed from EpicStaff \u2014 use agent/task nodes). A key-value node writes its read entries',
+  "branch with a decision-table (conditional edges were removed from EpicStaff); never use node types",
+  '"llm", "code-agent" or "crew" (removed from EpicStaff \u2014 use agent/task nodes). Python `libraries`',
+  "are not installed any more: code runs in a venv selected in the editor. A key-value node writes its read entries",
   "to their own state paths, not output_variable_path. Credentials come from env vars",
   "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source;",
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
@@ -38206,7 +38085,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.3.0-dev.1"
+      version: "1.5.0-dev.1"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
