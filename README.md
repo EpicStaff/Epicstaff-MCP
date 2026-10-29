@@ -49,7 +49,8 @@ latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tra
 
 | EpicStaff | Plugin |
 |---|---|
-| 1.5 (`developer`, unreleased — `release/v1.4.x` was cut from it) | `1.5.0-dev.N` (`main`) |
+| 1.5 (`developer`, unreleased) | `1.5.0-dev.N` (`main`) |
+| 1.4.x | `1.4.y` (`release/v1.4.x`) |
 | 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
 
 **How to pick:** check your EpicStaff version (release tag, or `developer`) and install the newest

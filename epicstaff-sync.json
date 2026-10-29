@@ -1,10 +1,10 @@
 {
   "epicstaff": {
     "repo": "EpicStaff/EpicStaff",
-    "branch": "developer",
-    "commit": "d545c7a9370fa95fd67c89c2cccce7219a56520a",
+    "branch": "release/v1.4.x",
+    "commit": "328f159c460d769ea87670d33a8a61bb73814ff7",
     "synced_at": "2026-10-29",
-    "release_line": "1.5",
-    "status": "dev"
+    "release_line": "1.4",
+    "status": "release"
   }
 }
