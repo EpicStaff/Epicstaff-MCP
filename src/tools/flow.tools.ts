@@ -9,6 +9,7 @@ import { KnowledgeApi } from '../api/knowledge.js';
 import { LlmApi } from '../api/llm.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
+import { VenvsApi } from '../api/venvs.js';
 import { compileFlow } from '../compiler/index.js';
 import { decompileFlow } from '../flow-source/decompiler.js';
 import { hasErrors } from '../flow-source/diagnostics.js';
@@ -22,8 +23,7 @@ import { EntityPusher } from '../pusher/entities.js';
 import { resolveRagRefs } from '../pusher/rag-refs.js';
 import { resolveFlowRefs } from '../pusher/flow-refs.js';
 import { GraphPusher, lockedGraphMismatch, reconcileLockedGraph } from '../pusher/graph.js';
-import { prepareRestoreState, restoreConditionalEdges } from '../pusher/restore.js';
-import { applySaveResponse } from '../graph/temp-id.js';
+import { prepareRestoreState } from '../pusher/restore.js';
 import { err, ok, toContent } from '../util/result.js';
 import { runTool } from './auth-org.tools.js';
 import { KeyedMutex } from '../util/keyed-mutex.js';
@@ -254,7 +254,6 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           bytes: body.length,
           nodes,
           edges: Array.isArray(dto.edge_list) ? dto.edge_list.length : 0,
-          conditional_edges: Array.isArray(dto.conditional_edge_list) ? dto.conditional_edge_list.length : 0,
           lossyFieldsCaptured: lossyFieldsCaptured.sort(),
           next:
             'Archival snapshot — restore by hand in the editor, or diff against a later dump. ' +
@@ -270,8 +269,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
       description:
         'Materialize a dump_graph snapshot as a brand-new graph, preserving the settings flow source ' +
         'cannot express — end-node output_map, classification prompt_configs and route codes, python ' +
-        'test_input and secrets, task output_schema, error routes and conditional edges (recreated through ' +
-        'their dedicated endpoint, so the copy routes identically). Use it to make a restorable ' +
+        'test_input and secrets, task output_schema and error routes. Use it to make a restorable ' +
         'backup, or to clone a flow when the backend copy/export endpoints mishandle classification and ' +
         'agent nodes. Always CREATES a new graph; it never overwrites an existing one, so it cannot ' +
         'damage the source. Org-level entities (agent definitions, llm configs, surfaces) are referenced, ' +
@@ -309,7 +307,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           throw new Error(`${dump_path} does not look like a dump_graph snapshot (no edge_list).`);
         }
 
-        const { state, conditionalEdges, detached, remappedUuids, warnings } = prepareRestoreState(dto);
+        const { state, detached, remappedUuids, warnings } = prepareRestoreState(dto);
 
         const source = dto as unknown as { metadata?: Record<string, unknown>; tags?: string[]; label_ids?: number[] };
         const graphs = new GraphsApi(context.client);
@@ -323,13 +321,10 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         let remote: { nodes: GraphState['nodes']; edges: GraphState['edges'] };
         let createdGraph = false;
         let replaced = 0;
-        let staleConditionalEdgeIds: number[] = [];
 
         if (target_graph_id != null) {
           const targetDto = await graphs.get(target_graph_id);
           remote = buildRemoteState(targetDto);
-          // The target's conditional edges hang off nodes the overwrite deletes.
-          staleConditionalEdgeIds = (targetDto.conditional_edge_list ?? []).map((edge) => edge.id);
           targetId = target_graph_id;
           targetName = targetDto.name;
           baseSaveVersion = targetDto.save_version;
@@ -371,25 +366,6 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           );
         }
 
-        // Conditional edges are not part of bulk-save — recreate them through conditionaledges/,
-        // addressed by the new ids of their source nodes, so the copy routes like the original.
-        let conditionalEdgesRestored = 0;
-        try {
-          for (const edgeId of staleConditionalEdgeIds) await graphs.deleteConditionalEdge(edgeId);
-          conditionalEdgesRestored = await restoreConditionalEdges(
-            graphs,
-            targetId,
-            conditionalEdges,
-            applySaveResponse(state, { nodes: remote.nodes, edges: remote.edges }, saved),
-          );
-        } catch (error) {
-          const cause = error instanceof Error ? error.message : String(error);
-          throw new Error(
-            `Graph #${targetId} ("${targetName}") was saved, but restoring its conditional edges failed after ` +
-              `${conditionalEdgesRestored} of ${conditionalEdges.length} — it will not route like the dump. Cause: ${cause}`,
-          );
-        }
-
         // Labels are not part of the create body, so they need a follow-up PATCH.
         // Non-fatal: the graph content is already correct without them.
         const labelIds = source.label_ids ?? [];
@@ -397,9 +373,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         if (labelIds.length > 0 && createdGraph) {
           try {
             // PATCH is optimistically locked like bulk-save — save_version is mandatory.
-            await context.client.patch(`graphs/${targetId}/`, {
-              body: { save_version: saved.save_version, label_ids: labelIds },
-            });
+            await graphs.patch(targetId, { save_version: saved.save_version, label_ids: labelIds });
             labelsCopied = true;
           } catch (error) {
             warnings.push(
@@ -419,7 +393,6 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
           restoredFrom: { graph_id: dto.id, graph_name: dto.name, save_version: dto.save_version, dump_path },
           nodes: state.nodes.length,
           edges: state.edges.length,
-          conditionalEdges: conditionalEdgesRestored,
           detached,
           remappedUuids,
           warnings,
@@ -669,7 +642,9 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         'Import an existing EpicStaff flow (graph) into a local flow-source directory so it can be edited and ' +
         'repushed: writes flow.yaml with every node, edge and pinned canvas position, plus a seeded flow.lock.json ' +
         'so push_flow updates the same graph in place. Referenced entities (agents, surfaces, llm configs, tools, ' +
-        'knowledge collections) are written as {existing: "<name>"} references — they stay owned by the backend. ' +
+        'knowledge collections) are written as {existing: "<name>"} references — they stay owned by the backend; ' +
+        'a python node\'s virtual environment as venv: "<name>". The result also reports who created and last ' +
+        'edited the flow and each node (with its #N number) — read-only, so it is not part of flow source. ' +
         'Refuses to overwrite an existing flow source.',
       inputSchema: {
         graph_id: z.number().int().describe('Backend id of the graph to pull (see list output of graph-light)'),
@@ -683,7 +658,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
 
-        const { files, warnings } = await decompileFlow(
+        const { files, warnings, authorship } = await decompileFlow(
           {
             graphs: new GraphsApi(context.client),
             agentDefinitions: new AgentDefinitionsApi(context.client),
@@ -692,6 +667,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
             tools: new ToolsApi(context.client),
             knowledge: new KnowledgeApi(context.client),
             keyValueTables: new KeyValueTablesApi(context.client),
+            venvs: new VenvsApi(context.client),
           },
           graph_id,
           target_dir,
@@ -700,6 +676,7 @@ export function registerFlowTools(server: McpServer, context: AppContext): void 
         return {
           files,
           warnings,
+          authorship,
           next: 'Run diff_flow to verify a no-op baseline, then edit with es-write-flow.',
         };
       }),

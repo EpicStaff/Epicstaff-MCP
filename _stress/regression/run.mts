@@ -263,7 +263,7 @@ const initialKey = (() => {
   const { EPICSTAFF_BASE_URL: _url, ...withoutUrl } = process.env;
   const server = await Server.start({ ...withoutUrl, EPICSTAFF_BASE_URL: '${EPICSTAFF_BASE_URL}' });
   const { tools } = await server.client.listTools();
-  assertion('unconfigured server starts and lists every tool', 'check_connection', tools.length === 44, `tools=${tools.length}`);
+  assertion('unconfigured server starts and lists every tool', 'check_connection', tools.length === 89, `tools=${tools.length}`);
   await step(server, 'unconfigured: check_connection explains the config problem', 'check_connection', {}, (response) =>
     (!response.ok && /EPICSTAFF_BASE_URL/.test(response.error ?? '') && /EPICSTAFF_BASE_URL/.test(response.hint ?? '')) || response.text.slice(0, 300),
   );
@@ -360,12 +360,6 @@ await step(server, '#3 ...and no entity churn', 'diff_flow', { flow_dir: flow('r
 
 const lastVariables = new Map<string, Record<string, any>>();
 
-/**
- * Note on conditional edges: EpicStaff (developer e310ee3) names runtime graph nodes "<name> #<id>",
- * so a condition returning the bare node name ("Gold") does not route — the run ends after the
- * edge's source. That is a known upstream/runtime gap (see the PR report), so these checks assert
- * what the platform delivers today and, for restore, that the copy behaves exactly like the original.
- */
 async function runAndVerify(label: string, graphId: number, initialState: Record<string, unknown>, verify: (variables: Record<string, any>) => true | string) {
   const started = await step(server, `${label}: run`, 'run_flow', { graph_id: graphId, initial_state: initialState }, (response) =>
     (response.ok && typeof response.data.session_id === 'number') || failure(response),
@@ -380,7 +374,8 @@ async function runAndVerify(label: string, graphId: number, initialState: Record
 }
 
 const goldSession = await runAndVerify('core gold path (amount=150)', coreId, { amount: 150, customer: 'c_gold' }, (variables) =>
-  (variables.tier?.tier === 'gold' && variables.loaded?.tier === 'gold' && typeof variables.verdict === 'string' && /gold/i.test(variables.verdict)) ||
+  (variables.tier?.tier === 'gold' && variables.loaded?.tier === 'gold' && typeof variables.verdict === 'string' && /gold/i.test(variables.verdict) &&
+    variables.path === 'gold-path') ||
   json(variables).slice(0, 300),
 );
 await step(server, 'session updates', 'get_session_updates', { session_id: goldSession }, (response) =>
@@ -391,7 +386,8 @@ await step(server, 'list sessions for graph', 'list_sessions', { graph_id: coreI
   (response.ok && json(response.data).includes(`"id":${goldSession}`)) || failure(response),
 );
 await runAndVerify('core basic path (amount=10)', coreId, { amount: 10, customer: 'c_basic' }, (variables) =>
-  (variables.tier?.tier === 'basic' && variables.loaded?.tier === 'basic' && typeof variables.verdict === 'string') ||
+  (variables.tier?.tier === 'basic' && variables.loaded?.tier === 'basic' && typeof variables.verdict === 'string' &&
+    variables.path === 'basic-path') ||
   json(variables).slice(0, 300),
 );
 
@@ -490,12 +486,10 @@ trackGraph(await step(server, 'file-extractor + audio-to-text push', 'push_flow'
   );
   const dumpPath = join(RUN_DIR, 'core-dump.json');
   await step(server, 'dump core', 'dump_graph', { graph_id: coreId, output_path: dumpPath }, (response) =>
-    (response.ok && existsSync(dumpPath) && response.data.conditional_edges === 1) || failure(response),
+    (response.ok && existsSync(dumpPath)) || failure(response),
   );
-  const restored = await step(server, '#9 restore as copy keeps conditional edges', 'restore_graph', { dump_path: dumpPath, name: `reg-core-copy-${RUN}` }, (response) =>
-    (response.ok && response.data.graphId !== coreId && response.data.conditionalEdges === 1 &&
-      !/conditional edge/i.test(json(response.data.warnings))) ||
-    json(response.data ?? response.error).slice(0, 300),
+  const restored = await step(server, '#9 restore as copy', 'restore_graph', { dump_path: dumpPath, name: `reg-core-copy-${RUN}` }, (response) =>
+    (response.ok && response.data.graphId !== coreId) || json(response.data ?? response.error).slice(0, 300),
   );
   trackGraph(restored);
   await step(server, 'describe restored', 'describe_graph', { graph_id: restored.data?.graphId ?? -1 });
@@ -504,27 +498,6 @@ trackGraph(await step(server, 'file-extractor + audio-to-text push', 'push_flow'
     const comparable = (vars: Record<string, any>) => json({ tier: vars.tier, loaded: vars.loaded, score: vars.score, path: vars.path });
     return (variables.tier?.edited === true && comparable(variables) === comparable(original)) ||
       `copy ${comparable(variables)} vs original ${comparable(original)}`;
-  });
-  const copyDump = join(RUN_DIR, 'copy-dump.json');
-  await step(server, '#9 restored conditional edge matches the original', 'dump_graph', { graph_id: restored.data?.graphId ?? -1, output_path: copyDump }, (response) => {
-    if (!response.ok) return failure(response);
-    const nameById = (graph: any): Map<number, string> => {
-      const names = new Map<number, string>();
-      for (const [key, list] of Object.entries(graph)) {
-        if (key.endsWith('_list') && Array.isArray(list)) for (const node of list as any[]) if (node?.node_name) names.set(node.id, node.node_name);
-      }
-      return names;
-    };
-    const describe = (graph: any) =>
-      json((graph.conditional_edge_list ?? []).map((edge: any) => ({
-        source: nameById(graph).get(edge.source_node_id),
-        code: edge.python_code?.code,
-        input_map: edge.input_map,
-      })));
-    const original = JSON.parse(readFileSync(dumpPath, 'utf8'));
-    const copy = JSON.parse(readFileSync(copyDump, 'utf8'));
-    return (describe(copy) === describe(original) && (copy.conditional_edge_list ?? []).length === 1) ||
-      `copy ${describe(copy)} vs original ${describe(original)}`;
   });
 }
 
@@ -750,6 +723,216 @@ trackGraph(await step(server, 'file-extractor + audio-to-text push', 'push_flow'
   await step(server, 'sec: ...and a plain repush afterwards is a no-op', 'push_flow', { flow_dir: originalDir }, (response) =>
     (response.ok && response.data.changed === false) || response.text.slice(0, 300),
   );
+}
+
+// Coverage tools (venvs, versions, recycle bin, configs, secrets, key-value tables, tool catalog,
+// labels, import/export, persistent state). Everything is named reg-cov-<run> and removed here; the
+// flow's python code is moved back to the default venv before anything is copied, versioned or
+// binned, so the venv can be deleted at the end (binned code would still hold it).
+{
+  const prefix = `reg-cov-${RUN}`;
+  const binned: Array<{ kind: string; id: number }> = [];
+  const binnedId = (kind: string, response: ToolResponse): void => {
+    if (response.ok && typeof response.data?.deleted?.id === 'number') binned.push({ kind, id: response.data.deleted.id });
+  };
+
+  const settings = await step(server, 'cov: get_settings', 'get_settings', {}, (response) =>
+    (response.ok && response.data.execution_timeout_limits.default_seconds > 0 && typeof response.data.recycle_bin_retention_days === 'number') ||
+    failure(response),
+  );
+  await step(server, 'cov: list_venvs', 'list_venvs');
+  const venv = await step(server, 'cov: create_venv (requirement strings)', 'create_venv', { name: prefix, libraries: ['six'] }, (response) =>
+    (response.ok && response.data.venv.name === prefix) || failure(response),
+  );
+  const venvId: number | undefined = venv.data?.venv?.id;
+  await step(server, 'cov: update_venv replaces the library list', 'update_venv', { venv: prefix, libraries: ['six>=1.16'] }, (response) =>
+    (response.ok && response.data.venv.libraries[0].startsWith('six>=1.16')) || failure(response),
+  );
+
+  const dir = join(FLOWS, `reg-cov-flow-${RUN}`);
+  mkdirSync(dir, { recursive: true });
+  const flowYaml = (venvValue: string): string => `meta:
+  name: reg-cov-flow-${RUN}
+tools:
+  python_code_tools:
+    reg-cov-tool-${RUN}:
+      description: Coverage tool.
+      venv: ${venvValue}
+      code: |
+        def main():
+            return 1
+flow:
+  nodes:
+    start: { type: start }
+    crunch:
+      type: python
+      venv: ${venvValue}
+      code: |
+        def main():
+            return {"ok": True}
+      output_variable_path: variables.result
+    finish: { type: end }
+  edges:
+    - { from: start, to: crunch }
+    - { from: crunch, to: finish }
+`;
+  writeFileSync(join(dir, 'flow.yaml'), flowYaml(prefix));
+  const pushed = await step(server, 'cov: push_flow resolves venv: by name', 'push_flow', { flow_dir: dir }, (response) =>
+    (response.ok && response.data.entities.some((action: { kind: string; backendId: number }) => action.kind === 'venv' && action.backendId === venvId)) ||
+    failure(response),
+  );
+  trackGraph(pushed);
+  const flowId: number = pushed.data?.graphId ?? -1;
+  const flowTool = (pushed.data?.entities ?? []).find((action: { kind: string }) => action.kind === 'python_code_tool');
+  await step(server, 'cov: describe_graph shows venv_id, node_number and authorship', 'describe_graph', { graph_id: flowId }, (response) => {
+    const python = response.data?.nodes?.python_node_list?.[0];
+    return (response.ok && python?.venv_id === venvId && typeof python?.node_number === 'number' && 'created_by' in response.data && 'created_by' in python) ||
+      json(response.data ?? response.error).slice(0, 300);
+  });
+  await step(server, 'cov: repush with venv unchanged is a no-op', 'push_flow', { flow_dir: dir }, (response) =>
+    (response.ok && response.data.changed === false) || json(response.data ?? response.error).slice(0, 300),
+  );
+  const pulledDir = join(FLOWS, `reg-cov-pulled-${RUN}`);
+  await step(server, 'cov: pull_flow writes venv: and reports authorship', 'pull_flow', { graph_id: flowId, target_dir: pulledDir }, (response) =>
+    (response.ok && readFileSync(join(pulledDir, 'flow.yaml'), 'utf8').includes(`venv: ${prefix}`) &&
+      response.data.authorship.nodes.some((node: { name: string; node_number: unknown }) => node.name === 'crunch' && typeof node.node_number === 'number')) ||
+    failure(response),
+  );
+  await step(server, 'cov: the pulled source repushes as a no-op', 'push_flow', { flow_dir: pulledDir }, (response) =>
+    (response.ok && response.data.changed === false) || json(response.data ?? response.error).slice(0, 300),
+  );
+  writeFileSync(join(dir, 'flow.yaml'), flowYaml('null'));
+  await step(server, 'cov: venv: null moves the code back to the default venv', 'push_flow', { flow_dir: dir }, (response) =>
+    (response.ok && response.data.changed === true) || failure(response),
+  );
+
+  // Versions, copy, export / import, labels, persistent state.
+  const version = await step(server, 'cov: create_graph_version', 'create_graph_version', { graph_id: flowId, name: `${prefix}-v1` });
+  await step(server, 'cov: list_graph_versions', 'list_graph_versions', { graph_id: flowId }, (response) =>
+    (response.ok && response.data.some((row: { id: number }) => row.id === version.data?.version?.id)) || failure(response),
+  );
+  await step(server, 'cov: restore_graph_version in place (with backup)', 'restore_graph_version', { version_id: version.data?.version?.id ?? -1 }, (response) =>
+    (response.ok && response.data.restored === true && response.data.auto_backup_version_id != null) || failure(response),
+  );
+  const fromVersion = await step(server, 'cov: restore_graph_version as a new flow', 'restore_graph_version', { version_id: version.data?.version?.id ?? -1, mode: 'new_flow' });
+  if (typeof fromVersion.data?.graph_id === 'number') created.graphs.add(fromVersion.data.graph_id);
+  await step(server, 'cov: get_flow_persistent_state', 'get_flow_persistent_state', { graph_id: flowId }, (response) =>
+    (response.ok && response.data.graphId === flowId) || failure(response),
+  );
+  trackGraph(await step(server, 'cov: copy_flow', 'copy_flow', { graph_id: flowId, name: `${prefix}-copy` }));
+  const exportPath = join(RUN_DIR, 'cov-export.json');
+  await step(server, 'cov: export_entities', 'export_entities', { kind: 'flow', ids: [flowId], output_path: exportPath }, (response) =>
+    (response.ok && existsSync(exportPath)) || failure(response),
+  );
+  await step(server, 'cov: import_entities inspect_only', 'import_entities', { kind: 'flow', file_path: exportPath, inspect_only: true });
+  const graphsBefore = new Set(((await server.call('list_graphs')).data ?? []).map((graph: { id: number }) => graph.id));
+  await step(server, 'cov: import_entities', 'import_entities', { kind: 'flow', file_path: exportPath });
+  for (const graph of ((await server.call('list_graphs')).data ?? []) as Array<{ id: number }>) {
+    if (!graphsBefore.has(graph.id)) created.graphs.add(graph.id);
+  }
+  const flowLabel = await step(server, 'cov: create_label (flow)', 'create_label', { scope: 'flow', name: `${prefix}-flow`, color: 'green' });
+  await step(server, 'cov: set_flow_labels', 'set_flow_labels', { graph_id: flowId, labels: [`${prefix}-flow`] }, (response) =>
+    (response.ok && response.data.label_ids.includes(flowLabel.data?.id)) || failure(response),
+  );
+  await step(server, 'cov: update_label', 'update_label', { scope: 'flow', label: `${prefix}-flow`, color: 'blue' });
+  await step(server, 'cov: list_labels', 'list_labels', { scope: 'flow' }, (response) =>
+    (response.ok && response.data.some((label: { id: number; color: string }) => label.id === flowLabel.data?.id && label.color === 'blue')) || failure(response),
+  );
+
+  // Tool catalog + recycle bin.
+  const toolLabel = await step(server, 'cov: create_label (tool)', 'create_label', { scope: 'tool', name: `${prefix}-tool` });
+  const pyTool = await step(server, 'cov: create_python_tool (venv + label)', 'create_python_tool', {
+    name: `${prefix}-py`, description: 'Coverage tool.', code: 'def main():\n    return 1', venv: prefix, labels: [`${prefix}-tool`],
+  });
+  const pyToolId: number = pyTool.data?.tool?.id ?? -1;
+  await step(server, 'cov: update_python_tool (venv null, timeout)', 'update_python_tool', { tool: pyToolId, venv: null, execution_timeout: 60 }, (response) =>
+    (response.ok && response.data.tool.venv_id === null) || failure(response),
+  );
+  await step(server, 'cov: delete_python_tool → recycle bin', 'delete_python_tool', { tool: pyToolId });
+  await step(server, 'cov: list_recycle_bin (one kind, search)', 'list_recycle_bin', { kind: 'python_tool', search: prefix }, (response) =>
+    (response.ok && response.data.items.some((item: { id: number }) => item.id === pyToolId)) || failure(response),
+  );
+  await step(server, 'cov: restore_from_recycle_bin', 'restore_from_recycle_bin', { kind: 'python_tool', ids: [pyToolId] }, (response) =>
+    (response.ok && response.data.restored.some((item: { id: number }) => item.id === pyToolId)) || failure(response),
+  );
+  binnedId('python_tool', await step(server, 'cov: delete the python tool again', 'delete_python_tool', { tool: pyToolId }));
+  if (flowTool) binnedId('python_tool', await step(server, 'cov: delete the flow\'s python tool', 'delete_python_tool', { tool: flowTool.backendId }));
+  const mcpTool = await step(server, 'cov: create_mcp_tool', 'create_mcp_tool', {
+    name: `${prefix}-mcp`, transport: 'http://127.0.0.1:9/mcp', tool_name: 'noop', labels: [toolLabel.data?.id ?? -1],
+  });
+  await step(server, 'cov: update_mcp_tool', 'update_mcp_tool', { tool: mcpTool.data?.tool?.id ?? -1, timeout: 45 }, (response) =>
+    (response.ok && response.data.tool.timeout === 45) || failure(response),
+  );
+  binnedId('mcp_tool', await step(server, 'cov: delete_mcp_tool', 'delete_mcp_tool', { tool: mcpTool.data?.tool?.id ?? -1 }));
+  await step(server, 'cov: delete_label (tool)', 'delete_label', { scope: 'tool', label: `${prefix}-tool` });
+  await step(server, 'cov: delete_label (flow)', 'delete_label', { scope: 'flow', label: `${prefix}-flow` });
+
+  // Secrets and model configuration. The secret value comes from the suite's provider key env.
+  await step(server, 'cov: list_secrets', 'list_secrets');
+  const secret = await step(server, 'cov: create_secret from an env var (value never echoed)', 'create_secret', { name: `${prefix}-secret`, value_env: 'STRESS_OPENAI_KEY' }, (response) =>
+    (response.ok && !response.text.includes(process.env.STRESS_OPENAI_KEY ?? '\u0000') && !('tail' in response.data.secret)) || failure(response),
+  );
+  const llm = await step(server, 'cov: create_llm_config (key by secret name)', 'create_llm_config', {
+    name: `${prefix}-llm`, model: MODEL, provider: PROVIDER, api_key_secret: `${prefix}-secret`, temperature: 0.2,
+  }, (response) => (response.ok && response.data.config.api_key_secret_id === secret.data?.secret?.id) || failure(response));
+  await step(server, 'cov: update_llm_config', 'update_llm_config', { config: `${prefix}-llm`, temperature: 0.5 }, (response) =>
+    (response.ok && response.data.config.temperature === 0.5) || failure(response),
+  );
+  await step(server, 'cov: delete_llm_config dry_run deletes nothing', 'delete_llm_config', { config: `${prefix}-llm`, dry_run: true }, (response) =>
+    (response.ok && response.data.dry_run === true && response.data.deleted_ids.length === 0) || failure(response),
+  );
+  await step(server, 'cov: delete_llm_config', 'delete_llm_config', { config: llm.data?.config?.id ?? -1 });
+  const embeddings = await step(server, 'cov: list_embedding_configs include_models', 'list_embedding_configs', { include_models: true });
+  const embeddingModel = embeddings.data?.models?.[0];
+  if (embeddingModel) {
+    await step(server, 'cov: create_embedding_config', 'create_embedding_config', { name: `${prefix}-embed`, model: embeddingModel.id, api_key_secret: `${prefix}-secret` });
+    await step(server, 'cov: update_embedding_config', 'update_embedding_config', { config: `${prefix}-embed`, is_visible: false });
+    await step(server, 'cov: delete_embedding_config', 'delete_embedding_config', { config: `${prefix}-embed` });
+  } else {
+    for (const tool of ['create_embedding_config', 'update_embedding_config', 'delete_embedding_config']) skip('cov: embedding configs', tool, 'no embedding model on this instance');
+  }
+  binnedId('secret', await step(server, 'cov: delete_secret', 'delete_secret', { secret: `${prefix}-secret` }));
+  // A no-op write: the current value is sent back, so the org's defaults never change.
+  const memoryLlm = settings.data?.default_models?.memory_llm_config?.id ?? null;
+  await step(server, 'cov: update_default_models (current value re-sent)', 'update_default_models', { memory_llm_config: memoryLlm }, (response) =>
+    (response.ok && response.data.memory_llm_config === memoryLlm) || failure(response),
+  );
+  skip('cov: quickstart', 'run_quickstart', 'creates backend-named configs (and possibly realtime ones) the suite cannot attribute and remove');
+
+  // Key-value tables.
+  const table = await step(server, 'cov: create_key_value_table', 'create_key_value_table', { name: `${prefix}-kv` });
+  const tableId: number = table.data?.id ?? -1;
+  await step(server, 'cov: write_key_value_entries', 'write_key_value_entries', { table: tableId, set: { alpha: { n: 1 }, beta: 'b' }, delete: ['beta'] }, (response) =>
+    (response.ok && response.data.created.length === 2 && response.data.deleted[0] === 'beta') || failure(response),
+  );
+  await step(server, 'cov: list_key_value_entries (one key, full value)', 'list_key_value_entries', { table: tableId, key: 'alpha' }, (response) =>
+    (response.ok && response.data.entry.value.n === 1) || failure(response),
+  );
+  await step(server, 'cov: list_key_value_tables', 'list_key_value_tables', {}, (response) =>
+    (response.ok && response.data.some((row: { id: number }) => row.id === tableId)) || failure(response),
+  );
+  await step(server, 'cov: update_key_value_table', 'update_key_value_table', { table: tableId, description: 'coverage' });
+  binnedId('key_value_table', await step(server, 'cov: delete_key_value_table', 'delete_key_value_table', { table: tableId }));
+  await step(server, 'cov: list_recycle_bin (every bin)', 'list_recycle_bin', {}, (response) =>
+    (response.ok && typeof response.data.retention_days === 'number') || failure(response),
+  );
+
+  // The flow itself: delete → bin → restore; the D cleanup deletes it again.
+  await step(server, 'cov: delete_flow', 'delete_flow', { graph_id: flowId });
+  await step(server, 'cov: restore the flow', 'restore_from_recycle_bin', { kind: 'flow', ids: [flowId] });
+
+  // Purge only what this block binned. Superadmin-only upstream: anyone else gets the explanation.
+  for (const kind of [...new Set(binned.map((item) => item.kind))]) {
+    const ids = binned.filter((item) => item.kind === kind).map((item) => item.id);
+    const purged = await server.call('purge_from_recycle_bin', { kind, ids, confirm: true });
+    if (!purged.ok && /only a superadmin/.test(purged.error ?? '')) {
+      record('cov: purge own binned items', 'purge_from_recycle_bin', 'SKIP', purged.ms, 'the test user is not a superadmin');
+      break;
+    }
+    record(`cov: purge own binned ${kind}`, 'purge_from_recycle_bin', purged.ok && purged.data.failed.length === 0 ? 'PASS' : 'FAIL', purged.ms,
+      purged.ok ? json(purged.data.failed) : failure(purged));
+  }
+  await step(server, 'cov: delete_venv (no code runs in it any more)', 'delete_venv', { venv: venvId ?? -1 });
 }
 
 await server.close();

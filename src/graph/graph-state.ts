@@ -38,7 +38,10 @@ export interface GraphNodeBase {
   color: string;
   icon: string;
   size: { width: number; height: number };
-  /** Unique incrementing number per graph, displayed as the #N badge. */
+  /**
+   * The #N badge. Read from the backend's `node_number` for persisted nodes; for new nodes of a
+   * numbered type it is sent as `node_number_hint` (an ordering key — the server issues the number).
+   */
   nodeNumber?: number;
   input_map: Record<string, unknown>;
   output_variable_path: string | null;
@@ -112,6 +115,9 @@ export interface WebhookTriggerGraphNode extends GraphNodeBase {
   data: {
     webhook_trigger: WebhookTriggerRef | null;
     python_code: CustomPythonCode;
+    test_payload?: Record<string, unknown>;
+    /** Whether the code gets the flow's file storage (`epicstaff_storage`). */
+    use_storage?: boolean;
   };
 }
 
@@ -121,6 +127,7 @@ export interface TelegramTriggerGraphNode extends GraphNodeBase {
     telegram_bot_api_key_secret_id: number | null;
     webhook_trigger: WebhookTriggerRef | null;
     fields: TelegramTriggerFieldWrite[];
+    test_payload?: Record<string, unknown>;
   };
 }
 
@@ -191,11 +198,19 @@ export interface DecisionTableGraphNode extends GraphNodeBase {
 
 export interface CdtComputationState {
   code?: string;
-  libraries?: string[];
   input_map?: Record<string, string>;
   output_variable_path?: string | null;
   /** Secrets the computation may read. */
   secret_ids?: number[];
+  /** Seconds one run of the code may take; absent until set, then the backend applies its default. */
+  execution_timeout?: number;
+}
+
+/** A named, coloured group of condition rows (`CdtSection`); `id` is what a row's `section` points at. */
+export interface CdtSectionState {
+  id: string;
+  name: string;
+  metadata: { color?: string };
 }
 
 export interface CdtPromptConfigState {
@@ -235,6 +250,10 @@ export interface CdtTableState {
   next_error_node?: string | null;
   pre_computation?: CdtComputationState;
   post_computation?: CdtComputationState;
+  /** Whether the pre / post computation code gets the flow's file storage. */
+  pre_use_storage?: boolean;
+  post_use_storage?: boolean;
+  sections?: CdtSectionState[];
   /** Legacy flat fields — read as fallbacks, mirroring the frontend. */
   pre_computation_code?: string;
   post_computation_code?: string;
@@ -247,6 +266,11 @@ export interface CdtTableState {
 export interface ClassificationDecisionTableGraphNode extends GraphNodeBase {
   type: 'classification-decision-table';
   data: { name?: string; table: CdtTableState };
+  /**
+   * Generated step explanations, persisted in the node's `metadata.explanations`. Flow source
+   * cannot author them; they are carried over from the persisted node so a repush keeps them.
+   */
+  explanations?: Record<string, unknown>;
 }
 
 export type GraphNode =

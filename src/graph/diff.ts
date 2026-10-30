@@ -1,9 +1,9 @@
 /**
  * Node / connection diffing between the persisted (remote) graph state and the
- * desired local state. Faithful port of frontend `visual-programming/utils/save/diff.ts`
- * (minus the excluded legacy `llm` node type).
+ * desired local state. Faithful port of frontend `visual-programming/utils/save/diff.ts`.
  */
 
+import { normalizeCdtSectionColor } from '../models/nodes/classification-decision-table-node.js';
 import { hasPersistedWaypoints, waypointsChanged } from './edge-waypoints.js';
 import type {
   AgentGraphNode,
@@ -29,11 +29,13 @@ import type {
   WebhookTriggerGraphNode,
 } from './graph-state.js';
 import { toNodeMetadata } from './metadata.js';
+import { storedPythonCode } from './python-code-text.js';
 import { canonicalJson } from '../flow-source/lockfile.js';
 
 export interface NodeDiff<T> {
   toCreate: T[];
-  toUpdate: Array<{ previous: T; current: T }>;
+  /** `changedFields`: the comparable fields that differ (`python_code.code`, `metadata.position` …). */
+  toUpdate: Array<{ previous: T; current: T; changedFields: string[] }>;
   toDelete: T[];
 }
 
@@ -69,6 +71,32 @@ function areEqual(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The paths (one level into object fields) where two comparables differ — why a node is rewritten.
+ * Not in the frontend: MCP reports it so a push that changed a node says what changed.
+ */
+export function changedComparableFields(previous: unknown, current: unknown): string[] {
+  if (!isPlainObject(previous) || !isPlainObject(current)) return areEqual(previous, current) ? [] : ['(value)'];
+  const changed: string[] = [];
+  for (const key of [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort()) {
+    const left = previous[key];
+    const right = current[key];
+    if (areEqual(left, right)) continue;
+    if (isPlainObject(left) && isPlainObject(right)) {
+      for (const subKey of [...new Set([...Object.keys(left), ...Object.keys(right)])].sort()) {
+        if (!areEqual(left[subKey], right[subKey])) changed.push(`${key}.${subKey}`);
+      }
+    } else {
+      changed.push(key);
+    }
+  }
+  return changed;
+}
+
 export function buildUuidToBackendIdMap(nodes: GraphNode[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const node of nodes) {
@@ -92,7 +120,7 @@ function diffNodesByBackendId<T extends { backendId: number | null }>(
   }
 
   const toCreate: T[] = [];
-  const toUpdate: Array<{ previous: T; current: T }> = [];
+  const toUpdate: Array<{ previous: T; current: T; changedFields: string[] }> = [];
   const matchedBackendIds = new Set<number>();
 
   for (const node of current) {
@@ -107,8 +135,14 @@ function diffNodesByBackendId<T extends { backendId: number | null }>(
     }
 
     matchedBackendIds.add(node.backendId);
-    if (!areEqual(toComparable(previousNode), toComparable(node))) {
-      toUpdate.push({ previous: previousNode, current: node });
+    const previousComparable = toComparable(previousNode);
+    const currentComparable = toComparable(node);
+    if (!areEqual(previousComparable, currentComparable)) {
+      toUpdate.push({
+        previous: previousNode,
+        current: node,
+        changedFields: changedComparableFields(previousComparable, currentComparable),
+      });
     }
   }
 
@@ -159,8 +193,13 @@ function toPythonComparable(node: PythonGraphNode): unknown {
     node_name: node.node_name,
     // secret_ids order is incidental (which secret record happened to resolve first), not a
     // real difference — sort it so two independent reconstructions of the same set don't
-    // register as a change.
-    python_code: { ...node.data, secret_ids: [...(node.data.secret_ids || [])].sort() },
+    // register as a change. Divergence: code is compared as the server stores it (stripped, see
+    // storedPythonCode) — source code ends with a newline the server never returns.
+    python_code: {
+      ...node.data,
+      code: storedPythonCode(node.data.code),
+      secret_ids: [...(node.data.secret_ids || [])].sort(),
+    },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
     test_input: node.test_input ?? {},
@@ -252,12 +291,15 @@ function toWebhookComparable(node: WebhookTriggerGraphNode): unknown {
     node_name: node.node_name,
     python_code: {
       ...node.data.python_code,
+      code: storedPythonCode(node.data.python_code.code),
       secret_ids: [...(node.data.python_code.secret_ids || [])].sort(),
     },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
     webhook_trigger_path: '',
     webhook_trigger: node.data.webhook_trigger,
+    test_payload: node.data.test_payload ?? {},
+    use_storage: node.data.use_storage ?? false,
     metadata: toNodeMetadata(node),
   };
 }
@@ -268,6 +310,7 @@ function toTelegramComparable(node: TelegramTriggerGraphNode): unknown {
     telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
     webhook_trigger: node.data.webhook_trigger,
     fields: node.data.fields,
+    test_payload: node.data.test_payload ?? {},
     metadata: toNodeMetadata(node),
   };
 }
@@ -334,8 +377,9 @@ function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: G
     return backendId != null ? backendId : (`temp:${uuid}` as const);
   };
 
-  const preCode = tableData?.pre_computation?.code || tableData?.pre_computation_code || null;
-  const postCode = tableData?.post_computation?.code || tableData?.post_computation_code || null;
+  // As stored (stripped); a whitespace-only block is not saved at all (isPythonCodeBlockSaved).
+  const preCode = storedPythonCode(tableData?.pre_computation?.code || tableData?.pre_computation_code || '') || null;
+  const postCode = storedPythonCode(tableData?.post_computation?.code || tableData?.post_computation_code || '') || null;
 
   return {
     node_name: node.node_name,
@@ -367,20 +411,33 @@ function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: G
         variable_mappings: config.variable_mappings ?? {},
       })),
     default_llm_config: tableData?.default_llm_config ?? null,
-    default_next_node: tableData?.default_next_node || null,
-    next_error_node: tableData?.next_error_node || null,
+    // Divergence: the frontend compares these uuids raw (its two states share uuids). A pushed
+    // state keeps compiler uuids against remote-<type>-<id> ones, so resolve them like next_node_id —
+    // compared raw, every table with a default or error route was rewritten on each push.
+    default_next_node: resolveRef(tableData?.default_next_node || null),
+    next_error_node: resolveRef(tableData?.next_error_node || null),
     pre_input_map: tableData?.pre_computation?.input_map || tableData?.pre_input_map || {},
     pre_output_variable_path:
       tableData?.pre_computation?.output_variable_path || tableData?.pre_output_variable_path || null,
+    pre_use_storage: tableData?.pre_use_storage ?? false,
     post_computation_code: postCode,
     post_input_map: tableData?.post_computation?.input_map || tableData?.post_input_map || {},
     post_output_variable_path:
       tableData?.post_computation?.output_variable_path || tableData?.post_output_variable_path || null,
-    pre_libraries: tableData?.pre_computation?.libraries || [],
-    post_libraries: tableData?.post_computation?.libraries || [],
+    post_use_storage: tableData?.post_use_storage ?? false,
     pre_secret_ids: [...(tableData?.pre_computation?.secret_ids || [])].sort(),
     post_secret_ids: [...(tableData?.post_computation?.secret_ids || [])].sort(),
-    metadata: toNodeMetadata(node),
+    pre_execution_timeout: tableData?.pre_computation?.execution_timeout,
+    post_execution_timeout: tableData?.post_computation?.execution_timeout,
+    sections: [...(tableData?.sections || [])]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((section) => ({
+        id: section.id,
+        name: section.name,
+        color: normalizeCdtSectionColor(section.metadata?.color),
+      })),
+    // Mirrors bulk-save.ts. Without it a node whose only change is its explanations never reaches toUpdate.
+    metadata: { ...toNodeMetadata(node), explanations: node.explanations ?? {} },
   };
 }
 

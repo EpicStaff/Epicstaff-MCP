@@ -2,7 +2,7 @@
  * The flow's **variable domain** — the authoritative set of top-level variables the
  * start node seeds into flow state.
  *
- * Backend contract (`src/django_app/.../graph_serializers.py` GraphOrganizationSerializer):
+ * Backend contract (`src/django_app/tables/serializers/model_serializers/graph_serializers.py` GraphOrganizationSerializer):
  * `start_node.variables` IS the flow's variable domain. Every `user_variables` /
  * `persistent_variables` key a caller supplies must already exist in it, or the backend
  * rejects the request ("Variable `<key>` is not in domain"). A variable a node only ever

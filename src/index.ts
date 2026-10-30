@@ -24,13 +24,19 @@ const EPICSTAFF_INSTRUCTIONS = [
   'scoped to exactly "user" or "organization".',
   '',
   'Invariants: agent nodes need at least one task (tasks:); no parallel fan-out — one active path,',
-  'branch with a decision-table or conditional edge; never use node types "llm", "code-agent" or',
-  '"crew" (removed from EpicStaff — use agent/task nodes). A key-value node writes its read entries',
+  'branch with a decision-table (conditional edges were removed from EpicStaff); never use node types',
+  '"llm", "code-agent" or "crew" (removed from EpicStaff — use agent/task nodes). Python `libraries`',
+  'are not installed any more: code runs in a virtual environment named with `venv: "<name>"` (list_venvs /',
+  'create_venv). A key-value node writes its read entries',
   'to their own state paths, not output_variable_path. Credentials come from env vars',
   '(api_key_env, bot_token_env) and are stored as org secrets on push — never in flow source;',
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
   'llm_configs follow the backend bounds: temperature 0–2, max_tokens >= 500.',
   'Call describe_node_types for the full node catalog (fields + runtime caveats).',
+  'Deleted flows, agents, surfaces, tools, collections, tables and secrets go to the recycle bin',
+  '(list_recycle_bin / restore_from_recycle_bin); snapshot a flow before risky edits (create_graph_version).',
+  'Voice is not flow source: an agent gets a voice with set_agent_voice (a voice config from',
+  'create_voice_config) and a phone number with create_voice_channel (Twilio) — see the es-voice skill.',
   '',
   'Build flows with the es-* skills (front door: es-deliver → es-write-flow → build → push → test).',
 ].join('\n');
@@ -59,7 +65,7 @@ async function main(): Promise<void> {
   const server = new McpServer(
     {
       name: 'epicstaff',
-      version: '1.3.0-dev.1',
+      version: '1.4.0',
     },
     { instructions: EPICSTAFF_INSTRUCTIONS },
   );

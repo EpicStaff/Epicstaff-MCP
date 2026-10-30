@@ -3,13 +3,17 @@ import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import type { ApiClient } from '../http/client.js';
-import { ApiError } from '../http/errors.js';
-import { AgentDefinitionsApi, type CreateAgentDefinitionRequest } from '../api/agent-definitions.js';
+import {
+  AgentDefinitionsApi,
+  toInstructionList,
+  type CreateAgentDefinitionRequest,
+} from '../api/agent-definitions.js';
 import { KnowledgeApi } from '../api/knowledge.js';
 import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SurfacesApi, type CreateSurfaceRequest, type Surface } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
 import { runTool } from './auth-org.tools.js';
+import { createOrExplainConflict, idOrName, recycleBinHint, resolveNamedRef } from './catalog-helpers.js';
 
 /**
  * Standalone CRUD for the org-scoped catalog — agents, surfaces, knowledge
@@ -26,9 +30,6 @@ import { runTool } from './auth-org.tools.js';
 // ---------------------------------------------------------------------------
 // Shared Zod pieces (friendly input shapes, modeled on flow-source/schema/*).
 // ---------------------------------------------------------------------------
-
-/** A reference: a backend id (number) or the exact name (string) of an existing entity. */
-const idOrName = z.union([z.number().int(), z.string().min(1)]);
 
 const toolModeSchema = z
   .enum(['allow', 'deny'])
@@ -146,28 +147,6 @@ const ragInputSchema = z.strictObject({
 // Reference resolution (id-or-name → backend id), mirroring the pusher lookup.
 // ---------------------------------------------------------------------------
 
-async function resolveNamedRef<T>(
-  ref: number | string,
-  entityLabel: string,
-  list: () => Promise<T[]>,
-  idOf: (item: T) => number | undefined,
-  nameOf: (item: T) => string,
-): Promise<number> {
-  if (typeof ref === 'number') return ref;
-  const items = await list();
-  const wanted = ref.trim().toLowerCase();
-  const match = items.find((item) => nameOf(item).toLowerCase() === wanted);
-  const id = match ? idOf(match) : undefined;
-  if (id === undefined) {
-    const available = items.map(nameOf).filter(Boolean).slice(0, 30).join(', ');
-    throw new Error(
-      `${entityLabel} "${ref}" not found in the active organization. Available: ${available || '(none)'}. ` +
-        'Pass a numeric backend id or an exact existing name.',
-    );
-  }
-  return id;
-}
-
 /**
  * Resolve the embedder for a RAG strategy. Number → used as-is; name → matched
  * against embedding-configs; omitted → the org default (ported from EntityPusher).
@@ -178,11 +157,11 @@ async function resolveEmbedderRef(ref: number | string | undefined, llm: LlmApi)
   if (typeof ref === 'string') {
     const wanted = ref.trim().toLowerCase();
     const named = configs.find(
-      (config) => String(config.custom_name ?? config.name ?? '').toLowerCase() === wanted,
+      (config) => config.custom_name.toLowerCase() === wanted,
     );
-    if (named) return named.id as number;
+    if (named) return named.id;
     const available = configs
-      .map((config) => String(config.custom_name ?? config.name ?? ''))
+      .map((config) => config.custom_name)
       .filter(Boolean)
       .join(', ');
     throw new Error(
@@ -190,45 +169,6 @@ async function resolveEmbedderRef(ref: number | string | undefined, llm: LlmApi)
     );
   }
   return resolveDefaultEmbeddingConfigId(llm);
-}
-
-// ---------------------------------------------------------------------------
-// Org-unique-name handling on create.
-// ---------------------------------------------------------------------------
-
-/**
- * Detect a "name already exists" failure. Agents return 409
- * (agent_definition_conflict); surfaces surface a 400 whose body carries the
- * Django uniqueness message. Neither uses the structured errors[] array.
- */
-function isAlreadyExistsError(error: ApiError): boolean {
-  if (error.status === 409) return true;
-  const haystack = [
-    error.message,
-    error.bodyExcerpt ?? '',
-    ...(error.validationErrors?.map((issue) => `${issue.field} ${issue.reason}`) ?? []),
-  ]
-    .join(' ')
-    .toLowerCase();
-  return /already exist|must be unique|unique constraint|duplicate|conflict/.test(haystack);
-}
-
-async function createOrExplainConflict<T>(
-  create: () => Promise<T>,
-  name: string,
-  updateToolName: string,
-): Promise<T> {
-  try {
-    return await create();
-  } catch (error) {
-    if (error instanceof ApiError && isAlreadyExistsError(error)) {
-      throw new Error(
-        `An entity named "${name}" already exists in this organization (catalog names are org-unique). ` +
-          `Use ${updateToolName} to modify the existing one, or choose a different name.`,
-      );
-    }
-    throw error;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,8 +335,9 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     {
       title: 'Delete a catalog surface',
       description:
-        'Delete a catalog surface by id or exact name. IRREVERSIBLE and NOT flow-aware: any flow that references ' +
-        'this surface via existing: "<name>" will FAIL its next push_flow (the reference will not resolve). ' +
+        'Delete a catalog surface by id or exact name: it moves to the EpicStaff recycle bin (restorable with ' +
+        'restore_from_recycle_bin kind "surface" until purged). NOT flow-aware: while it is binned, any flow that references this surface via ' +
+        'existing: "<name>" will FAIL its next push_flow (the reference will not resolve). ' +
         'Verify no flow depends on it first.',
       inputSchema: {
         surface: idOrName.describe('The surface to delete: backend id or exact name.'),
@@ -414,7 +355,8 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
           next:
             'WARNING: any flow referencing this surface via existing: "' +
             current.name +
-            '" will fail its next push_flow. Update or remove those references.',
+            '" will fail its next push_flow. Update or remove those references, or restore it. ' +
+            recycleBinHint('surface', surfaceId),
         };
       }),
   );
@@ -433,7 +375,9 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         'then update_surface(owner_agent: <this agent>) to make the surface agent-specific.',
       inputSchema: {
         name: z.string().min(1).describe('Org-unique agent name; the handle flows reference via existing:.'),
-        instructions: z.string().describe('Boot instructions — the agent system prompt.'),
+        instructions: z
+          .string()
+          .describe('Boot instructions — the agent system prompt. Stored as the agent\'s single instruction document.'),
         description: z.string().optional().describe('One-line summary of what this agent is for.'),
         llm_config: idOrName.describe('LLM config the agent thinks with: backend id or exact name (list_llm_configs).'),
         fcm_llm_config: idOrName.optional().describe('Separate LLM config for function calling: id or name.'),
@@ -486,7 +430,13 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
       inputSchema: {
         agent: idOrName.describe('The agent to update: backend id or exact current name.'),
         name: z.string().min(1).optional().describe('New name (rename).'),
-        instructions: z.string().optional(),
+        instructions: z
+          .string()
+          .optional()
+          .describe(
+            'New boot instructions. REPLACES the whole instruction list with this one document ' +
+              '(documents added in the editor are dropped); omit to keep the current instructions.',
+          ),
         description: z.string().optional(),
         llm_config: idOrName.optional(),
         fcm_llm_config: idOrName.optional(),
@@ -541,9 +491,10 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     {
       title: 'Delete an agent definition',
       description:
-        'Delete an AgentDefinition by id or exact name. IRREVERSIBLE and NOT flow-aware: any flow that references ' +
-        'this agent via existing: "<name>" will FAIL its next push_flow. Surfaces owned by this agent are ' +
-        'cascade-deleted with it. Verify no flow depends on it first.',
+        'Delete an AgentDefinition by id or exact name: it moves to the EpicStaff recycle bin (restorable with ' +
+        'restore_from_recycle_bin kind "agent" until purged), together with the surfaces it owns. NOT flow-aware: while it is binned, any flow ' +
+        'that references this agent via existing: "<name>" will FAIL its next push_flow. ' +
+        'Verify no flow depends on it first.',
       inputSchema: {
         agent: idOrName.describe('The agent to delete: backend id or exact name.'),
       },
@@ -560,7 +511,9 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
           next:
             'WARNING: any flow referencing this agent via existing: "' +
             current.name +
-            '" will fail its next push_flow. Surfaces owned by this agent were cascade-deleted.',
+            '" will fail its next push_flow. Surfaces owned by this agent went to the recycle bin with it (and come ' +
+            'back with it). ' +
+            recycleBinHint('agent', agentId),
         };
       }),
   );
@@ -670,10 +623,10 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     {
       title: 'Delete a knowledge collection',
       description:
-        'Delete a knowledge source collection by id. IRREVERSIBLE: its documents, attached RAG strategies, and ' +
-        'the pgvector index are dropped permanently. NOT flow-aware: any flow whose surface references this ' +
-        'collection via existing: "<name>" will FAIL its next push_flow, and retrieval stops immediately. ' +
-        'Verify no surface/flow depends on it first.',
+        'Delete a knowledge source collection by id: it moves to the EpicStaff recycle bin with its documents and ' +
+        'RAG strategies (restorable with restore_from_recycle_bin kind "collection" until purged; purging drops the index for good). NOT ' +
+        'flow-aware: retrieval stops immediately, and while it is binned any flow whose surface references this ' +
+        'collection via existing: "<name>" will FAIL its next push_flow. Verify no surface/flow depends on it first.',
       inputSchema: {
         collection_id: z.number().int().describe('Backend id of the source collection to delete.'),
       },
@@ -686,8 +639,9 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         return {
           deleted: { collectionId: collection_id },
           next:
-            'WARNING: the pgvector index was dropped irreversibly. Any surface/flow referencing this collection ' +
-            'via existing: "<name>" will fail its next push_flow, and retrieval has stopped.',
+            'WARNING: retrieval has stopped. Restore the collection, or any surface/flow referencing it via ' +
+            'existing: "<name>" will fail its next push_flow. ' +
+            recycleBinHint('collection', collection_id),
         };
       }),
   );
@@ -733,7 +687,7 @@ async function buildAgentRequest(
 ): Promise<CreateAgentDefinitionRequest> {
   const request: CreateAgentDefinitionRequest = {
     name,
-    instructions: body.instructions,
+    instruction_list: toInstructionList(body.instructions),
     llm_config: await resolvers.resolveLlmConfig(body.llm_config),
   };
   if (body.description !== undefined) request.description = body.description;
@@ -751,7 +705,7 @@ async function buildAgentPatch(
 ): Promise<Partial<CreateAgentDefinitionRequest>> {
   const request: Partial<CreateAgentDefinitionRequest> = {};
   if (body.name !== undefined) request.name = body.name;
-  if (body.instructions !== undefined) request.instructions = body.instructions;
+  if (body.instructions !== undefined) request.instruction_list = toInstructionList(body.instructions);
   if (body.description !== undefined) request.description = body.description;
   if (body.llm_config !== undefined) request.llm_config = await resolvers.resolveLlmConfig(body.llm_config);
   if (body.fcm_llm_config !== undefined) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
@@ -773,9 +727,9 @@ function assignAgentKnobs(request: Partial<CreateAgentDefinitionRequest>, body: 
 }
 
 /**
- * Merge a partial update body over the current surface. Because the backend
- * update is a full PUT, unspecified scalar fields are re-sent from the current
- * record so they are not wiped; specified list fields replace outright.
+ * Merge a partial update body over the current surface, so the update re-sends the
+ * whole surface: unspecified fields keep their current values; specified list fields
+ * replace outright.
  */
 function mergeSurfaceBody(
   current: Surface,

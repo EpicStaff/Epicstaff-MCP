@@ -6,21 +6,18 @@
  * - visual-programming/core/models/node-metadata.model.ts (NodeDtoMetadata)
  * - visual-programming/utils/save/payload.ts            (bulk-save body shape)
  *
- * Intentionally excluded node type (never emitted by this module):
- * - llm_node_list — legacy; the frontend still emits it but the backend no longer has it
- *   in NODE_TYPE_REGISTRY. Its `deleted.llm_node_ids` key is kept (always empty) so the
- *   wire body shape matches what the frontend sends.
- * Removed upstream (EST-3849 / EST-3813) and gone from the wire entirely:
- * `crew_node_list` / `crew_node_ids`, `code_agent_node_list` / `code_agent_node_ids`.
+ * Removed upstream and gone from the wire entirely: `llm_node_list` / `llm_node_ids`,
+ * `conditional_edge_list` (conditional edges no longer exist), `crew_node_list` /
+ * `crew_node_ids`, `code_agent_node_list` / `code_agent_node_ids`.
  */
 
+import type { AuthorshipFields, UserSummary } from './authorship.js';
 import type { AgentNodeDto, AgentNodeWrite } from './nodes/agent-node.js';
 import type { AudioToTextNodeDto, AudioToTextNodeWrite } from './nodes/audio-to-text-node.js';
 import type {
   ClassificationDecisionTableNodeDto,
   ClassificationDecisionTableNodeWrite,
 } from './nodes/classification-decision-table-node.js';
-import type { ConditionalEdgeDto } from './nodes/conditional-edge.js';
 import type { DecisionTableNodeDto, DecisionTableNodeWrite } from './nodes/decision-table-node.js';
 import type { BulkEdgeCreate, BulkEdgeUpdate, EdgeDto } from './nodes/edge.js';
 import type { EndNodeDto, EndNodeWrite } from './nodes/end-node.js';
@@ -48,7 +45,6 @@ export interface NodeDtoMetadata extends Record<string, unknown> {
   color: string;
   icon: string;
   size: { width: number; height: number };
-  nodeNumber?: number;
 }
 
 export interface SubflowLightDto {
@@ -59,15 +55,19 @@ export interface SubflowLightDto {
   label_ids?: number[];
   created_at?: string;
   updated_at?: string;
+  save_version?: number;
 }
 
-export interface GetGraphLightRequest {
+/**
+ * Author and last-edit fields are optional like created_at/updated_at: the frontend also builds
+ * light graphs from SubflowLightDto, which carries no authorship.
+ */
+export interface GetGraphLightRequest extends Partial<AuthorshipFields> {
   id: number;
   uuid: string;
   name: string;
   description: string;
   tags?: string[];
-  epicchat_enabled?: boolean;
   label_ids?: number[];
   created_at?: string;
   updated_at?: string;
@@ -80,13 +80,21 @@ export interface GetGraphLightRequest {
  * `agent_node_list` is optional in the source frontend DTO (known drift) — kept optional here.
  */
 export interface GraphDto extends GetGraphLightRequest {
+  created_by: UserSummary | null;
+  created_at: string;
+  last_edited_by: UserSummary | null;
+  last_edited_at: string | null;
   save_version: number;
+  /**
+   * Read-only: the highest node number the graph has issued. Never lowered, so a deleted node's
+   * number is not given out again.
+   */
+  node_number_seq: number;
   start_node_list: StartNodeDto[];
   python_node_list: PythonNodeDto[];
   task_node_list: TaskNodeDto[];
   agent_node_list?: AgentNodeDto[];
   edge_list: EdgeDto[];
-  conditional_edge_list: ConditionalEdgeDto[];
   file_extractor_node_list: FileExtractorNodeDto[];
   webhook_trigger_node_list: WebhookTriggerNodeDto[];
   telegram_trigger_node_list: TelegramTriggerNodeDto[];
@@ -110,7 +118,6 @@ export interface CreateGraphDtoRequest {
   start_node_list?: StartNodeDto[];
   python_node_list?: PythonNodeDto[];
   edge_list?: EdgeDto[];
-  conditional_edge_list?: ConditionalEdgeDto[];
   file_extractor_node_list?: FileExtractorNodeDto[];
   webhook_trigger_node_list?: WebhookTriggerNodeDto[];
   telegram_trigger_node_list?: TelegramTriggerNodeDto[];
@@ -131,27 +138,41 @@ export interface UpdateGraphDtoRequest {
   save_version?: number;
 }
 
+/**
+ * Body of `PATCH /graphs/{id}/`: only the writable graph metadata. The read-only author,
+ * timestamps and last edit of a loaded graph are never sent back.
+ */
+export type PatchGraphDtoRequest = Partial<
+  Pick<GraphDto, 'name' | 'description' | 'tags' | 'label_ids' | 'save_version'>
+>;
+
 // ── Bulk-save item shapes ────────────────────────────────────────────────────
 
-/** A node being created in a bulk save: `id: null` plus the client-minted `temp_id`. */
-export type BulkCreateItem<TWrite> = { id: null; temp_id: string } & TWrite;
+/**
+ * Identity keys of a node item the bulk save creates (`CreatedNodeItemKeys`). `node_number_hint`
+ * is wire-only and sent for numbered node types alone. It is an ordering key: the server sorts
+ * the save's new nodes by it and numbers them consecutively from the graph's counter.
+ */
+export interface CreatedNodeItemKeys {
+  id: null;
+  temp_id: string;
+  node_number_hint?: number;
+}
+
+/** A node being created in a bulk save: `id: null`, the client-minted `temp_id`, and the write body. */
+export type BulkCreateItem<TWrite> = CreatedNodeItemKeys & TWrite;
 
 /** A node being updated in a bulk save: the backend primary key plus the full write body. */
 export type BulkUpdateItem<TWrite> = { id: number } & TWrite;
 
 export type BulkItem<TWrite> = BulkCreateItem<TWrite> | BulkUpdateItem<TWrite>;
 
-/**
- * The `deleted` block of the bulk-save body — backend ids to remove, keyed by type.
- * `llm_node_ids` is always empty (type not modelled here) but kept so the body shape
- * matches the frontend's exactly.
- */
+/** The `deleted` block of the bulk-save body — backend ids to remove, keyed by type. */
 export interface BulkDeletedBlock {
   start_node_ids: number[];
   python_node_ids: number[];
   task_node_ids: number[];
   agent_node_ids: number[];
-  llm_node_ids: number[];
   file_extractor_node_ids: number[];
   audio_transcription_node_ids: number[];
   end_node_ids: number[];
@@ -168,9 +189,8 @@ export interface BulkDeletedBlock {
 }
 
 /**
- * Body of `POST /graphs/:id/bulk-save/` — exactly what
- * `visual-programming/utils/save/payload.ts#buildBulkSavePayload` emits,
- * minus the excluded legacy `llm_node_list`.
+ * Body of `POST /graphs/:id/save/` — exactly what
+ * `visual-programming/utils/save/payload.ts#buildBulkSavePayload` emits.
  */
 export interface BulkSavePayload {
   save_version: number;

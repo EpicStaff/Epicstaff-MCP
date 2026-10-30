@@ -6,6 +6,7 @@
  * `visual-programming/utils/save/payload.ts`.
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
 export type RagType = 'naive' | 'graph';
@@ -32,7 +33,7 @@ export interface KnowledgeRetrieverNodeData {
   search_configs: AgentSearchConfigs | null;
 }
 
-export interface KnowledgeRetrieverNodeDto {
+export interface KnowledgeRetrieverNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
   graph: number | null;
   source_collection: number | null;

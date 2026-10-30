@@ -1,5 +1,6 @@
 /** Ported from frontend `visual-programming/core/models/schedule-trigger.model.ts` + `buildScheduleBlock` in `visual-programming/utils/save/payload.ts`. */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
 export type WeekdayCode = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
@@ -59,7 +60,7 @@ export interface GetScheduleBlock {
   end: GetScheduleEndBlock;
 }
 
-export interface ScheduleTriggerNodeDto {
+export interface ScheduleTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
   node_name: string;
   graph: number;

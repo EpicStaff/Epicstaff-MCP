@@ -34,7 +34,6 @@ function metadataOf(node: GraphNodeBase): Record<string, unknown> {
     color: node.color,
     icon: node.icon,
     size: node.size,
-    ...(node.nodeNumber != null ? { nodeNumber: node.nodeNumber } : {}),
   };
 }
 
@@ -43,7 +42,6 @@ const emptyDeleted = {
   python_node_ids: [],
   task_node_ids: [],
   agent_node_ids: [],
-  llm_node_ids: [],
   file_extractor_node_ids: [],
   audio_transcription_node_ids: [],
   end_node_ids: [],
@@ -69,7 +67,7 @@ describe('buildBulkSavePayload', () => {
     const pythonNode: PythonGraphNode = {
       ...baseNode('py-1', 2, 'Transform', 100, 0),
       type: 'python',
-      data: { name: 'transform', libraries: [], code: 'def main(x): return x', entrypoint: 'main' },
+      data: { name: 'transform', code: 'def main(x): return x', entrypoint: 'main' },
       test_input: {},
     };
     const taskNode: TaskGraphNode = {
@@ -194,6 +192,8 @@ describe('buildBulkSavePayload', () => {
         {
           id: null,
           temp_id: 'agent-temp-1',
+          // The #N badge travels as an ordering hint, never in metadata.
+          node_number_hint: 6,
           node_name: 'Agent',
           graph: 42,
           agent_definition: 10,
@@ -319,14 +319,20 @@ describe('buildBulkSavePayload', () => {
           default_llm_config: 11,
           pre_computation: {
             code: 'def main():\n    return 1',
-            libraries: ['requests'],
             input_map: { a: 'variables.a' },
             output_variable_path: 'variables.pre',
+            execution_timeout: 45,
           },
+          pre_use_storage: true,
           // No code but a declared secret: the block is still emitted (secrets-only computation).
-          post_computation: { code: '', libraries: [], secret_ids: [31] },
+          post_computation: { code: '', secret_ids: [31] },
+          sections: [
+            { id: 'section-a', name: 'Positive', metadata: { color: '#2aba6b' } },
+            { id: 'section-b', name: 'Other', metadata: { color: 'not-a-colour' } },
+          ],
         },
       },
+      explanations: { 'step-1': { text: 'Routes yes', fingerprint: 'f1', generatedBy: 'gpt' } },
     };
 
     const remote: GraphState = { nodes: [taskNode], edges: [] };
@@ -350,22 +356,24 @@ describe('buildBulkSavePayload', () => {
         node_name: 'Classifier',
         pre_python_code: {
           code: 'def main():\n    return 1',
-          libraries: ['requests'],
           entrypoint: 'main',
           global_kwargs: {},
           secret_ids: [],
+          execution_timeout: 45,
         },
         pre_input_map: { a: 'variables.a' },
         pre_output_variable_path: 'variables.pre',
+        pre_use_storage: true,
         post_python_code: {
           code: '',
-          libraries: [],
           entrypoint: 'main',
           global_kwargs: {},
           secret_ids: [31],
+          execution_timeout: undefined,
         },
         post_input_map: {},
         post_output_variable_path: null,
+        post_use_storage: false,
         prompt_configs: [
           {
             prompt_key: 'p1',
@@ -395,7 +403,15 @@ describe('buildBulkSavePayload', () => {
             field_manipulations: { x: 'x + 1' },
           },
         ],
-        metadata: metadataOf(cdtNode),
+        // Palette colours keep their canonical case; an invalid colour falls back to the default.
+        sections: [
+          { id: 'section-a', name: 'Positive', metadata: { color: '#2ABA6B' } },
+          { id: 'section-b', name: 'Other', metadata: { color: '#685FFF' } },
+        ],
+        metadata: {
+          ...metadataOf(cdtNode),
+          explanations: { 'step-1': { text: 'Routes yes', fingerprint: 'f1', generatedBy: 'gpt' } },
+        },
       },
     ]);
     expect(payload.deleted).toStrictEqual(emptyDeleted);
@@ -405,27 +421,32 @@ describe('buildBulkSavePayload', () => {
     const nodes = {
       python: {
         ...baseNode('py-new', null, 'Py', 0, 0),
+        nodeNumber: 1,
         type: 'python',
         data: {
           id: 77,
           name: 'code',
-          libraries: ['numpy'],
           code: 'def main(): pass',
           entrypoint: 'main',
           use_storage: true,
           secret_ids: [3],
+          venv_id: 4,
+          execution_timeout: 30,
         },
         test_input: { n: 1 },
       },
-      end: { ...baseNode('end-new', null, '__end__', 0, 1), type: 'end', data: {} },
-      subgraph: { ...baseNode('sub-new', null, 'Sub', 0, 2), type: 'subgraph', data: { id: 55 } },
+      // End nodes are never numbered: a stray nodeNumber must not become a hint.
+      end: { ...baseNode('end-new', null, '__end__', 0, 1), nodeNumber: 99, type: 'end', data: {} },
+      subgraph: { ...baseNode('sub-new', null, 'Sub', 0, 2), nodeNumber: 2, type: 'subgraph', data: { id: 55 } },
       orphanSubgraph: { ...baseNode('sub-orphan', null, 'Orphan', 0, 2), type: 'subgraph', data: { id: null } },
       webhook: {
         ...baseNode('wh-new', null, 'Hook', 0, 3),
         type: 'webhook-trigger',
         data: {
           webhook_trigger: 12,
-          python_code: { name: 'hook', libraries: [], code: 'c', entrypoint: 'main' },
+          python_code: { name: 'hook', code: 'c', entrypoint: 'main' },
+          test_payload: { order: 1 },
+          use_storage: true,
         },
       },
       telegram: {
@@ -504,15 +525,17 @@ describe('buildBulkSavePayload', () => {
       {
         id: null,
         temp_id: 'py-new',
+        node_number_hint: 1,
         node_name: 'Py',
         graph: 42,
         python_code: {
           id: 77,
           name: 'code',
-          libraries: ['numpy'],
           code: 'def main(): pass',
           entrypoint: 'main',
           secret_ids: [3],
+          venv_id: 4,
+          execution_timeout: 30,
         },
         input_map: {},
         output_variable_path: null,
@@ -534,6 +557,7 @@ describe('buildBulkSavePayload', () => {
       {
         id: null,
         temp_id: 'sub-new',
+        node_number_hint: 2,
         node_name: 'Sub',
         graph: 42,
         subgraph: 55,
@@ -558,11 +582,13 @@ describe('buildBulkSavePayload', () => {
         temp_id: 'wh-new',
         node_name: 'Hook',
         graph: 42,
-        python_code: { name: 'hook', libraries: [], code: 'c', entrypoint: 'main' },
+        python_code: { name: 'hook', code: 'c', entrypoint: 'main' },
         input_map: {},
         output_variable_path: null,
         webhook_trigger_path: '',
         webhook_trigger: 12,
+        test_payload: { order: 1 },
+        use_storage: true,
         metadata: metadataOf(nodes.webhook),
       },
     ]);
@@ -575,6 +601,8 @@ describe('buildBulkSavePayload', () => {
         telegram_bot_api_key_secret_id: 21,
         webhook_trigger: null,
         fields: [{ parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
+        // Unset test payload goes out as {} (frontend `?? {}`).
+        test_payload: {},
         metadata: metadataOf(nodes.telegram),
       },
     ]);
@@ -635,6 +663,7 @@ describe('buildBulkSavePayload', () => {
     expect(payload).not.toHaveProperty('crew_node_list');
     expect(payload.deleted).not.toHaveProperty('crew_node_ids');
     expect(payload.deleted).not.toHaveProperty('code_agent_node_ids');
+    expect(payload.deleted).not.toHaveProperty('llm_node_ids');
     expect(payload.schedule_trigger_node_list).toStrictEqual([
       {
         id: null,

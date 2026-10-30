@@ -22,7 +22,13 @@ function jsonResponse(status: number, body: unknown, setCookie?: string): Respon
   return new Response(JSON.stringify(body), { status, headers });
 }
 
-/** Current backends: access in the body, refresh only in the HttpOnly `auth.refresh` cookie. */
+/**
+ * The refresh token is sent under both refresh-cookie names: the server reads only its own
+ * (`__Host-auth.refresh` over HTTPS, `auth.refresh` over http), which then appears once.
+ */
+const BOTH_REFRESH_COOKIES = (token: string): string => `__Host-auth.refresh=${token}; auth.refresh=${token}`;
+
+/** Current backends over http: access in the body, refresh only in the HttpOnly `auth.refresh` cookie. */
 function loginResponse(access: string, refresh: string): Response {
   return jsonResponse(200, { access }, `auth.refresh=${refresh}; HttpOnly; Path=/api/auth/; SameSite=Lax`);
 }
@@ -122,7 +128,7 @@ describe('auth bootstrap + org resolution', () => {
 
   it('user session: refreshes an expired access token through the refresh cookie (no login)', async () => {
     routes.set('POST /api/auth/refresh/', (call) => {
-      expect(call.headers.get('Cookie')).toBe('auth.refresh=refresh-1');
+      expect(call.headers.get('Cookie')).toBe(BOTH_REFRESH_COOKIES('refresh-1'));
       return jsonResponse(200, { access: 'access-2' }, 'auth.refresh=refresh-2; HttpOnly; Path=/api/auth/');
     });
     const { store, auth } = makeServices();
@@ -131,6 +137,28 @@ describe('auth bootstrap + org resolution', () => {
     expect(await auth.accessToken()).toBe('access-2');
     expect(store.get().bearerRefreshToken).toBe('refresh-2'); // rotated cookie adopted
     expect(calls.some((call) => call.url.includes('auth/login/'))).toBe(false);
+  });
+
+  it('user session: over HTTPS reads the __Host- refresh cookie, not the expired legacy one', async () => {
+    routes.set('POST /api/auth/login/', () => {
+      // An HTTPS server sets the prefixed cookie and expires the legacy name in the same response.
+      const headers = new Headers({ 'Content-Type': 'application/json' });
+      headers.append('Set-Cookie', '__Host-auth.refresh=refresh-secure; HttpOnly; Secure; Path=/; SameSite=Lax');
+      headers.append('Set-Cookie', 'auth.refresh=""; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/api/auth/');
+      return new Response(JSON.stringify({ access: 'access-1' }), { status: 200, headers });
+    });
+    routes.set('POST /api/auth/refresh/', (call) => {
+      expect(call.headers.get('Cookie')).toBe(BOTH_REFRESH_COOKIES('refresh-secure'));
+      return jsonResponse(200, { access: 'access-2' }, '__Host-auth.refresh=refresh-rotated; HttpOnly; Secure; Path=/');
+    });
+    const { store, auth } = makeServices();
+
+    expect(await auth.accessToken()).toBe('access-1');
+    expect(store.get().bearerRefreshToken).toBe('refresh-secure');
+
+    store.update({ bearerAccessToken: jwt('user', -60) });
+    expect(await auth.accessToken()).toBe('access-2');
+    expect(store.get().bearerRefreshToken).toBe('refresh-rotated');
   });
 
   it('user session: logs in once when there is no refresh token', async () => {
@@ -204,7 +232,7 @@ describe('auth bootstrap + org resolution', () => {
   it('invalid stored key + expired access: refreshes through the cookie and mints, no login', async () => {
     routes.set('GET /api/auth/api-key/validate/', () => jsonResponse(401, { detail: 'invalid' }));
     routes.set('POST /api/auth/refresh/', (call) => {
-      expect(call.headers.get('Cookie')).toBe('auth.refresh=refresh-1');
+      expect(call.headers.get('Cookie')).toBe(BOTH_REFRESH_COOKIES('refresh-1'));
       return jsonResponse(200, { access: 'access-2' }, 'auth.refresh=refresh-2; HttpOnly; Path=/api/auth/');
     });
     routes.set('POST /api/profile/api-keys/', (call) => {
@@ -416,7 +444,7 @@ describe('auth bootstrap + org resolution', () => {
     routes.set('POST /api/auth/refresh/', (call) => {
       // Sent both ways: body for legacy backends, cookie for current ones.
       expect(call.body).toEqual({ refresh: 'refresh-1' });
-      expect(call.headers.get('Cookie')).toBe('auth.refresh=refresh-1');
+      expect(call.headers.get('Cookie')).toBe(BOTH_REFRESH_COOKIES('refresh-1'));
       return jsonResponse(200, { access: 'access-2' });
     });
 

@@ -49,7 +49,8 @@ latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tra
 
 | EpicStaff | Plugin |
 |---|---|
-| 1.3 (`developer`, unreleased) | `1.3.0-dev.N` (`main`) |
+| 1.5 (`developer`, unreleased) | `1.5.0-dev.N` (`main`) |
+| 1.4.x | `1.4.y` (`release/v1.4.x`) |
 | 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
 
 **How to pick:** check your EpicStaff version (release tag, or `developer`) and install the newest
@@ -68,7 +69,7 @@ Each plugin release records the exact EpicStaff commit it was verified against i
 | `release_line` | EpicStaff MAJOR.MINOR this version targets (equals the plugin's MAJOR.MINOR) |
 | `status` | `dev` — tracks an unreleased branch; `release` — verified against a release tag |
 
-**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. `1.3.0-dev.1` is numerically
+**Upgrading from 3.x:** plugin versions `3.x` predate this scheme. Every `1.x` version is numerically
 *lower* than `3.1.0`, so uninstall and reinstall instead of updating:
 `claude plugin uninstall epicstaff-mcp@epicstaff` then `claude plugin install epicstaff-mcp@epicstaff`.
 
@@ -83,6 +84,8 @@ Each plugin release records the exact EpicStaff commit it was verified against i
 | `es-push-flow` | Diff, then materialize on EpicStaff |
 | `es-test-flow` | Run, poll, read messages, iterate |
 | `es-pull-flow` | Import an existing remote flow into local source |
+| `es-catalog` | Manage org entities without a flow: agents, surfaces, collections, tools, venvs, model configs, secrets, key-value tables, labels, recycle bin, versions |
+| `es-voice` | Voice for an agent: voice configs, an agent's voice settings, Twilio voice channels, voice chat history |
 
 Start with **es-deliver** for any build request: it decides whether the deliverable is the flow
 alone, the flow plus a new app/UI, or the flow integrated into an existing app — then runs the
@@ -110,7 +113,8 @@ dashboard, batch runner, …) against the same run-session contract — which is
 A flow is a directory with `flow.yaml` (splittable into `*.flow.yaml` parts) plus any
 knowledge documents. Entities are keyed by symbolic name and reference each other by name;
 `{ existing: "<name>" }` reuses a remote entity instead of defining one. No coordinates —
-layout is computed at build time with the same algorithm as the EpicStaff editor.
+layout is computed at build time (the editor's former auto-arrange; its **Arrange** button re-lays a
+pushed flow with the current editor layout).
 
 ```yaml
 meta:
@@ -128,6 +132,7 @@ tools:
   python_code_tools:
     fetch_page:
       description: Fetch a web page.
+      venv: scraping                      # an existing virtual environment (list_venvs / create_venv)
       code: |
         def main(url: str) -> str:
             ...
@@ -145,7 +150,7 @@ surfaces:                                 # what an agent may touch
 
 agents:                                   # AgentDefinitions (the new model)
   researcher:
-    instructions: You are a meticulous researcher.
+    instructions: You are a meticulous researcher.   # stored as the agent's one instruction document
     llm_config: default
     fcm_llm_config: { existing: "org-default-fcm" }
     default_surfaces: [{ surface: web_research, place: all }]
@@ -159,14 +164,24 @@ flow:
   edges:
     - { from: start, to: research }
     - { from: research, to: write }
-    - { from: write, to: finish }        # conditional: { from: X, condition: { code: ... } }
+    - { from: write, to: finish }        # branch with a decision-table node, not on an edge
 ```
 
 Node types: `start`, `agent`, `task`, `python`, `end`, `note`, `file-extractor`, `subgraph`,
 `webhook-trigger`, `telegram-trigger`, `schedule-trigger`, `decision-table`,
 `classification-decision-table`, `audio-to-text`, `knowledge-retriever`, `key-value`.
 `llm`, `code-agent` and `crew` node types are rejected with an error (removed from EpicStaff —
-rewrite a `crew` node as an `agent` node or `task` nodes).
+rewrite a `crew` node as an `agent` node or `task` nodes). So is an edge `condition:` — EpicStaff
+removed conditional edges; branch with a `decision-table` node.
+
+Python code no longer declares `libraries`: EpicStaff runs code in a virtual environment (venv)
+chosen per code block. Name it with `venv: "<name>"` on a python node or python tool — an existing
+venv, resolved by name on push (`create_venv` makes one; the sandbox builds it asynchronously).
+`venv: null` selects the default venv; leaving `venv` out keeps whatever venv the code already runs
+in (new code gets the default), the way a repush keeps a node's execution timeout, a trigger's test
+payload and a classification table's generated explanations. Venv names are not unique in
+EpicStaff, so a name two venvs share is refused at push. `pull_flow` writes the venv back as
+`venv:`. A `libraries:` list is not sent (the build warns).
 
 ```yaml
     lookup:                               # search one RAG of a collection; results → output path
@@ -185,6 +200,42 @@ rewrite a `crew` node as an `agent` node or `task` nodes).
 
 Webhook and Telegram trigger nodes are pushed without a webhook trigger (path / provider); attach
 one in the EpicStaff editor — a repush keeps it.
+
+## Tools
+
+| Area | Tools |
+|---|---|
+| Connection | `check_connection`, `list_organizations`, `set_active_organization` |
+| Flow source | `init_flow`, `validate_flow`, `build_flow`, `diff_flow`, `push_flow`, `pull_flow`, `provision_knowledge`, `describe_node_types` |
+| Flows | `list_graphs`, `describe_graph` (with node numbers and who created / last edited the flow and each node), `copy_flow`, `delete_flow`, `set_flow_labels`, `get_flow_persistent_state`, `dump_graph`, `restore_graph` |
+| Versions | `list_graph_versions`, `create_graph_version`, `restore_graph_version` (in place with a backup version, or as a new flow) |
+| Import / export | `export_entities`, `import_entities` — EpicStaff export documents of flows, python tools or MCP tools (export writes a new `.json` file; it replaces an existing one only with `overwrite: true`, never through a symbolic link) |
+| Recycle bin | `list_recycle_bin`, `restore_from_recycle_bin` (by ids, or a whole bin of one kind with `all: true`), `purge_from_recycle_bin` (by ids only; superadmin, `confirm: true`) |
+| Catalog | `create_agent`, `update_agent`, `get_agent`, `delete_agent`, `create_surface`, `update_surface`, `get_surface`, `delete_surface`, `list_agents`, `list_surfaces` |
+| Tools | `list_tools`, `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`, `update_mcp_tool`, `delete_mcp_tool` |
+| Labels | `list_labels`, `create_label`, `update_label`, `delete_label` (flow and tool label trees) |
+| Venvs | `list_venvs`, `create_venv`, `update_venv`, `delete_venv` |
+| Models | `list_llm_configs`, `list_llm_models`, `create_llm_config`, `update_llm_config`, `delete_llm_config`, `list_embedding_configs`, `create_embedding_config`, `update_embedding_config`, `delete_embedding_config`, `get_settings`, `update_default_models` (incl. the legacy voice / transcription slots), `run_quickstart` |
+| Voice | `list_voice_configs`, `create_voice_config`, `update_voice_config`, `delete_voice_config` (OpenAI Realtime / ElevenLabs / Gemini Live), `create_voice_model`, `delete_voice_model` (custom realtime models), `list_voice_agents`, `set_agent_voice`, `delete_agent_voice`, `list_voice_channels`, `create_voice_channel`, `update_voice_channel`, `delete_voice_channel`, `list_twilio_phone_numbers`, `list_voice_chats`, `get_voice_chat`, `delete_voice_chat` |
+| Secrets | `list_secrets`, `create_secret`, `delete_secret` |
+| Key-value tables | `list_key_value_tables`, `create_key_value_table`, `update_key_value_table`, `delete_key_value_table`, `list_key_value_entries`, `write_key_value_entries` |
+| Knowledge | `list_source_collections`, `create_collection`, `attach_rag`, `delete_collection`, `list_documents`, `upload_documents`, `delete_documents`, `get_collection_status`, `wait_for_collections` |
+| Runs | `run_flow`, `get_session`, `get_session_updates`, `get_session_messages`, `list_sessions`, `stop_session` |
+| Apps | `generate_chat_ui` |
+
+Credentials never pass through a tool argument or result: `create_secret`, `api_key_env` on
+`create_llm_config` / `create_embedding_config` / `create_voice_config` / `run_quickstart`, and
+`auth_token_env` on the voice-channel tools read the value from an environment variable of the MCP
+server (stored as an org secret); a secret's value is never returned, nor is a voice channel's routing
+token or a voice chat's connection key. Deletes of flows, agents, surfaces, tools, collections,
+key-value tables, secrets and voice channels go to the recycle bin; LLM / embedding / voice configs,
+an agent's voice settings, voice chats, venvs and labels are deleted for good. Deleting a config clears
+it from whatever used it (`dry_run: true` lists that usage first); it is skipped only when something
+the caller cannot see uses it.
+
+Voice is not part of flow source: an agent gets a voice with `set_agent_voice` (a voice config made
+with `create_voice_config`), users talk to it in the EpicStaff Chats page or over a Twilio number
+routed with `create_voice_channel` — see the `es-voice` skill.
 
 ## The data layer — `variables:` and dataflow checks
 
@@ -263,7 +314,11 @@ npx tsx _stress/run-all.mts                # compile → push → run → verify
 The regression suite gives every graph/agent/collection it creates a per-run name and deletes them
 at the end (`REG_KEEP=1` keeps them); `REG_LLM_MODEL` / `REG_LLM_PROVIDER` override the default
 `gpt-4o-mini` / `openai`. `attach_rag` and `provision_knowledge` are skipped (they need an embedding
-model). Scratch output and lockfiles written by these runs are gitignored local state.
+model), and so is `run_quickstart` (it creates configs the suite cannot attribute). The coverage phase
+(`reg-cov-<run>`: venvs, versions, recycle bin, configs, secrets, key-value tables, tool catalog, labels,
+import/export) removes what it creates; `purge_from_recycle_bin` purges only that phase's own binned items
+and is reported as SKIP when the test user is not a superadmin. Scratch output and lockfiles written by
+these runs are gitignored local state.
 
 The server is a headless port of the EpicStaff Angular frontend's API layer: same
 endpoints, same request models, same auth/org headers, and a verbatim port of the

@@ -5,6 +5,7 @@
  */
 import { z } from 'zod';
 
+import { VENV_NAME_PATTERN } from '../../api/venvs.js';
 import { isReservedEnvName } from '../../config.js';
 
 /** Symbolic names key every entity in a flow source and are used for cross-references. */
@@ -71,6 +72,26 @@ export const inputMapSchema = z
   .describe(
     'Maps this node\'s named inputs to flow-state variable paths, e.g. { "query": "variables.user_query" }.',
   );
+
+/**
+ * `venv:` of a python node or python tool — the EpicStaff virtual environment its code runs in,
+ * named as in the venv list (list_venvs / create_venv). Resolved by name on push; the venv itself
+ * is never created or changed from flow source. `null` = the sandbox's default venv; omitted =
+ * keep the venv the code already runs in (new code gets the default).
+ */
+export const venvRefSchema = z
+  .string()
+  .regex(VENV_NAME_PATTERN, 'venv names contain only letters, digits, spaces, "_" and "-"')
+  .nullable()
+  .describe(
+    'Name of an existing EpicStaff virtual environment (list_venvs / create_venv) this code runs in; ' +
+      'third-party packages come from it. null = the default venv; omit to keep the current one ' +
+      '(new code gets the default).',
+  );
+
+export const LIBRARIES_DEPRECATION_NOTE =
+  'DEPRECATED — not sent: EpicStaff replaced per-code libraries with virtual environments (venvs). ' +
+  'Put the packages in a venv (create_venv) and reference it with venv: "<name>".';
 
 /**
  * Name of the environment variable a credential is read from (`api_key_env`, `bot_token_env`).

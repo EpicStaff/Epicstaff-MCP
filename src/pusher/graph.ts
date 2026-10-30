@@ -1,19 +1,13 @@
 import type { AppContext } from '../context.js';
 import type { BuildArtifact } from '../compiler/artifact.js';
 import { substituteRefs } from '../compiler/artifact.js';
-import type { ConditionalEdgePlan } from '../compiler/emit.js';
 import { GraphsApi } from '../api/graphs.js';
-import {
-  type FlowLock,
-  contentHash,
-  getEntity,
-  isEntityDirty,
-  removeEntity,
-  setEntity,
-} from '../flow-source/lockfile.js';
+import { type FlowLock, contentHash, getEntity, removeEntity, setEntity } from '../flow-source/lockfile.js';
 import type { GraphNode, GraphState } from '../graph/graph-state.js';
 import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
+import type { CustomPythonCode } from '../models/nodes/python-node.js';
 import { buildBulkSavePayload } from '../graph/bulk-save.js';
+import { getNodeDiff } from '../graph/diff.js';
 import { buildRemoteState, collectOrphanEdgeIds } from '../graph/remote-state.js';
 import { applySaveResponse } from '../graph/temp-id.js';
 import type { BulkSavePayload, GraphDto } from '../models/graph.js';
@@ -22,13 +16,16 @@ import { logger } from '../util/logger.js';
 
 /**
  * Graph pusher — persists the desired GraphState via the bulk-save protocol
- * (save_version optimistic lock, temp_id round-trip), plus conditional edges
- * through their dedicated endpoints (they are NOT part of bulk-save, matching
- * the frontend). Node backend ids are tracked in the lockfile under the
- * `nodes.<node_name>` keys so a repush updates instead of duplicating.
+ * (save_version optimistic lock, temp_id round-trip). Node backend ids are tracked
+ * in the lockfile under the `nodes.<node_name>` keys so a repush updates instead
+ * of duplicating.
  */
 const NODE_SECTION = 'nodes';
-const CONDITIONAL_EDGE_SECTION = 'conditional_edges';
+/**
+ * Lock section older pushes wrote for conditional edges. EpicStaff removed conditional edges
+ * (their rows were deleted by its migration), so entries left in a lockfile are dropped.
+ */
+const REMOVED_CONDITIONAL_EDGE_SECTION = 'conditional_edges';
 
 export interface GraphPushResult {
   graphId: number;
@@ -37,23 +34,41 @@ export interface GraphPushResult {
   createdGraph: boolean;
   /** False when the computed diff was empty and the bulk save was skipped (save_version unchanged). */
   changed: boolean;
-  nodeActions: { created: number; updated: number; deleted: number; updatedNodes: string[] };
+  nodeActions: {
+    created: number;
+    updated: number;
+    deleted: number;
+    updatedNodes: string[];
+    /** Per rewritten node, the fields that differed from the remote graph (only when some did). */
+    changedFields?: Record<string, string[]>;
+  };
   warnings: string[];
 }
 
 /**
  * The graph a lockfile points at no longer exists (deleted in the editor, or the lockfile came
- * from another EpicStaff instance). Returns a lock that recreates it: no graph id, no node or
- * conditional-edge ids (they belonged to the dead graph), save_version reset. Entity entries
- * are kept here — the entity pusher re-verifies them (see EntityPusher `verifyLockedIds`).
+ * from another EpicStaff instance). Returns a lock that recreates it: no graph id, no node ids
+ * (they belonged to the dead graph), save_version reset. Entity entries are kept here — the
+ * entity pusher re-verifies them (see EntityPusher `verifyLockedIds`).
  */
 export function forgetMissingGraph(lock: FlowLock): FlowLock {
-  const entities = Object.fromEntries(
-    Object.entries(lock.entities).filter(
-      ([key]) => !key.startsWith(`${NODE_SECTION}.`) && !key.startsWith(`${CONDITIONAL_EDGE_SECTION}.`),
-    ),
+  return {
+    ...lock,
+    graphId: null,
+    saveVersion: 0,
+    entities: withoutSections(lock, [NODE_SECTION, REMOVED_CONDITIONAL_EDGE_SECTION]),
+  };
+}
+
+/** The lock without the conditional-edge entries older pushes wrote. */
+export function dropRemovedConditionalEdges(lock: FlowLock): FlowLock {
+  return { ...lock, entities: withoutSections(lock, [REMOVED_CONDITIONAL_EDGE_SECTION]) };
+}
+
+function withoutSections(lock: FlowLock, sections: readonly string[]): FlowLock['entities'] {
+  return Object.fromEntries(
+    Object.entries(lock.entities).filter(([key]) => !sections.some((section) => key.startsWith(`${section}.`))),
   );
-  return { ...lock, graphId: null, saveVersion: 0, entities };
 }
 
 export function missingGraphWarning(graphId: number, flowName: string): string {
@@ -337,6 +352,12 @@ export class GraphPusher {
       saveVersion: remoteDto.save_version,
     });
 
+    // Why each persisted node is rewritten — the same diff the payload was built from.
+    const changedFields: Record<string, string[]> = {};
+    for (const bucket of Object.values(getNodeDiff(remote, desired))) {
+      for (const { current, changedFields: fields } of bucket.toUpdate) changedFields[current.node_name] = fields;
+    }
+
     // Reap edges whose endpoints no longer resolve to a node. buildRemoteState cannot
     // represent them, so the edge differ never sees them and they would otherwise stay
     // on the graph forever (see collectOrphanEdgeIds).
@@ -384,12 +405,8 @@ export class GraphPusher {
       .filter(([key]) => key !== 'edge_ids')
       .reduce((total, [, ids]) => total + (Array.isArray(ids) ? ids.length : 0), 0);
 
-    // 7. Conditional edges — dedicated endpoints, diffed via lockfile.
-    const conditional = await this.pushConditionalEdges(artifact, remoteDto.id, desired, currentLock);
-    currentLock = conditional.lock;
-
-    // 8. Persist the new save_version.
-    currentLock = { ...currentLock, saveVersion: response.save_version };
+    // 7. Persist the new save_version (and forget conditional-edge entries of older pushes).
+    currentLock = { ...dropRemovedConditionalEdges(currentLock), saveVersion: response.save_version };
 
     // Names of the persisted nodes this save rewrote (start/end nodes have no node_name on the wire).
     const updatedNodes: string[] = [];
@@ -407,8 +424,14 @@ export class GraphPusher {
       saveVersion: response.save_version,
       lock: currentLock,
       createdGraph,
-      changed: changed || conditional.changes > 0,
-      nodeActions: { created, updated, deleted, updatedNodes },
+      changed,
+      nodeActions: {
+        created,
+        updated,
+        deleted,
+        updatedNodes,
+        ...(Object.keys(changedFields).length > 0 ? { changedFields } : {}),
+      },
       warnings,
     };
   }
@@ -433,82 +456,16 @@ export class GraphPusher {
       throw error;
     }
   }
-
-  private async pushConditionalEdges(
-    artifact: BuildArtifact,
-    graphId: number,
-    desired: GraphState,
-    lock: FlowLock,
-  ): Promise<{ lock: FlowLock; changes: number }> {
-    let currentLock = lock;
-    let changes = 0;
-    const plans = (artifact.summary.conditionalEdges as ConditionalEdgePlan[] | undefined) ?? [];
-    const nodeIdByUuid = new Map(
-      desired.nodes.filter((node) => node.backendId != null).map((node) => [node.id, node.backendId as number]),
-    );
-
-    const seenKeys = new Set<string>();
-    for (const plan of plans) {
-      const sourceNodeId = nodeIdByUuid.get(plan.sourceNode);
-      if (sourceNodeId === undefined) {
-        throw new Error(`Conditional edge source node "${plan.sourceNodeName}" has no backend id after save.`);
-      }
-      const body = {
-        graph: graphId,
-        source_node_id: sourceNodeId,
-        python_code: plan.python_code,
-        input_map: plan.input_map,
-      };
-      const hash = contentHash(body);
-      const lockName = plan.sourceNodeName;
-      seenKeys.add(lockName);
-      const entry = getEntity(currentLock, CONDITIONAL_EDGE_SECTION, lockName);
-      if (!entry) {
-        const createdEdge = await this.graphs.createConditionalEdge(body);
-        currentLock = setEntity(currentLock, CONDITIONAL_EDGE_SECTION, lockName, {
-          backendId: createdEdge.id as number,
-          contentHash: hash,
-        });
-        changes += 1;
-        logger.info(`Created conditional edge from "${plan.sourceNodeName}"`);
-      } else if (isEntityDirty(currentLock, CONDITIONAL_EDGE_SECTION, lockName, hash)) {
-        await this.graphs.updateConditionalEdge(entry.backendId, body);
-        currentLock = setEntity(currentLock, CONDITIONAL_EDGE_SECTION, lockName, {
-          backendId: entry.backendId,
-          contentHash: hash,
-        });
-        changes += 1;
-        logger.info(`Updated conditional edge from "${plan.sourceNodeName}"`);
-      }
-    }
-
-    // Delete conditional edges removed from the source.
-    for (const key of Object.keys(lock.entities)) {
-      if (!key.startsWith(`${CONDITIONAL_EDGE_SECTION}.`)) continue;
-      const name = key.slice(CONDITIONAL_EDGE_SECTION.length + 1);
-      if (!seenKeys.has(name)) {
-        const entry = lock.entities[key];
-        if (entry) {
-          await this.graphs.deleteConditionalEdge(entry.backendId).catch((error) => {
-            logger.warn(`Failed to delete conditional edge #${entry.backendId}`, error);
-          });
-        }
-        currentLock = removeEntity(currentLock, CONDITIONAL_EDGE_SECTION, name);
-        changes += 1;
-      }
-    }
-
-    return { lock: currentLock, changes };
-  }
 }
 
 /**
  * Keep node settings flow source cannot express, so a repush does not wipe what a user
  * attached in the EpicStaff editor: a trigger node's `webhook_trigger` (path / provider
- * live in `webhook-triggers/`), a telegram node's bot-token secret when the source sets
- * no `bot_token_env`, and the secrets a python node's code may read. Only nodes matched
- * to a persisted node (same backend id and type) inherit; the source still wins wherever
- * it states a value.
+ * live in `webhook-triggers/`), test payload and storage access, a telegram node's
+ * bot-token secret when the source sets no `bot_token_env` and its fields, the secrets, virtual
+ * environment and execution timeout of python code, and a classification table's
+ * generated step explanations. Only nodes matched to a persisted node (same backend id
+ * and type) inherit; the source still wins wherever it states a value.
  *
  * It also carries over the backend identities the compiler cannot know, so an unchanged node
  * diffs clean and an edited one is updated in place instead of re-created: the python code row
@@ -526,16 +483,22 @@ export function inheritUnrepresentableFields(desired: GraphState, remote: GraphS
 
     if (node.type === 'webhook-trigger' && previous.type === 'webhook-trigger') {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
-      node.data.python_code.secret_ids ??= previous.data.python_code.secret_ids;
-      node.data.python_code.id ??= previous.data.python_code.id;
+      node.data.test_payload ??= previous.data.test_payload;
+      node.data.use_storage ??= previous.data.use_storage;
+      inheritPythonCodeSettings(node.data.python_code, previous.data.python_code);
     } else if (node.type === 'telegram-trigger' && previous.type === 'telegram-trigger') {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.telegram_bot_api_key_secret_id ??= previous.data.telegram_bot_api_key_secret_id;
+      node.data.test_payload ??= previous.data.test_payload;
+      // Flow source cannot list a telegram node's fields (it compiles []): keep the editor's, ids
+      // included — otherwise every repush rewrote the node and dropped them.
+      if (node.data.fields.length === 0) node.data.fields = previous.data.fields;
     } else if (node.type === 'python' && previous.type === 'python') {
-      node.data.secret_ids ??= previous.data.secret_ids;
-      node.data.id ??= previous.data.id;
+      inheritPythonCodeSettings(node.data, previous.data);
       // Flow source cannot set use_storage; the wire default is false (bulk-save `?? false`).
       node.data.use_storage ??= false;
+    } else if (node.type === 'classification-decision-table' && previous.type === 'classification-decision-table') {
+      node.explanations ??= previous.explanations;
     } else if (node.type === 'agent' && previous.type === 'agent') {
       inheritAgentTaskIds(node.data.tasks ?? [], previous.data.tasks ?? []);
     } else if (node.type === 'note' && previous.type === 'note') {
@@ -543,6 +506,17 @@ export function inheritUnrepresentableFields(desired: GraphState, remote: GraphS
       previous.node_name = node.node_name;
     }
   }
+}
+
+/**
+ * The python-code settings flow source cannot state: the code row id, the secrets it may read,
+ * the virtual environment it runs in and its execution timeout.
+ */
+function inheritPythonCodeSettings(code: CustomPythonCode, previous: CustomPythonCode): void {
+  code.id ??= previous.id;
+  code.secret_ids ??= previous.secret_ids;
+  if (code.venv_id === undefined && previous.venv_id !== undefined) code.venv_id = previous.venv_id;
+  code.execution_timeout ??= previous.execution_timeout;
 }
 
 /** Give compiled sub-tasks the ids of the persisted tasks at the same position. */

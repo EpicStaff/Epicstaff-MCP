@@ -42,10 +42,6 @@ async function main(): Promise<void> {
         `  ${node.node_name.padEnd(20)} ${node.type.padEnd(30)} @ ${node.position.x},${node.position.y}\n`,
       );
     }
-    const conditional = (artifact.summary.conditionalEdges as unknown[] | undefined) ?? [];
-    if (conditional.length > 0) {
-      process.stdout.write(`  conditional edges: ${conditional.length}\n`);
-    }
   }
 
   for (const warning of warnings) {

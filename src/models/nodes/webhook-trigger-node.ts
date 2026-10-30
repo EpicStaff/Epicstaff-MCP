@@ -4,6 +4,7 @@
  * emission in `visual-programming/utils/save/payload.ts` (which always sends `webhook_trigger_path: ''`).
  */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 import type { CustomPythonCode, GetPythonCodeDto } from './python-node.js';
 
@@ -42,15 +43,14 @@ export interface WebhookTriggerModel {
 }
 
 /**
- * `webhook_trigger` on a trigger node. The frontend types it `number | WebhookTriggerModel`,
- * but both the node serializers (bulk-save) and `GET graphs/{id}/` use a primary-key field
- * at TO — the nested form is only returned by the per-node read endpoints. MCP only ever
- * reads the graph and writes via bulk-save, so the id is the whole contract.
+ * `webhook_trigger` on a trigger node: the id of an existing `webhook-triggers/` row. The graph
+ * API and bulk save both use a bare id; triggers themselves are created through `webhook-triggers/`.
  */
 export type WebhookTriggerRef = number;
 
-export interface WebhookTriggerNodeDto {
+export interface WebhookTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  created_at: string;
   node_name: string;
   graph: number;
   python_code: GetPythonCodeDto;
@@ -59,6 +59,10 @@ export interface WebhookTriggerNodeDto {
   webhook_trigger_path?: string;
   metadata: Record<string, unknown>;
   webhook_trigger: WebhookTriggerRef | null;
+  /** Payload used by "Run with test payload"; a JSON object, `{}` when unset. */
+  test_payload: Record<string, unknown>;
+  /** Whether the code gets the flow's file storage (`epicstaff_storage`). */
+  use_storage: boolean;
 }
 
 export interface WebhookTriggerNodeWrite {
@@ -70,5 +74,7 @@ export interface WebhookTriggerNodeWrite {
   /** Always `''` at bulk-save time — the backend derives the real path. */
   webhook_trigger_path: string;
   webhook_trigger: WebhookTriggerRef | null;
+  test_payload: Record<string, unknown>;
+  use_storage: boolean;
   metadata: NodeDtoMetadata;
 }

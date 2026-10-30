@@ -2,9 +2,6 @@
  * Bulk-save payload builder — faithful port of frontend
  * `visual-programming/utils/save/payload.ts#buildBulkSavePayload`, with the diffing
  * (`utils/save/diff.ts`) folded in so callers pass whole graph states.
- *
- * Excluded from emission (per protocol decision): `llm_node_list` (legacy — still emitted
- * by the frontend, ignored by the backend). Its `deleted.llm_node_ids` key remains, always empty.
  */
 
 import type {
@@ -12,17 +9,19 @@ import type {
   BulkItem,
   BulkSavePayload,
   BulkUpdateItem,
-  NodeDtoMetadata,
+  CreatedNodeItemKeys,
 } from '../models/graph.js';
 import type { AgentNodeTaskUi, AgentNodeTaskWrite } from '../models/nodes/agent-node.js';
-import type {
-  CdtConditionGroupWrite,
-  ClassificationDecisionTableNodeWrite,
-  PromptConfigWrite,
+import {
+  normalizeCdtSectionColor,
+  type CdtConditionGroupWrite,
+  type ClassificationDecisionTableNodeWrite,
+  type PromptConfigWrite,
 } from '../models/nodes/classification-decision-table-node.js';
 import type { DecisionTableConditionGroupWrite, DecisionTableNodeWrite } from '../models/nodes/decision-table-node.js';
 import type { BulkEdgeCreate, BulkEdgeUpdate } from '../models/nodes/edge.js';
 import type { ScheduleBlockWrite } from '../models/nodes/schedule-trigger-node.js';
+import { isPythonCodeBlockSaved } from './cdt-python-code-block.js';
 import { buildUuidToBackendIdMap, getConnectionDiff, getNodeDiff, type NodeDiff } from './diff.js';
 import { hasPersistedWaypoints, mergeWaypointsIntoMetadata } from './edge-waypoints.js';
 import type {
@@ -34,6 +33,15 @@ import type {
   ScheduleTriggerGraphNode,
 } from './graph-state.js';
 import { toNodeMetadata } from './metadata.js';
+import { isNumberedNodeType } from './node-number.js';
+
+/**
+ * Ported from `slugifyPortName` in frontend `visual-programming/core/helpers/helpers.ts`: the id-slug
+ * derived from a port's display name (route code). Port ids are persisted — do not change it.
+ */
+function slugifyPortName(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, '-');
+}
 
 function resolveNodeRef(
   uuid: string | null,
@@ -159,8 +167,7 @@ function buildCdtNodePayload(
       if (group.route_code) {
         targetUuid = group.next_node ?? null;
         if (!targetUuid) {
-          const slugified = group.route_code.toLowerCase().replace(/\s+/g, '-');
-          const routePortId = `${node.id}_decision-route-${slugified}`;
+          const routePortId = `${node.id}_decision-route-${slugifyPortName(group.route_code)}`;
           const edge = edges.find(
             (candidate) => candidate.sourceNodeId === node.id && candidate.sourcePortId === routePortId
           );
@@ -226,30 +233,30 @@ function buildCdtNodePayload(
   return {
     graph: graphId,
     node_name: node.node_name,
-    pre_python_code:
-      preCodeValue.trim() === '' && !preSecretIds.length
-        ? null
-        : {
-            code: preCodeValue,
-            libraries: preComputation.libraries ?? [],
-            entrypoint: 'main',
-            global_kwargs: {},
-            secret_ids: preSecretIds,
-          },
+    pre_python_code: isPythonCodeBlockSaved(preCodeValue, preSecretIds)
+      ? {
+          code: preCodeValue,
+          entrypoint: 'main',
+          global_kwargs: {},
+          secret_ids: preSecretIds,
+          execution_timeout: preComputation.execution_timeout,
+        }
+      : null,
     pre_input_map: preComputation.input_map ?? tableData?.pre_input_map ?? {},
     pre_output_variable_path: preComputation.output_variable_path || tableData?.pre_output_variable_path || null,
-    post_python_code:
-      postCodeValue.trim() === '' && !postSecretIds.length
-        ? null
-        : {
-            code: postCodeValue,
-            libraries: postComputation.libraries ?? [],
-            entrypoint: 'main',
-            global_kwargs: {},
-            secret_ids: postSecretIds,
-          },
+    pre_use_storage: tableData?.pre_use_storage ?? false,
+    post_python_code: isPythonCodeBlockSaved(postCodeValue, postSecretIds)
+      ? {
+          code: postCodeValue,
+          entrypoint: 'main',
+          global_kwargs: {},
+          secret_ids: postSecretIds,
+          execution_timeout: postComputation.execution_timeout,
+        }
+      : null,
     post_input_map: postComputation.input_map ?? tableData?.post_input_map ?? {},
     post_output_variable_path: postComputation.output_variable_path || tableData?.post_output_variable_path || null,
+    post_use_storage: tableData?.post_use_storage ?? false,
     prompt_configs: promptConfigs,
     default_llm_config: tableData?.default_llm_config ?? null,
     ...(defaultRef.backendId != null ? { default_next_node_id: defaultRef.backendId } : {}),
@@ -257,7 +264,15 @@ function buildCdtNodePayload(
     ...(errorRef.backendId != null ? { next_error_node_id: errorRef.backendId } : {}),
     ...(errorRef.tempId != null ? { next_error_node_temp_id: errorRef.tempId } : {}),
     condition_groups: conditionGroups,
-    metadata: toNodeMetadata(node),
+    sections: (tableData?.sections ?? []).map((section) => ({
+      id: section.id,
+      name: section.name,
+      metadata: { color: normalizeCdtSectionColor(section.metadata?.color) },
+    })),
+    // Divergence: the frontend runs the explanations through `toStoredCdtExplanations` (size and
+    // shape limits). Flow source never authors explanations — they only round-trip what the
+    // server already stored, which that function produced — so they pass through unchanged.
+    metadata: { ...toNodeMetadata(node), explanations: node.explanations ?? {} },
   };
 }
 
@@ -296,12 +311,17 @@ function buildAgentTasksPayload(tasks: AgentNodeTaskUi[]): AgentNodeTaskWrite[] 
   });
 }
 
-function nodeItems<TNode extends { id: string; backendId: number | null }, TWrite extends object>(
+function createdNodeItemKeys(node: GraphNode): CreatedNodeItemKeys {
+  const hint = isNumberedNodeType(node.type) ? node.nodeNumber : undefined;
+  return { id: null, temp_id: node.id, ...(hint != null ? { node_number_hint: hint } : {}) };
+}
+
+function nodeItems<TNode extends GraphNode, TWrite extends object>(
   diff: NodeDiff<TNode>,
   mapPayload: (node: TNode) => TWrite
 ): BulkItem<TWrite>[] {
   const created = diff.toCreate.map(
-    (node) => ({ id: null, temp_id: node.id, ...mapPayload(node) }) as BulkCreateItem<TWrite>
+    (node) => ({ ...createdNodeItemKeys(node), ...mapPayload(node) }) as BulkCreateItem<TWrite>
   );
   const updated = diff.toUpdate.map(
     ({ current: node }) => ({ id: node.backendId as number, ...mapPayload(node) }) as BulkUpdateItem<TWrite>
@@ -357,7 +377,6 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
     python_node_ids: nodeDiff.pythonNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     task_node_ids: nodeDiff.taskNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
     agent_node_ids: nodeDiff.agentNodes.toDelete.map((node) => node.backendId!).filter((id) => id != null),
-    llm_node_ids: [],
     file_extractor_node_ids: nodeDiff.fileExtractorNodes.toDelete
       .map((node) => node.backendId!)
       .filter((id) => id != null),
@@ -466,6 +485,8 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       output_variable_path: node.output_variable_path || null,
       webhook_trigger_path: '',
       webhook_trigger: node.data.webhook_trigger,
+      test_payload: node.data.test_payload ?? {},
+      use_storage: node.data.use_storage ?? false,
       metadata: toNodeMetadata(node),
     })),
     telegram_trigger_node_list: nodeItems(nodeDiff.telegramNodes, (node) => ({
@@ -474,6 +495,7 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       telegram_bot_api_key_secret_id: node.data.telegram_bot_api_key_secret_id,
       webhook_trigger: node.data.webhook_trigger,
       fields: node.data.fields,
+      test_payload: node.data.test_payload ?? {},
       metadata: toNodeMetadata(node),
     })),
     schedule_trigger_node_list: nodeItems(nodeDiff.scheduleNodes, (node) => ({

@@ -10,20 +10,24 @@ interface FixtureMeta {
   color: string;
   icon: string;
   size: { width: number; height: number };
-  nodeNumber?: number;
 }
 
-function meta(x: number, y: number, nodeNumber?: number): FixtureMeta {
+function meta(x: number, y: number): FixtureMeta {
   return {
     position: { x, y },
     color: '#123456',
     icon: 'ti-node',
     size: { width: 200, height: 100 },
-    ...(nodeNumber != null ? { nodeNumber } : {}),
   };
 }
 
-function desiredBase(type: GraphNodeType, backendId: number, nodeName: string, m: FixtureMeta): GraphNodeBase {
+function desiredBase(
+  type: GraphNodeType,
+  backendId: number,
+  nodeName: string,
+  m: FixtureMeta,
+  nodeNumber?: number,
+): GraphNodeBase {
   return {
     id: remoteNodeUuid(type, backendId),
     backendId,
@@ -32,7 +36,7 @@ function desiredBase(type: GraphNodeType, backendId: number, nodeName: string, m
     color: m.color,
     icon: m.icon,
     size: m.size,
-    ...(m.nodeNumber != null ? { nodeNumber: m.nodeNumber } : {}),
+    ...(nodeNumber != null ? { nodeNumber } : {}),
     input_map: {},
     output_variable_path: null,
   };
@@ -47,13 +51,38 @@ function expectEmptyNodeDiff(nodeDiff: NodeDiffByType, except?: keyof NodeDiffBy
   }
 }
 
+/**
+ * The desired state as GraphPusher holds it: every node keeps a compiler-minted uuid (here
+ * `compiled-<n>`) and only its backend id matches the remote node. Route refs (decision-table and
+ * classification-table targets) and edge endpoints are rewritten to the new uuids.
+ */
+function withCompiledUuids(state: GraphState): GraphState {
+  const uuidByOld = new Map(state.nodes.map((node, index) => [node.id, `compiled-${index}`]));
+  const rekey = (uuid: string | null | undefined): string | null =>
+    uuid == null ? null : (uuidByOld.get(uuid) ?? uuid);
+  for (const node of state.nodes) {
+    if (node.type === 'decision-table' || node.type === 'classification-decision-table') {
+      const table = node.data.table;
+      for (const group of table.condition_groups ?? []) group.next_node = rekey(group.next_node);
+      table.default_next_node = rekey(table.default_next_node);
+      table.next_error_node = rekey(table.next_error_node);
+    }
+    node.id = rekey(node.id) ?? node.id;
+  }
+  for (const edge of state.edges) {
+    edge.sourceNodeId = rekey(edge.sourceNodeId) ?? edge.sourceNodeId;
+    edge.targetNodeId = rekey(edge.targetNodeId) ?? edge.targetNodeId;
+  }
+  return state;
+}
+
 // ── Shared fixture: a fully persisted graph + the desired state a pusher would hold ─
 
 const mStart = meta(0, 0);
 const mPython = meta(100, 0);
 const mNote = meta(600, 0);
 const mTask = meta(400, 0);
-const mAgent = meta(250, 120, 6);
+const mAgent = meta(250, 120);
 const mDt = meta(250, -120);
 const mCdt = meta(200, 200);
 const mSchedule = meta(0, 300);
@@ -74,20 +103,25 @@ const uuidAgent = remoteNodeUuid('agent', 6);
 const transformCodeWire = {
   id: 70,
   name: 'transform',
-  libraries: [],
   code: 'def main(x): return x',
   entrypoint: 'main',
+  venv_id: 4,
   secrets: [{ id: 3, name: 'API_TOKEN' }],
+  execution_timeout: 30,
 };
 const transformCodeState = {
   id: 70,
   name: 'transform',
-  libraries: [],
   code: 'def main(x): return x',
   entrypoint: 'main',
+  venv_id: 4,
+  execution_timeout: 30,
   secret_ids: [3],
 };
-const hookCode = { id: 80, name: 'hook', libraries: [], code: 'c', entrypoint: 'main' };
+const hookCode = { id: 80, name: 'hook', code: 'c', entrypoint: 'main' };
+const hookTestPayload = { order: { id: 7 } };
+const cdtSection = { id: '0b7a9c1e-4c55-4d0e-9a54-3f1b2c3d4e5f', name: 'Positive', metadata: { color: '#2ABA6B' } };
+const cdtExplanations = { 'step-yes': { text: 'Routes yes', fingerprint: 'f1', generatedBy: 'gpt-4o' } };
 /** GET graphs/{id}/ returns the webhook trigger as a primary key. */
 const hookTrigger = 33;
 const endOutputMap = { context: 'variables.context' };
@@ -101,7 +135,11 @@ function makeDto(): GraphDto {
     description: '',
     save_version: 8,
     metadata: {},
-    conditional_edge_list: [],
+    created_by: null,
+    created_at: '2026-10-29T10:00:00Z',
+    last_edited_by: null,
+    last_edited_at: null,
+    node_number_seq: 6,
     start_node_list: [{ id: 1, graph: 42, node_name: '__start__', variables: { topic: 'ai' }, metadata: mStart }],
     knowledge_node_list: [
       {
@@ -164,6 +202,7 @@ function makeDto(): GraphDto {
     agent_node_list: [
       {
         id: 6,
+        node_number: 6,
         metadata: mAgent,
         node_name: 'Agent',
         graph: 42,
@@ -229,16 +268,19 @@ function makeDto(): GraphDto {
         node_name: 'Classifier',
         pre_python_code: {
           code: 'def main():\n    return 1',
-          libraries: ['requests'],
           entrypoint: 'main',
           global_kwargs: {},
           secrets: [{ id: 5, name: 'CLASSIFIER_KEY' }],
+          execution_timeout: 45,
         },
         pre_input_map: { a: 'variables.a' },
         pre_output_variable_path: 'variables.pre',
+        pre_use_storage: true,
         post_python_code: null,
         post_input_map: {},
         post_output_variable_path: null,
+        post_use_storage: false,
+        sections: [cdtSection],
         prompt_configs: [
           {
             id: 400,
@@ -269,10 +311,10 @@ function makeDto(): GraphDto {
             field_expressions: { status: '== "ok"', count: '5' },
             field_manipulations: { x: 'x + 1' },
             next_node_id: 5,
-            section: null,
+            section: cdtSection.id,
           },
         ],
-        metadata: mCdt,
+        metadata: { ...mCdt, explanations: cdtExplanations },
       },
     ],
     schedule_trigger_node_list: [
@@ -307,6 +349,8 @@ function makeDto(): GraphDto {
         webhook_trigger_path: 'wh/abc',
         metadata: mWebhook,
         webhook_trigger: hookTrigger,
+        test_payload: hookTestPayload,
+        use_storage: true,
       },
     ],
     telegram_trigger_node_list: [
@@ -318,6 +362,7 @@ function makeDto(): GraphDto {
         fields: [{ id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
         metadata: mTelegram,
         webhook_trigger: null,
+        test_payload: {},
       },
     ],
     subgraph_node_list: [
@@ -369,7 +414,7 @@ function makeDesired(): GraphState {
         },
       },
       {
-        ...desiredBase('agent', 6, 'Agent', mAgent),
+        ...desiredBase('agent', 6, 'Agent', mAgent, 6),
         input_map: { query: 'variables.topic' },
         output_variable_path: 'variables.agent_out',
         type: 'agent',
@@ -450,7 +495,7 @@ function makeDesired(): GraphState {
                 dock_visible: true,
                 field_expressions: { status: '== "ok"', count: '5' },
                 field_manipulations: { x: 'x + 1' },
-                section: null,
+                section: cdtSection.id,
               },
             ],
             prompts: {
@@ -468,14 +513,18 @@ function makeDesired(): GraphState {
             next_error_node: null,
             pre_computation: {
               code: 'def main():\n    return 1',
-              libraries: ['requests'],
               input_map: { a: 'variables.a' },
               output_variable_path: 'variables.pre',
               secret_ids: [5],
+              execution_timeout: 45,
             },
-            post_computation: { code: '', libraries: [], input_map: {}, output_variable_path: null, secret_ids: [] },
+            post_computation: { code: '', input_map: {}, output_variable_path: null, secret_ids: [] },
+            pre_use_storage: true,
+            post_use_storage: false,
+            sections: [cdtSection],
           },
         },
+        explanations: cdtExplanations,
       },
       {
         ...desiredBase('schedule-trigger', 9, 'Repeat schedule', mSchedule),
@@ -496,7 +545,12 @@ function makeDesired(): GraphState {
       {
         ...desiredBase('webhook-trigger', 10, 'Hook', mWebhook),
         type: 'webhook-trigger',
-        data: { webhook_trigger: hookTrigger, python_code: { ...hookCode } },
+        data: {
+          webhook_trigger: hookTrigger,
+          python_code: { ...hookCode },
+          test_payload: hookTestPayload,
+          use_storage: true,
+        },
       },
       {
         ...desiredBase('telegram-trigger', 11, 'Bot', mTelegram),
@@ -505,6 +559,7 @@ function makeDesired(): GraphState {
           telegram_bot_api_key_secret_id: 21,
           webhook_trigger: null,
           fields: [{ id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' }],
+          test_payload: {},
         },
       },
       { ...desiredBase('subgraph', 12, 'Sub', mSubgraph), type: 'subgraph', data: { id: 55 } },
@@ -567,6 +622,59 @@ describe('buildRemoteState', () => {
     expect(connectionDiff.toUpdate).toStrictEqual([]);
   });
 
+  it('round-trips with the pusher\'s uuids: a compiled state keeps its own node uuids, only backend ids match', () => {
+    // A push binds compiled nodes to backend ids but never adopts the remote-<type>-<id> uuids, so
+    // every route ref in a comparable must be resolved to a backend id, not compared as a uuid.
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+
+    expectEmptyNodeDiff(getNodeDiff(remote, desired));
+    const connectionDiff = getConnectionDiff(remote, desired, buildUuidToBackendIdMap(desired.nodes));
+    expect(connectionDiff.toCreate).toStrictEqual([]);
+    expect(connectionDiff.toDelete).toStrictEqual([]);
+    expect(connectionDiff.toUpdate).toStrictEqual([]);
+  });
+
+  it('python code that ends with a newline matches the stripped text the server returns', () => {
+    // PythonCodeSerializer stores `code.strip()`: the source block's final newline never comes back.
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+    for (const node of desired.nodes) {
+      if (node.type === 'python') node.data.code = `${node.data.code}\n`;
+      if (node.type === 'webhook-trigger') node.data.python_code.code = `\n${node.data.python_code.code}\n\n`;
+      if (node.type === 'classification-decision-table' && node.data.table.pre_computation) {
+        node.data.table.pre_computation.code = `${node.data.table.pre_computation.code}\n`;
+      }
+    }
+
+    expectEmptyNodeDiff(getNodeDiff(remote, desired));
+  });
+
+  it('an edit inside python code is still an update', () => {
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+    const python = desired.nodes.find((node) => node.type === 'python');
+    if (python?.type !== 'python') return expect.unreachable('python node missing');
+    python.data.code = python.data.code.replace('return x', 'return  x');
+
+    const nodeDiff = getNodeDiff(remote, desired);
+    expectEmptyNodeDiff(nodeDiff, 'pythonNodes');
+    expect(nodeDiff.pythonNodes.toUpdate.map((update) => update.changedFields)).toEqual([['python_code.code']]);
+  });
+
+  it('a CDT whose default route really moved is an update, with compiled uuids', () => {
+    const remote = buildRemoteState(makeDto());
+    const desired = withCompiledUuids(makeDesired());
+    const cdt = desired.nodes.find((node) => node.type === 'classification-decision-table');
+    const agent = desired.nodes.find((node) => node.type === 'agent');
+    if (cdt?.type !== 'classification-decision-table' || agent === undefined) return expect.unreachable('nodes missing');
+    cdt.data.table.default_next_node = agent.id;
+
+    const nodeDiff = getNodeDiff(remote, desired);
+    expectEmptyNodeDiff(nodeDiff, 'classificationDecisionTableNodes');
+    expect(nodeDiff.classificationDecisionTableNodes.toUpdate).toHaveLength(1);
+  });
+
   it('reconstructs branch refs in node state, never as edges', () => {
     const remote = buildRemoteState(makeDto());
 
@@ -593,6 +701,25 @@ describe('buildRemoteState', () => {
     const waypointEdge = remote.edges[1]!;
     expect(waypointEdge.waypoints).toStrictEqual(waypoints);
     expect(waypointEdge.userAdjustedWaypoints).toBe(true);
+  });
+
+  it('reads the server-issued #N badge from node_number, not from metadata', () => {
+    const remote = buildRemoteState(makeDto());
+    expect(remote.nodes.find((node) => node.type === 'agent')?.nodeNumber).toBe(6);
+    // Start / End / Note are never numbered.
+    expect(remote.nodes.find((node) => node.type === 'start')?.nodeNumber).toBeUndefined();
+  });
+
+  it('a CDT whose only change is its explanations is an update', () => {
+    const remote = buildRemoteState(makeDto());
+    const desired = makeDesired();
+    const cdt = desired.nodes.find((node) => node.type === 'classification-decision-table');
+    if (cdt?.type !== 'classification-decision-table') return expect.unreachable('cdt missing');
+    cdt.explanations = {};
+
+    const nodeDiff = getNodeDiff(remote, desired);
+    expectEmptyNodeDiff(nodeDiff, 'classificationDecisionTableNodes');
+    expect(nodeDiff.classificationDecisionTableNodes.toUpdate).toHaveLength(1);
   });
 
   it('detects exactly one update when a single field changes', () => {

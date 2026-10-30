@@ -1,5 +1,6 @@
 /**
- * Remote-baseline converter: `GraphDto` (wire read shape) → `GraphState`.
+ * Remote-baseline converter: `GraphDto` (wire read shape) → `GraphState`. Ported from the
+ * frontend's load mappers (`visual-programming/utils/load/nodes/*.mapper.ts`).
  *
  * Inverse of the per-type `mapPayload` emission in `bulk-save.ts`, so a pusher can
  * diff a desired local state against what the backend currently holds. The projection
@@ -16,7 +17,7 @@
  * - Comparables JSON-compare objects verbatim, so pass-through objects (`input_map`,
  *   `python_code`, `metadata` sub-objects) round-trip only when the backend echoes
  *   key order — true for JSONFields persisted from our own payloads. `python_code`
- *   is rebuilt in canonical `{id, name, libraries, code, entrypoint}` order; `name`
+ *   is rebuilt in canonical `{id, name, code, entrypoint}` order; `name`
  *   falls back to `node_name` when the read shape omits it.
  * - Backend node ids are assumed unique across node types when resolving branch
  *   refs (`next_node_id` carries no type); on collision the first registered list wins.
@@ -26,7 +27,10 @@
 
 import type { GraphDto } from '../models/graph.js';
 import type { AgentNodeDto, AgentNodeTaskUi } from '../models/nodes/agent-node.js';
-import type { ClassificationDecisionTableNodeDto } from '../models/nodes/classification-decision-table-node.js';
+import {
+  normalizeCdtSectionColor,
+  type ClassificationDecisionTableNodeDto,
+} from '../models/nodes/classification-decision-table-node.js';
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
 import type { CustomPythonCode, DeclaredSecretRef, GetPythonCodeDto } from '../models/nodes/python-node.js';
 import type { ScheduleTriggerNodeDto } from '../models/nodes/schedule-trigger-node.js';
@@ -52,7 +56,6 @@ interface ExtractedMetadata {
   color: string;
   icon: string;
   size: { width: number; height: number };
-  nodeNumber?: number;
 }
 
 function extractNodeMetadata(metadata: unknown): ExtractedMetadata {
@@ -61,13 +64,14 @@ function extractNodeMetadata(metadata: unknown): ExtractedMetadata {
   const size = (record['size'] as { width: number; height: number } | undefined) ?? { width: 0, height: 0 };
   const color = typeof record['color'] === 'string' ? record['color'] : '';
   const icon = typeof record['icon'] === 'string' ? record['icon'] : '';
-  const nodeNumber = typeof record['nodeNumber'] === 'number' ? record['nodeNumber'] : undefined;
-  return { position, color, icon, size, ...(nodeNumber !== undefined ? { nodeNumber } : {}) };
+  return { position, color, icon, size };
 }
 
 interface BaseDtoFields {
   id: number;
   node_name?: string;
+  /** Server-issued #N badge; absent on Start / End / Note, null on rows not numbered yet. */
+  node_number?: number | null;
   input_map?: Record<string, unknown>;
   output_variable_path?: string | null;
   metadata?: unknown;
@@ -79,6 +83,8 @@ function baseNode(type: GraphNodeType, dto: BaseDtoFields): GraphNodeBase {
     backendId: dto.id,
     node_name: dto.node_name ?? '',
     ...extractNodeMetadata(dto.metadata),
+    // Mirrors the load mappers' `nodeNumber: dto.node_number ?? undefined`.
+    ...(dto.node_number != null ? { nodeNumber: dto.node_number } : {}),
     input_map: dto.input_map ?? {},
     output_variable_path: dto.output_variable_path ?? null,
   };
@@ -92,17 +98,28 @@ function toSecretIds(secrets: DeclaredSecretRef[] | undefined): number[] {
 /**
  * Rebuild `CustomPythonCode` in canonical key order; `name` is absent from the read shape.
  * `secret_ids` goes last — the diff comparable appends it there when a desired state omits it.
+ * `venv_id` / `execution_timeout` are kept only when the read shape carries them, so a graph
+ * saved before they existed still diffs clean.
  */
 function toCustomPythonCode(code: GetPythonCodeDto, fallbackName: string): CustomPythonCode {
   const withName = code as GetPythonCodeDto & { name?: string };
   return {
     ...(withName.id !== undefined ? { id: withName.id } : {}),
     name: withName.name ?? fallbackName,
-    libraries: withName.libraries,
     code: withName.code,
     entrypoint: withName.entrypoint,
+    ...(withName.venv_id !== undefined ? { venv_id: withName.venv_id } : {}),
+    ...(withName.execution_timeout !== undefined ? { execution_timeout: withName.execution_timeout } : {}),
     secret_ids: toSecretIds(withName.secrets),
   };
+}
+
+/** `readCdtExplanations`: the stored explanations of a CDT node, `{}` when none. */
+function readCdtExplanations(metadata: unknown): Record<string, unknown> {
+  const explanations = ((metadata ?? {}) as Record<string, unknown>)['explanations'];
+  return explanations !== null && typeof explanations === 'object' && !Array.isArray(explanations)
+    ? (explanations as Record<string, unknown>)
+    : {};
 }
 
 function toAgentTasks(dto: AgentNodeDto): AgentNodeTaskUi[] {
@@ -208,18 +225,29 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
     next_error_node: uuidOf(dto.next_error_node_id),
     pre_computation: {
       code: dto.pre_python_code?.code ?? '',
-      libraries: dto.pre_python_code?.libraries ?? [],
       input_map: dto.pre_input_map ?? {},
       output_variable_path: dto.pre_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.pre_python_code?.secrets),
+      ...(dto.pre_python_code?.execution_timeout !== undefined
+        ? { execution_timeout: dto.pre_python_code.execution_timeout }
+        : {}),
     },
     post_computation: {
       code: dto.post_python_code?.code ?? '',
-      libraries: dto.post_python_code?.libraries ?? [],
       input_map: dto.post_input_map ?? {},
       output_variable_path: dto.post_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.post_python_code?.secrets),
+      ...(dto.post_python_code?.execution_timeout !== undefined
+        ? { execution_timeout: dto.post_python_code.execution_timeout }
+        : {}),
     },
+    pre_use_storage: dto.pre_use_storage ?? false,
+    post_use_storage: dto.post_use_storage ?? false,
+    sections: (dto.sections ?? []).map((section) => ({
+      id: section.id,
+      name: section.name,
+      metadata: { color: normalizeCdtSectionColor(section.metadata?.color) },
+    })),
   };
 }
 
@@ -356,6 +384,8 @@ export function buildRemoteState(dto: GraphDto): GraphState {
         data: {
           webhook_trigger: node.webhook_trigger ?? null,
           python_code: toCustomPythonCode(node.python_code, node.node_name),
+          test_payload: node.test_payload ?? {},
+          use_storage: node.use_storage ?? false,
         },
       })
     ),
@@ -372,6 +402,7 @@ export function buildRemoteState(dto: GraphDto): GraphState {
             field_name: field.field_name,
             variable_path: field.variable_path,
           })),
+          test_payload: node.test_payload ?? {},
         },
       })
     ),
@@ -406,6 +437,7 @@ export function buildRemoteState(dto: GraphDto): GraphState {
         ...baseNode('classification-decision-table', node),
         type: 'classification-decision-table',
         data: { table: toCdtTableState(node, uuidOf) },
+        explanations: readCdtExplanations(node.metadata),
       })
     ),
     ...(dto.knowledge_node_list ?? []).map(

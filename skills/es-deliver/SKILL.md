@@ -22,6 +22,9 @@ or domain.
 | **ES + App** | The flow **plus a new app** you create to drive it. | The request names an interface or consumer to build: a UI, page, dashboard, form, chat, CLI, service, "expose an API for …", "so <someone> can use it". |
 | **ES + Integration** | The flow **plus changes to an existing app** so it calls the flow. | "add this to our app", "integrate into <existing system>", "in our frontend / website / product / service", "our existing …". |
 
+A **voice** request — talk to an agent by voice, put an agent on a phone number — is not a flow:
+hand it to `es-voice` (the agent itself comes from `es-catalog`).
+
 If genuinely ambiguous, ask exactly ONE clarifying question: *"Should I deliver just the EpicStaff
 flow, a new app on top of it, or wire it into an existing app?"* — then proceed. Otherwise infer
 and state the shape you chose in your first response.

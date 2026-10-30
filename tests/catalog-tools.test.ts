@@ -87,7 +87,8 @@ class MockBackend {
       const id = Number(path.split('/')[3]);
       return { status: 200, body: { id, name: 'Docs', description: '', instructions: '', owner_agent: null, allow_creation: false, python_tools: [], mcp_tools: [], storage_items: [], knowledge: [] } };
     }
-    if (/^PUT \/api\/surfaces\/\d+\/$/.test(key)) {
+    // EpicStaff has no PUT for surfaces any more — only PATCH.
+    if (/^PATCH \/api\/surfaces\/\d+\/$/.test(key)) {
       const id = Number(path.split('/')[3]);
       return { status: 200, body: { id, ...(body as Record<string, unknown>) } };
     }
@@ -263,6 +264,11 @@ describe('catalog tools (mock backend)', () => {
     const posted = post.body as { llm_config: number; default_surfaces: Array<{ surface: number; place: string }> };
     expect(posted.llm_config).toBe(55);
     expect(posted.default_surfaces[0]).toEqual({ surface: 7, place: 'flow' });
+    // The backend refuses the old single `instructions` text: one named instruction document instead.
+    expect(post.body).not.toHaveProperty('instructions');
+    expect((post.body as { instruction_list: unknown }).instruction_list).toEqual([
+      { name: 'Instruction_1.md', content: 'do things' },
+    ]);
 
     backend.overrides.set('POST /api/agent-definitions/', {
       status: 409,
@@ -273,6 +279,26 @@ describe('catalog tools (mock backend)', () => {
     );
     expect(conflict.ok).toBe(false);
     expect(conflict.error).toContain('update_agent');
+  });
+
+  it('update_agent sends new instructions as the instruction list; omitted ones are left alone', async () => {
+    const renamed = parse(await handlers.get('update_agent')!({ agent: 'Writer', name: 'Writer 2' }));
+    expect(renamed.ok).toBe(true);
+    const updated = parse(await handlers.get('update_agent')!({ agent: 'Writer', instructions: 'be brief' }));
+    expect(updated.ok).toBe(true);
+
+    const patches = backend.received.filter((r) => r.method === 'PATCH' && r.path.startsWith('/api/agent-definitions/'));
+    expect(patches).toHaveLength(2);
+    expect(patches[0]!.body).toEqual({ name: 'Writer 2' });
+    expect(patches[1]!.body).toEqual({ instruction_list: [{ name: 'Instruction_1.md', content: 'be brief' }] });
+  });
+
+  it('update_surface PATCHes the merged surface (the backend has no PUT)', async () => {
+    const result = parse(await handlers.get('update_surface')!({ surface: 7, instructions: 'Cite sources.' }));
+    expect(result.ok).toBe(true);
+    const patch = backend.received.find((r) => r.method === 'PATCH' && r.path === '/api/surfaces/7/');
+    expect(patch?.body).toMatchObject({ name: 'Docs', instructions: 'Cite sources.' });
+    expect(backend.received.some((r) => r.method === 'PUT')).toBe(false);
   });
 
   it('delete_surface warns that referencing flows will break on next push', async () => {
@@ -311,10 +337,11 @@ describe('catalog tools (mock backend)', () => {
     expect(result.error).toContain('graph RAG requires llm_config');
   });
 
-  it('delete_collection warns the pgvector index is dropped irreversibly', async () => {
+  it('delete_collection warns that retrieval stops and the collection sits in the recycle bin', async () => {
     const result = parse(await handlers.get('delete_collection')!({ collection_id: 42 }));
     expect(result.ok).toBe(true);
-    expect(result.data.next).toContain('pgvector');
+    expect(result.data.next).toContain('retrieval has stopped');
+    expect(result.data.next).toContain('recycle bin');
     expect(backend.received.some((r) => r.method === 'DELETE' && r.path === '/api/source-collections/42/')).toBe(true);
   });
 });

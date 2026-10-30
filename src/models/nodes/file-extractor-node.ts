@@ -1,9 +1,11 @@
 /** Ported from frontend `visual-programming/core/models/file-extractor.model.ts` + bulk-save emission in `visual-programming/utils/save/payload.ts`. */
 
+import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 
-export interface FileExtractorNodeDto {
+export interface FileExtractorNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  created_at: string;
   node_name: string;
   graph: number;
   input_map: Record<string, unknown>;

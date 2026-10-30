@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import type { UserSession } from '../api/secrets.js';
+import type { UserSession } from '../api/user-session.js';
 import type { Config } from '../config.js';
 import type { StateStore } from '../state/store.js';
 import { logger } from '../util/logger.js';
@@ -13,9 +13,9 @@ import { ApiError } from './errors.js';
  *
  *   1. If a persisted API key exists, validate it (GET auth/api-key/validate/).
  *   2. Otherwise obtain a user session — the stored JWT access token while it is unexpired,
- *      else a refresh through the stored `auth.refresh` cookie, and only when both fail a
- *      login with credentials (POST auth/login/ → access token in the body, refresh token in
- *      the HttpOnly `auth.refresh` cookie) — then either:
+ *      else a refresh through the stored refresh cookie, and only when both fail a login with
+ *      credentials (POST auth/login/ → access token in the body, refresh token in the HttpOnly
+ *      refresh cookie, see REFRESH_COOKIE_NAMES) — then either:
  *      a. mint a dedicated API key (POST profile/api-keys/ with the access token — the
  *         raw key is returned exactly once), persist it; or
  *      b. if profile/api-keys/ doesn't exist (a legacy backend that predates the
@@ -33,7 +33,7 @@ import { ApiError } from './errors.js';
  */
 interface LoginResponse {
   access: string;
-  /** Only legacy backends return it in the body; current ones set the `auth.refresh` cookie. */
+  /** Only legacy backends return it in the body; current ones set the refresh cookie. */
   refresh?: string;
 }
 
@@ -52,8 +52,14 @@ interface ApiKeyMintResponse {
   api_key: string;
 }
 
-/** Name of the HttpOnly refresh-token cookie (rbac/identity/refresh_cookie.py). */
-export const REFRESH_COOKIE_NAME = 'auth.refresh';
+/**
+ * Names of the HttpOnly refresh-token cookie (rbac/identity/refresh_cookie.py): a server that sets
+ * Secure cookies (HTTPS) uses `__Host-auth.refresh` on `Path=/` and expires the old name in the
+ * same response; over plain http it is `auth.refresh` on `/api/auth/`. Only the server knows which
+ * applies, so the token is read from whichever it set and sent back under both names — the server
+ * reads only its own name, which then appears exactly once, as it requires.
+ */
+export const REFRESH_COOKIE_NAMES = ['__Host-auth.refresh', 'auth.refresh'] as const;
 
 /**
  * A key this process minted that is rejected sooner than this is not replaced by another
@@ -70,17 +76,29 @@ interface JwtSession {
   refresh: string | null;
 }
 
-/** Extract `auth.refresh` from Set-Cookie headers, if the response set it. */
+/**
+ * The refresh token the response set, if any. An empty value is the server expiring a cookie
+ * (the old name over HTTPS, or a logout), never a token, so it is skipped.
+ */
 function refreshTokenFromCookies(headers: Headers): string | null {
+  const valueByName = new Map<string, string>();
   for (const cookie of headers.getSetCookie()) {
     const [pair] = cookie.split(';');
     const separator = pair?.indexOf('=') ?? -1;
-    if (pair !== undefined && separator > 0 && pair.slice(0, separator).trim() === REFRESH_COOKIE_NAME) {
-      const value = pair.slice(separator + 1).trim();
-      return value === '' ? null : value;
-    }
+    if (pair === undefined || separator <= 0) continue;
+    const value = pair.slice(separator + 1).trim();
+    if (value !== '') valueByName.set(pair.slice(0, separator).trim(), value);
+  }
+  for (const name of REFRESH_COOKIE_NAMES) {
+    const value = valueByName.get(name);
+    if (value !== undefined) return value;
   }
   return null;
+}
+
+/** The `Cookie` entries that carry `refreshToken` to auth/refresh/ under every refresh-cookie name. */
+function refreshCookies(refreshToken: string): Record<string, string> {
+  return Object.fromEntries(REFRESH_COOKIE_NAMES.map((name) => [name, refreshToken]));
 }
 
 /** True when the JWT's `exp` is past (or within the safety margin). Unparseable ⇒ expired. */
@@ -229,7 +247,7 @@ export class AuthService implements UserSession {
 
   /**
    * Exchange the refresh token for a new access token (POST auth/refresh/). Current
-   * backends read the token only from the `auth.refresh` cookie; legacy ones read the
+   * backends read the token only from the refresh cookie; legacy ones read the
    * `refresh` body field — both are sent. Returns null when the refresh token itself is
    * rejected (expired or revoked), after clearing the session.
    */
@@ -239,7 +257,7 @@ export class AuthService implements UserSession {
     try {
       refreshed = await this.client.post<RefreshResponse>('auth/refresh/', {
         skipAuth: true,
-        cookies: { [REFRESH_COOKIE_NAME]: refreshToken },
+        cookies: refreshCookies(refreshToken),
         body: { refresh: refreshToken },
         onResponseHeaders: (headers) => {
           rotatedCookie = refreshTokenFromCookies(headers);

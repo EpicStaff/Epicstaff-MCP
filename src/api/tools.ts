@@ -1,4 +1,5 @@
 import type { ApiClient } from '../http/client.js';
+import type { AuthorshipFields } from '../models/authorship.js';
 
 /**
  * Tools API — ported from features/tools/services/
@@ -17,12 +18,26 @@ export interface ToolConfig {
   configuration: Record<string, unknown>;
 }
 
-export interface PythonCodeTool {
+/**
+ * Nested `python_code` of a python-code tool (`CreatePythonCodeBody`). EpicStaff replaced per-code
+ * `libraries` with a virtual environment: `venv_id` (null = the sandbox's default one).
+ */
+export interface PythonCodeToolCode {
+  code: string;
+  entrypoint: string;
+  venv_id?: number | null;
+  global_kwargs?: Record<string, unknown>;
+  secret_ids?: number[];
+  /** Seconds one run may take. Omitted, a new tool gets the backend default and an existing one keeps its own. */
+  execution_timeout?: number;
+}
+
+export interface PythonCodeTool extends Partial<AuthorshipFields> {
   id: number;
   name: string;
   description: string;
   variables?: unknown[];
-  python_code?: { code: string; entrypoint: string; libraries: string[]; global_kwargs?: Record<string, unknown> };
+  python_code?: PythonCodeToolCode;
   /** Catalog tool shipped with EpicStaff (visible to every org, not editable). */
   built_in?: boolean;
   is_favorite?: boolean;
@@ -49,12 +64,7 @@ export interface CreatePythonCodeToolRequest {
   name: string;
   description: string;
   variables: unknown[];
-  python_code: {
-    code: string;
-    entrypoint: string;
-    libraries: string[];
-    global_kwargs?: Record<string, unknown>;
-  };
+  python_code: PythonCodeToolCode;
   use_storage?: boolean;
   labels?: number[];
 }
@@ -129,11 +139,29 @@ export class ToolsApi {
     return this.client.patch(`python-code-tool/${id}/`, { body: request });
   }
 
+  async getPythonCodeTool(id: number): Promise<PythonCodeTool> {
+    return this.client.get(`python-code-tool/${id}/`);
+  }
+
+  /** Moves the tool to the recycle bin; built-in catalog tools cannot be deleted. */
+  async deletePythonCodeTool(id: number): Promise<void> {
+    await this.client.delete<void>(`python-code-tool/${id}/`);
+  }
+
   async createMcpTool(request: CreateMcpToolRequest): Promise<McpTool> {
     return this.client.post('mcp-tools/', { body: request });
   }
 
   async updateMcpTool(id: number, request: Partial<CreateMcpToolRequest>): Promise<McpTool> {
     return this.client.patch(`mcp-tools/${id}/`, { body: request });
+  }
+
+  async getMcpTool(id: number): Promise<McpTool> {
+    return this.client.get(`mcp-tools/${id}/`);
+  }
+
+  /** Moves the tool to the recycle bin. */
+  async deleteMcpTool(id: number): Promise<void> {
+    await this.client.delete<void>(`mcp-tools/${id}/`);
   }
 }

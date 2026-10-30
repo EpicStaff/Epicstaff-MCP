@@ -14,13 +14,19 @@ import { connectTools } from './helpers/mcp-harness.js';
  */
 const LOCAL_TOOLS = new Set(['init_flow', 'validate_flow', 'build_flow', 'describe_node_types']);
 
-type JsonSchema = { type?: string; enum?: unknown[]; properties?: Record<string, JsonSchema>; required?: string[]; items?: JsonSchema; anyOf?: JsonSchema[] };
+/** Valid samples for required arguments whose schema carries a pattern 'sample' does not match. */
+const SAMPLE_OVERRIDES: Record<string, unknown> = { account_sid: `AC${'0'.repeat(32)}` };
+
+type JsonSchema = { type?: string; const?: unknown; format?: string; enum?: unknown[]; properties?: Record<string, JsonSchema>; required?: string[]; items?: JsonSchema; anyOf?: JsonSchema[] };
 
 function sampleValue(schema: JsonSchema, scratchDir: string, key: string): unknown {
+  if (key in SAMPLE_OVERRIDES) return SAMPLE_OVERRIDES[key];
+  if (schema.const !== undefined) return schema.const;
   if (schema.enum?.length) return schema.enum[0];
   const type = schema.type ?? schema.anyOf?.[0]?.type;
   switch (type) {
     case 'string':
+      if (schema.format === 'uri') return 'http://sample.invalid/';
       return /path|dir/.test(key) ? join(scratchDir, key) : 'sample';
     case 'number':
     case 'integer':
@@ -73,9 +79,9 @@ describe('server started without a valid environment', () => {
     expect(body.hint).toMatch(/EPICSTAFF_BASE_URL/);
   });
 
-  it('registers all 44 tools and every backend tool reports the configuration error', async () => {
+  it('registers all 106 tools and every backend tool reports the configuration error', async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(44);
+    expect(tools).toHaveLength(106);
     for (const tool of tools) {
       if (LOCAL_TOOLS.has(tool.name)) continue;
       const schema = tool.inputSchema as JsonSchema;

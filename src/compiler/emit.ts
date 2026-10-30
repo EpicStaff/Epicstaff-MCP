@@ -36,6 +36,10 @@
  *    plan per table name a key-value node uses (found by name, created if missing).
  *  - collection RAGs:    `{$ref: "<collection ref>#rag:<naive|graph>"}` (see
  *    `ragRefKey` in artifact.ts) — the RAG a knowledge-retriever node searches.
+ *  - venvs:              `{$ref: "venvs.existing:<venv name>"}` — the `venv:` of a python node
+ *    or python tool, sitting in `python_code.venv_id`. Venvs are never defined in flow
+ *    source, so every one is a `resolve-existing` plan (kind `venv`); `venv: null` emits a
+ *    literal `venv_id: null` (the default venv) and an omitted `venv:` emits no `venv_id`.
  *
  * Numeric GraphState fields that carry refs (`agent_definition`, `surface_list`
  * entries, subgraph `data.id`, `default_llm_config`, inline-surface tool /
@@ -59,6 +63,8 @@
  *    neither.
  *  - classification category descriptions — the CDT table state has no
  *    description field.
+ *  - python `libraries` (nodes and python tools) — EpicStaff replaced per-code
+ *    libraries with virtual environments (venvs, the `venv:` key); the list is not sent.
  *
  * Cross-section cycle: `surfaces[].owner_agent` points forward to the agents
  * section while `agents[].default_surfaces` points back at surfaces. The plan
@@ -88,7 +94,9 @@ import type {
   GraphState,
   TaskGraphNodeData,
 } from '../graph/graph-state.js';
+import { isNumberedNodeType } from '../graph/node-number.js';
 import { mintTempId } from '../graph/temp-id.js';
+import { toInstructionList } from '../api/agent-definitions.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
 import { isWritableNode } from '../flow-source/schema/index.js';
 import { ragRefKey, type EntityKind, type EntityPlan, type RagPlan, type SymbolicRef } from './artifact.js';
@@ -104,16 +112,6 @@ import {
   type LayoutNode,
 } from './layout.js';
 import { secretName, type BuiltinToolRef, type EnvRef, type ModelRef, type StorageFileRef } from './template-refs.js';
-
-export interface ConditionalEdgePlan {
-  /** Client uuid of the source node — matches a `GraphState` node id. */
-  sourceNode: string;
-  /** Symbolic name of the source node (for human-readable summaries). */
-  sourceNodeName: string;
-  /** Shaped like `CreateConditionalEdgeRequest.python_code` (src/api/… models). */
-  python_code: { code: string; entrypoint: string; libraries: string[] };
-  input_map: Record<string, unknown>;
-}
 
 export interface EmitResult {
   entities: EntityPlan[];
@@ -232,6 +230,17 @@ class RefRegistry {
     }));
   }
 
+  /**
+   * `python_code.venv_id` for a source `venv:` value: a `{$ref}` to the named venv, `null` for the
+   * default venv, or no field at all when the source leaves the venv unstated.
+   */
+  venvField(venv: string | null | undefined): { venv_id?: number | null } {
+    if (venv === undefined) return {};
+    if (venv === null) return { venv_id: null };
+    // SymbolicRef in a numeric position — substituted by the pusher (artifact.ts).
+    return { venv_id: this.ref('venvs', { existing: venv }) as unknown as number };
+  }
+
   keyValueTablePlans(): EntityPlan[] {
     return [...this.keyValueTableNames].sort().map((tableName) => ({
       key: entityKey('key_value_tables', tableName),
@@ -343,10 +352,31 @@ function buildToolConfigPlans(source: FlowSource): EntityPlan[] {
   });
 }
 
-/** Payload template shaped like `CreatePythonCodeToolRequest` (src/api/tools.ts). */
+/**
+ * EpicStaff no longer installs per-code `libraries`: code runs in a virtual environment (venv),
+ * chosen per code block. The list in flow source is not sent, so say so instead of dropping it.
+ */
+function librariesNotInstalledWarning(atPath: string, hasVenv: boolean): Diagnostic {
+  return makeWarning(
+    atPath,
+    'EpicStaff no longer installs per-code libraries — code runs in a virtual environment (venv). ' +
+      (hasVenv
+        ? 'These libraries are NOT sent: make sure the venv named in `venv:` holds them, then remove `libraries`.'
+        : 'These libraries are NOT sent: create a venv holding them (create_venv) and reference it with ' +
+          '`venv: "<name>"`, then remove `libraries`.'),
+  );
+}
+
+/**
+ * Payload template shaped like `CreatePythonCodeToolRequest` (src/api/tools.ts). Divergence: the
+ * frontend always sends `python_code.venv_id`; here it is sent only when the source states `venv:`,
+ * so a new tool without one runs in the default venv and an update keeps the venv a user selected
+ * in the editor (the backend applies only the python-code fields it receives).
+ */
 async function buildPythonToolPlans(
   source: FlowSource,
   flowDir: string,
+  registry: RefRegistry,
   diagnostics: Diagnostic[],
 ): Promise<EntityPlan[]> {
   const plans: EntityPlan[] = [];
@@ -360,12 +390,17 @@ async function buildPythonToolPlans(
         ),
       );
     }
+    if (tool.libraries.length > 0) {
+      diagnostics.push(
+        librariesNotInstalledWarning(`tools.python_code_tools.${name}.libraries`, typeof tool.venv === 'string'),
+      );
+    }
     plans.push(
       upsertPlan('tools.python_code_tools', name, 'python_code_tool', tool, {
         name,
         description: tool.description,
         variables: [],
-        python_code: { code, entrypoint: tool.entrypoint, libraries: tool.libraries },
+        python_code: { code, entrypoint: tool.entrypoint, ...registry.venvField(tool.venv) },
       }),
     );
   }
@@ -500,7 +535,8 @@ function buildAgentPlans(source: FlowSource, registry: RefRegistry): EntityPlan[
   return Object.entries(source.agents).map(([name, agent]) =>
     upsertPlan('agents', name, 'agent_definition', agent, {
       name,
-      instructions: agent.instructions,
+      // The backend takes instructions as a list of named documents; flow source holds one text.
+      instruction_list: toInstructionList(agent.instructions),
       ...(agent.description !== undefined ? { description: agent.description } : {}),
       llm_config: registry.ref('llm_configs', agent.llm_config),
       ...(agent.fcm_llm_config !== undefined
@@ -590,7 +626,6 @@ interface GraphBuildResult {
   nodes: GraphNode[];
   edges: GraphEdgeState[];
   layoutConnections: LayoutConnection[];
-  conditionalEdges: ConditionalEdgePlan[];
 }
 
 async function buildGraph(
@@ -612,7 +647,6 @@ async function buildGraph(
   const nodes: GraphNode[] = [];
   const edges: GraphEdgeState[] = [];
   const layoutConnections: LayoutConnection[] = [];
-  const conditionalEdges: ConditionalEdgePlan[] = [];
 
   const seenEdges = new Set<string>();
   const pushEdge = (edge: GraphEdgeState, layoutSourcePortId?: string): void => {
@@ -633,15 +667,17 @@ async function buildGraph(
     });
   };
 
+  // The #N badge hint of new nodes, in authoring order. The server issues the real numbers and
+  // only sorts by the hint; Start, End and Note nodes are never numbered.
   let nodeNumber = 0;
   for (const [nodeName, parsedNode] of Object.entries(source.flow.nodes)) {
-    nodeNumber += 1;
     const uuid = uuidOf(nodeName);
     const nodePath = `flow.nodes.${nodeName}`;
     // Forbidden legacy types are load-time ERRORS — emit never sees them.
     invariant(isWritableNode(parsedNode), 'forbidden node type');
     const node = parsedNode;
     const type: GraphNodeType = node.type;
+    if (isNumberedNodeType(type)) nodeNumber += 1;
 
     const base = {
       id: uuid,
@@ -652,7 +688,7 @@ async function buildGraph(
       color: NODE_COLORS[type],
       icon: NODE_ICONS[type],
       size: NODE_SIZES[type] ?? { ...DEFAULT_NODE_SIZE },
-      nodeNumber,
+      ...(isNumberedNodeType(type) ? { nodeNumber } : {}),
       input_map: ('input_map' in node ? node.input_map : {}) as Record<string, unknown>,
       output_variable_path:
         'output_variable_path' in node && node.output_variable_path !== undefined
@@ -726,10 +762,13 @@ async function buildGraph(
 
       case 'python': {
         const code = node.code ?? (await readFlowFile(flowDir, node.code_file as string));
+        if (node.libraries.length > 0) {
+          diagnostics.push(librariesNotInstalledWarning(`${nodePath}.libraries`, typeof node.venv === 'string'));
+        }
         nodes.push({
           ...base,
           type: 'python',
-          data: { name: nodeName, libraries: node.libraries, code, entrypoint: node.entrypoint },
+          data: { name: nodeName, code, entrypoint: node.entrypoint, ...registry.venvField(node.venv) },
           test_input: {},
         });
         break;
@@ -783,7 +822,7 @@ async function buildGraph(
           type: 'webhook-trigger',
           data: {
             webhook_trigger: null,
-            python_code: { name: nodeName, libraries: [], code: '', entrypoint: 'main' },
+            python_code: { name: nodeName, code: '', entrypoint: 'main' },
           },
         });
         break;
@@ -990,21 +1029,10 @@ async function buildGraph(
   }
 
   for (const edge of source.flow.edges) {
-    if (edge.condition !== undefined) {
-      const code =
-        edge.condition.code ?? (await readFlowFile(flowDir, edge.condition.code_file as string));
-      conditionalEdges.push({
-        sourceNode: uuidOf(edge.from),
-        sourceNodeName: edge.from,
-        python_code: { code, entrypoint: edge.condition.entrypoint, libraries: [] },
-        input_map: edge.condition.input_map,
-      });
-      continue;
-    }
-    pushEdge({ sourceNodeId: uuidOf(edge.from), targetNodeId: uuidOf(edge.to as string) });
+    pushEdge({ sourceNodeId: uuidOf(edge.from), targetNodeId: uuidOf(edge.to) });
   }
 
-  return { nodes, edges, layoutConnections, conditionalEdges };
+  return { nodes, edges, layoutConnections };
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,13 +1120,13 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
 
   const llmPlans = buildLlmConfigPlans(source, registry);
   const toolConfigPlans = buildToolConfigPlans(source);
-  const pythonToolPlans = await buildPythonToolPlans(source, flowDir, diagnostics);
+  const pythonToolPlans = await buildPythonToolPlans(source, flowDir, registry, diagnostics);
   const mcpToolPlans = buildMcpToolPlans(source, diagnostics);
   const knowledgePlans = buildKnowledgePlans(source, flowDir, registry);
   const surfacePlans = buildSurfacePlans(source, registry);
   const agentPlans = buildAgentPlans(source, registry);
 
-  const { nodes, edges, layoutConnections, conditionalEdges } = await buildGraph(
+  const { nodes, edges, layoutConnections } = await buildGraph(
     source,
     flowDir,
     registry,
@@ -1109,9 +1137,10 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
   // Dependency order per the artifact contract; every section's
   // resolve-existing plans precede its local upserts.
   const entities: EntityPlan[] = [
-    // Secrets and key-value tables are leaves: nothing they hold references another entity.
+    // Secrets, key-value tables and venvs are leaves: nothing they hold references another entity.
     ...registry.secretPlans(),
     ...registry.keyValueTablePlans(),
+    ...registry.existingPlans('venvs', 'venv'),
     ...registry.existingPlans('llm_configs', 'llm_config'),
     ...llmPlans,
     ...registry.existingPlans('tools.tool_configs', 'tool_config'),
@@ -1142,15 +1171,6 @@ export async function emitFlow(source: FlowSource, flowDir: string): Promise<Emi
     edges: edges.length,
     entities: { total: entities.length, ...plansPerAction },
     layout: layoutBounds(nodes),
-    /**
-     * Conditional edges are NOT GraphEdgeState — the backend persists them
-     * through the dedicated conditional-edge endpoint (see
-     * `CreateConditionalEdgeRequest` in src/models/nodes/conditional-edge.ts).
-     * artifact.ts is frozen, so they travel via the summary: the pusher reads
-     * `summary.conditionalEdges`, maps each `sourceNode` uuid to its backend
-     * node id after bulk-save, and POSTs one conditional edge per entry.
-     */
-    conditionalEdges,
   };
 
   return { entities, graph: { nodes, edges }, summary, diagnostics };

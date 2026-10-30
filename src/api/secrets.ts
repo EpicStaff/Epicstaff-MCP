@@ -1,15 +1,20 @@
 import type { ApiClient } from '../http/client.js';
 import { ApiError } from '../http/errors.js';
+import type { UserSummary } from '../models/authorship.js';
+import { type Paginated, unwrap } from './paging.js';
+import { type UserSession, withUserSession } from './user-session.js';
 
 /**
  * Org Secrets API — ported from shared/services/secrets/secrets-api.service.ts.
  *
- * `secrets/` is JWT-only on the backend (SecretViewSet → DenyApiKeyAuth): an API key
- * can neither list nor create secrets. Every call therefore carries the user-session
- * bearer token from {@link UserSession}, never the X-Api-Key the rest of the MCP uses.
+ * `secrets/` is closed to personal API keys on the backend (SecretViewSet →
+ * DenyPersonalAndSystemApiKeys): an API key can neither list nor create secrets. Every call
+ * therefore carries the user-session bearer token from {@link UserSession}, never the
+ * X-Api-Key the rest of the MCP uses.
  *
  * A Secret's name and value are immutable. The response exposes only `tail` (the last
- * 4 characters of values of 9+ characters), never the value.
+ * 4 characters of values of 9+ characters), never the value. Deleting moves the secret to the
+ * recycle bin (RecycleBinActionsMixin).
  */
 export interface Secret {
   id: number;
@@ -17,21 +22,11 @@ export interface Secret {
   /** Last 4 characters of the value, or '' for values shorter than 9 characters. */
   tail: string;
   metadata?: Record<string, unknown>;
+  created_by?: UserSummary | null;
   created_at?: string;
   updated_at?: string;
-}
-
-/** Supplies a JWT access token for JWT-only routes (implemented by AuthService). */
-export interface UserSession {
-  /** A currently valid access token — refreshed or re-established as needed. */
-  accessToken(): Promise<string>;
-  /** The token was rejected (401): drop it and return a fresh one. */
-  renewAccessToken(): Promise<string>;
-}
-
-interface Paginated<T> {
-  count: number;
-  results: T[];
+  /** How many configs, tools and nodes reference this secret (SecretSerializer.usage_count). */
+  usage_count?: number;
 }
 
 /** Mirrors the backend's tail rule (tables/services/secrets/encryption.py). */
@@ -49,10 +44,10 @@ export class SecretsApi {
   ) {}
 
   async list(): Promise<Secret[]> {
-    const response = await this.withSession((bearerToken) =>
+    const response = await withUserSession(this.session, (bearerToken) =>
       this.client.get<Paginated<Secret> | Secret[]>('secrets/', { bearerToken, query: { limit: 1000 } }),
     );
-    return Array.isArray(response) ? response : response.results;
+    return unwrap(response);
   }
 
   async findByName(name: string): Promise<Secret | undefined> {
@@ -65,7 +60,7 @@ export class SecretsApi {
    */
   async create(name: string, value: string): Promise<Secret> {
     try {
-      return await this.withSession((bearerToken) =>
+      return await withUserSession(this.session, (bearerToken) =>
         this.client.post<Secret>('secrets/', { bearerToken, body: { name, value } }),
       );
     } catch (error) {
@@ -86,14 +81,8 @@ export class SecretsApi {
     }
   }
 
-  private async withSession<T>(call: (bearerToken: string) => Promise<T>): Promise<T> {
-    try {
-      return await call(await this.session.accessToken());
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        return call(await this.session.renewAccessToken());
-      }
-      throw error;
-    }
+  /** Move a secret to the recycle bin (`deleteSecret`). Configs and code that read it lose access. */
+  async delete(id: number): Promise<void> {
+    await withUserSession(this.session, (bearerToken) => this.client.delete<void>(`secrets/${id}/`, { bearerToken }));
   }
 }

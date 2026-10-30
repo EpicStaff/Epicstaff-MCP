@@ -17,7 +17,8 @@ One responsibility: materialize the local flow on the server, safely.
    knowledge documents, attaches RAG, and bulk-saves the graph with the computed layout.
    Repushing updates in place — the lockfile (`flow.lock.json`) maps names to backend ids. A
    push with nothing to change reports `changed: false` / "no changes" and does not touch the
-   graph (its `save_version` stays put). If the lockfile's graph no longer exists (deleted in the
+   graph (its `save_version` stays put); otherwise `nodes.changedFields` names, per rewritten node,
+   the fields that differed (e.g. `python_code.code`). If the lockfile's graph no longer exists (deleted in the
    editor, or a lockfile from another instance), push recreates it, re-verifies the locked entity
    ids, and says so in `warnings` — relay that to the user. If push then reports that an entity
    "already exists in this organization, and flow.lock.json does not point at it", do not work

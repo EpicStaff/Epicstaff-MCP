@@ -1,9 +1,11 @@
 import type { ApiClient } from '../http/client.js';
+import type { AuthorshipFields } from '../models/authorship.js';
 
 /**
  * AgentDefinition API — the NEW first-class Agent entity (CrewAI-replacement model).
- * Ported from features/agent-definitions/services/agent-definitions-api.service.ts
- * and models/agent-definition.model.ts. Not the legacy /agents/ CrewAI agent.
+ * Ported from features/agent-definitions/services/agent-definitions-api.service.ts,
+ * models/agent-definition.model.ts and utils/instructions-file.utils.ts (instruction
+ * naming). Not the legacy /agents/ CrewAI agent.
  */
 export type AgentSurfacePlace = 'all' | 'flow' | 'chat';
 
@@ -12,11 +14,19 @@ export interface AgentDefaultSurface {
   place: AgentSurfacePlace;
 }
 
-export interface AgentDefinition {
+/** One named instruction document. List order = the order the agent reads them in. */
+export interface AgentInstruction {
+  name: string;
+  content: string;
+}
+
+export interface AgentDefinition extends AuthorshipFields {
   id: number;
-  organization: number;
+  org: number;
   name: string;
   description: string;
+  instruction_list: AgentInstruction[];
+  /** Read-only: every `instruction_list` content joined by a blank line, compiled by the backend. */
   instructions: string;
   llm_config: number | null;
   fcm_llm_config: number | null;
@@ -27,12 +37,18 @@ export interface AgentDefinition {
   max_execution_time: number;
   cache: boolean;
   max_retry_limit: number;
-  default_temperature: number;
+  default_temperature: number | null;
+  /** Read-only creation time; null for agents created before it was recorded. */
+  created_at: string | null;
 }
 
+/**
+ * Write shape. The backend refuses the old single `instructions` text (it is read-only now);
+ * instructions travel as `instruction_list`.
+ */
 export interface CreateAgentDefinitionRequest {
   name: string;
-  instructions: string;
+  instruction_list?: AgentInstruction[];
   description?: string;
   llm_config?: number | null;
   fcm_llm_config?: number | null;
@@ -43,7 +59,23 @@ export interface CreateAgentDefinitionRequest {
   max_execution_time?: number;
   cache?: boolean;
   max_retry_limit?: number;
-  default_temperature?: number;
+  default_temperature?: number | null;
+}
+
+/** `nextDefaultInstructionName`: first free `Instruction_N.md`, starting at N = list length + 1. */
+export function nextDefaultInstructionName(list: readonly AgentInstruction[]): string {
+  const taken = new Set(list.map((instruction) => instruction.name.trim().toLowerCase()));
+  let number = list.length + 1;
+  while (taken.has(`instruction_${number}.md`)) number++;
+  return `Instruction_${number}.md`;
+}
+
+/**
+ * One instruction document holding `instructions`, named as the editor names a first document;
+ * blank text means no document. Flow source and the agent tools take a single instructions text.
+ */
+export function toInstructionList(instructions: string): AgentInstruction[] {
+  return instructions.trim() === '' ? [] : [{ name: nextDefaultInstructionName([]), content: instructions }];
 }
 
 interface Paginated<T> {

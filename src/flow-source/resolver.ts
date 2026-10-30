@@ -231,9 +231,7 @@ export function resolveFlow(source: FlowSource): ResolvedFlow {
   // --- edges ---------------------------------------------------------------
   source.flow.edges.forEach((edge, index) => {
     resolveNodeName(edge.from, `flow.edges[${index}].from`);
-    if (edge.to !== undefined) {
-      resolveNodeName(edge.to, `flow.edges[${index}].to`);
-    }
+    resolveNodeName(edge.to, `flow.edges[${index}].to`);
   });
 
   return { flowName: source.meta.name, symbols, references, diagnostics };

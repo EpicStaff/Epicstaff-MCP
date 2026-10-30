@@ -57,6 +57,8 @@ export function collectRefs(value: unknown, into: Set<string> = new Set()): Set<
 export type EntityKind =
   | 'secret'
   | 'key_value_table'
+  /** A virtual environment python code runs in — only ever an `existing:` reference (`venv:`). */
+  | 'venv'
   | 'llm_config'
   | 'tool_config'
   | 'python_code_tool'

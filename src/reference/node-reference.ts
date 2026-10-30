@@ -48,6 +48,9 @@ export const NODE_REFERENCE: Record<FlowNodeType, NodeReference> = {
     whenToUse: 'Deterministic transforms, glue, list/index manipulation, calling out to libraries.',
     caveats: [
       'Provide exactly one of `code` / `code_file`; the `entrypoint` function receives the mapped inputs.',
+      'Third-party packages come from a virtual environment: set `venv: "<name>"` (list_venvs / create_venv) — ' +
+        '`libraries:` is no longer installed. venv: null = the default venv; omitted = keep the current one (new ' +
+        'code gets the default). A venv still building makes the code wait; a failed build makes it fail.',
     ],
   },
   end: {

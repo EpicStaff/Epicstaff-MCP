@@ -8,7 +8,7 @@
  * Strategy — SHALLOW PULL: every referenced entity (agent definition, surface,
  * llm config, python/MCP tool, knowledge collection, subgraph flow) is
  * written as an `{existing: "<remote name>"}` reference; a key-value node names its
- * table directly. Those entities exist
+ * table directly and a python node its virtual environment (`venv:`). Those entities exist
  * remotely by definition, so referencing them is both simpler and safer than
  * re-authoring: the next push resolves them by name, never re-creates them,
  * and no entity content hashes have to be reconstructed — which guarantees an
@@ -18,7 +18,8 @@
  *
  * Known lossy pulls (each emits a warning; none affect graph topology):
  *  - agent-node sub-tasks; task-node output_schema / remember_output;
- *  - python-node test_input / use_storage; declared python secrets (kept on repush);
+ *  - python-node test_input / use_storage; declared python secrets and execution
+ *    timeout (both kept on repush);
  *  - webhook-trigger python code + input map; telegram-trigger field mappings; the
  *    attached webhook trigger and telegram bot-token secret are not representable
  *    but are kept on repush (see `inheritUnrepresentableFields` in pusher/graph.ts);
@@ -32,9 +33,7 @@
  *
  * Lock seeding matches what the pusher writes (src/pusher/graph.ts): node
  * entries under `nodes.<node_name>` carry the backend id and `contentHash({})`
- * (the pusher never hashes node content), and conditional-edge entries under
- * `conditional_edges.<source_node_name>` hash the exact request body the next
- * compile + push would produce.
+ * (the pusher never hashes node content).
  */
 import { existsSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
@@ -65,6 +64,8 @@ import type { LlmConfig } from '../api/llm.js';
 import type { SourceCollection } from '../api/knowledge.js';
 import type { Surface } from '../api/surfaces.js';
 import type { McpTool, PythonCodeTool } from '../api/tools.js';
+import type { Venv } from '../api/venvs.js';
+import { describeUser, type UserSummary } from '../models/authorship.js';
 import { contentHash, setEntity, writeLock, LOCKFILE_NAME, type FlowLock } from './lockfile.js';
 import { SYMBOLIC_NAME_PATTERN } from './schema/common.js';
 
@@ -103,6 +104,10 @@ export interface DecompilerKeyValueTablesApi {
   list(): Promise<KeyValueTable[]>;
 }
 
+export interface DecompilerVenvsApi {
+  list(): Promise<Venv[]>;
+}
+
 export interface DecompilerDeps {
   graphs: DecompilerGraphsApi;
   agentDefinitions: DecompilerAgentDefinitionsApi;
@@ -111,6 +116,26 @@ export interface DecompilerDeps {
   tools: DecompilerToolsApi;
   knowledge: DecompilerKnowledgeApi;
   keyValueTables: DecompilerKeyValueTablesApi;
+  venvs: DecompilerVenvsApi;
+}
+
+/** Read-only authorship of a pulled node — not representable in flow source, reported alongside. */
+export interface PulledNodeAuthorship {
+  name: string;
+  type: string;
+  /** The server-issued #N badge; null for start / end / note nodes. */
+  node_number: number | null;
+  created_by: string | null;
+  last_edited_by: string | null;
+  last_edited_at: string | null;
+}
+
+export interface PulledAuthorship {
+  created_by: string | null;
+  created_at: string | null;
+  last_edited_by: string | null;
+  last_edited_at: string | null;
+  nodes: PulledNodeAuthorship[];
 }
 
 export interface DecompileResult {
@@ -118,6 +143,8 @@ export interface DecompileResult {
   files: string[];
   warnings: string[];
   lock: FlowLock;
+  /** Who created / last edited the graph and each node (also written as a flow.yaml header comment). */
+  authorship: PulledAuthorship;
 }
 
 export const FLOW_SOURCE_FILE_NAME = 'flow.yaml';
@@ -153,7 +180,6 @@ export async function decompileFlow(
   }
 
   const plainEdges = buildPlainEdges(dto, registry, warnings);
-  const conditional = buildConditionalEdges(dto, registry, warnings);
 
   // Surface the start node's seeded values as a top-level `variables:` section
   // (bare value = default). Round-trips: the compiler re-seeds them into the start
@@ -191,7 +217,7 @@ export async function decompileFlow(
     ...(Object.keys(startVariables).length > 0 ? { variables: startVariables } : {}),
     flow: {
       nodes,
-      edges: [...plainEdges, ...conditional.map((edge) => edge.edge)],
+      edges: plainEdges,
     },
   };
 
@@ -210,13 +236,14 @@ export async function decompileFlow(
       contentHash: contentHash({}),
     });
   }
-  for (const edge of conditional) {
-    lock = setEntity(lock, 'conditional_edges', edge.lockName, edge.lockEntry);
-  }
+
+  const authorship = collectAuthorship(dto, registry);
 
   await fs.mkdir(targetDir, { recursive: true });
   const flowPath = path.join(targetDir, FLOW_SOURCE_FILE_NAME);
-  const header = `# Pulled from EpicStaff graph #${dto.id} — edit locally, then diff_flow / push_flow.\n`;
+  const header =
+    `# Pulled from EpicStaff graph #${dto.id} — edit locally, then diff_flow / push_flow.\n` +
+    authorshipHeader(authorship);
   await fs.writeFile(
     flowPath,
     header + stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false }),
@@ -224,7 +251,50 @@ export async function decompileFlow(
   );
   await writeLock(targetDir, lock);
 
-  return { files: [flowPath, path.join(targetDir, LOCKFILE_NAME)], warnings, lock };
+  return { files: [flowPath, path.join(targetDir, LOCKFILE_NAME)], warnings, lock, authorship };
+}
+
+// ---------------------------------------------------------------------------
+// Authorship (read-only on the backend — reported, never pushed)
+// ---------------------------------------------------------------------------
+
+function collectAuthorship(dto: GraphDto, registry: NodeRegistry): PulledAuthorship {
+  return {
+    created_by: describeUser(dto.created_by),
+    created_at: dto.created_at ?? null,
+    last_edited_by: describeUser(dto.last_edited_by),
+    last_edited_at: dto.last_edited_at ?? null,
+    nodes: registry.nodes.map(({ entry, name }) => {
+      const nodeDto = entry.dto as {
+        node_number?: number | null;
+        created_by?: UserSummary | null;
+        last_edited_by?: UserSummary | null;
+        last_edited_at?: string | null;
+      };
+      return {
+        name,
+        type: entry.type,
+        node_number: nodeDto.node_number ?? null,
+        created_by: describeUser(nodeDto.created_by),
+        last_edited_by: describeUser(nodeDto.last_edited_by),
+        last_edited_at: nodeDto.last_edited_at ?? null,
+      };
+    }),
+  };
+}
+
+/** YAML comment lines naming the graph's author and last editor (comments survive edits harmlessly). */
+function authorshipHeader(authorship: PulledAuthorship): string {
+  const lines: string[] = [];
+  if (authorship.created_by !== null) {
+    lines.push(`# Created by ${authorship.created_by}${authorship.created_at ? ` at ${authorship.created_at}` : ''}.`);
+  }
+  if (authorship.last_edited_by !== null) {
+    lines.push(
+      `# Last edited by ${authorship.last_edited_by}${authorship.last_edited_at ? ` at ${authorship.last_edited_at}` : ''}.`,
+    );
+  }
+  return lines.map((line) => `${line.replace(/[\r\n]+/g, ' ')}\n`).join('');
 }
 
 function refuseExistingFlowFiles(targetDir: string): void {
@@ -251,6 +321,7 @@ interface ReferencedEntityNames {
   collections: Map<number, string>;
   subgraphs: Map<number, string>;
   keyValueTables: Map<number, string>;
+  venvs: Map<number, string>;
 }
 
 async function fetchReferencedEntityNames(
@@ -282,9 +353,10 @@ async function fetchReferencedEntityNames(
     (dto.knowledge_node_list ?? []).some((node) => node.source_collection != null);
   const needsGraphList = dto.subgraph_node_list.some((node) => node.subgraph != null && !node.subgraph_detail?.name);
   const needsKeyValueTables = (dto.key_value_node_list ?? []).some((node) => node.key_value_table != null);
+  const needsVenvs = dto.python_node_list.some((node) => node.python_code.venv_id != null);
 
   const emptyMap = (): Map<number, string> => new Map();
-  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables] =
+  const [agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, graphNames, keyValueTables, venvs] =
     await Promise.all([
       mapFromFetches([...agentIds], (id) => deps.agentDefinitions.get(id), (agent) => agent.name),
       mapFromFetches([...surfaceIds], (id) => deps.surfaces.get(id), (surface) => surface.name),
@@ -319,6 +391,9 @@ async function fetchReferencedEntityNames(
       needsKeyValueTables
         ? deps.keyValueTables.list().then((tables) => new Map(tables.map((table) => [table.id, table.name])))
         : Promise.resolve(emptyMap()),
+      needsVenvs
+        ? deps.venvs.list().then((list) => new Map(list.map((venv) => [venv.id, venv.name])))
+        : Promise.resolve(emptyMap()),
     ]);
 
   // Nested subgraph_detail objects resolve names without the extra list call.
@@ -329,7 +404,7 @@ async function fetchReferencedEntityNames(
     }
   }
 
-  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables };
+  return { agents, surfaces, llmConfigs, pythonTools, mcpTools, collections, subgraphs, keyValueTables, venvs };
 }
 
 async function mapFromFetches<T>(
@@ -388,8 +463,13 @@ function positionOf(metadata: Record<string, unknown>): { x: number; y: number }
   };
 }
 
-function nodeNumberOf(metadata: Record<string, unknown>): number {
-  const nodeNumber = metadata['nodeNumber'];
+/**
+ * Authoring-order key: the start node first, then numbered nodes by their server-issued #N badge
+ * (`node_number`), then everything unnumbered (end, notes) in wire-list order.
+ */
+function authoringOrderOf(entry: NodeDtoEntry): number {
+  if (entry.type === 'start') return 0;
+  const nodeNumber = 'node_number' in entry.dto ? entry.dto.node_number : null;
   return typeof nodeNumber === 'number' ? nodeNumber : Number.MAX_SAFE_INTEGER;
 }
 
@@ -406,7 +486,7 @@ function sanitizeSymbolicName(raw: string, fallback: string): string {
 
 /**
  * Collect every node in canonical wire-list order, sorted by the #N badge
- * (`metadata.nodeNumber`) so the YAML reads in authoring order, with unique
+ * (`node_number`, see `authoringOrderOf`) so the YAML reads in authoring order, with unique
  * schema-legal symbolic names. Backend node ids are assumed unique across node
  * types — the same assumption `buildRemoteState` documents.
  */
@@ -446,9 +526,7 @@ function collectNodes(dto: GraphDto, warnings: string[]): NodeRegistry {
     ...(dto.key_value_node_list ?? []).map((node): NodeDtoEntry => ({ type: 'key-value', dto: node })),
   ];
 
-  const sorted = [...entries].sort(
-    (a, b) => nodeNumberOf(metadataOf(a.dto)) - nodeNumberOf(metadataOf(b.dto)),
-  );
+  const sorted = [...entries].sort((a, b) => authoringOrderOf(a) - authoringOrderOf(b));
 
   const usedLowercase = new Set<string>();
   const nodes: CollectedNode[] = [];
@@ -606,6 +684,37 @@ function inlineSurfaceField(
   return { inline_surface: body };
 }
 
+/**
+ * `venv:` of a pulled python node. The default venv (null) is left unstated, which a repush reads
+ * as "keep the current venv" — the same. A venv the name lookup cannot see (deleted, or
+ * renamed to something no longer unique) is left out too: a repush then keeps it.
+ */
+function venvField(
+  venvId: number | null | undefined,
+  names: ReferencedEntityNames,
+  atPath: string,
+  warnings: string[],
+): YamlObject {
+  if (venvId == null) return {};
+  const venvName = names.venvs.get(venvId);
+  if (venvName === undefined) {
+    warnings.push(
+      `${atPath}: its virtual environment (venv #${venvId}) was not found in the active organization — ` +
+        'left out of flow source; the next push keeps it',
+    );
+    return {};
+  }
+  const sameName = [...names.venvs.values()].filter((name) => name === venvName).length;
+  if (sameName > 1) {
+    warnings.push(
+      `${atPath}: its virtual environment "${venvName}" shares its name with another venv — left out of flow ` +
+        'source (a name would be ambiguous); the next push keeps it. Rename one with update_venv to pull it as venv:.',
+    );
+    return {};
+  }
+  return { venv: venvName };
+}
+
 function missingToolName(
   kind: 'python' | 'mcp',
   toolId: number,
@@ -709,7 +818,7 @@ function buildNodeBody(
         position,
         code: code.code,
         ...(code.entrypoint !== 'main' ? { entrypoint: code.entrypoint } : {}),
-        ...(code.libraries.length > 0 ? { libraries: code.libraries } : {}),
+        ...venvField(code.venv_id, names, atPath, warnings),
         ...inputMapField(entry.dto.input_map, atPath, warnings),
         ...outputVariablePathField(entry.dto.output_variable_path),
       };
@@ -1048,72 +1157,4 @@ function buildPlainEdges(dto: GraphDto, registry: NodeRegistry, warnings: string
     warnings.push('flow.edges: user-adjusted edge waypoints are not representable in flow source and reset on the next push');
   }
   return edges;
-}
-
-interface ConditionalEdgeBuild {
-  edge: YamlObject;
-  lockName: string;
-  lockEntry: { backendId: number; contentHash: string };
-}
-
-function buildConditionalEdges(
-  dto: GraphDto,
-  registry: NodeRegistry,
-  warnings: string[],
-): ConditionalEdgeBuild[] {
-  const builds: ConditionalEdgeBuild[] = [];
-  const seenSources = new Set<string>();
-
-  for (const conditionalEdge of dto.conditional_edge_list) {
-    const from = registry.nameByBackendId.get(conditionalEdge.source_node_id);
-    if (from === undefined) {
-      warnings.push(
-        `flow.edges: conditional edge #${conditionalEdge.id} references a node that is not part of the graph payload and was dropped`,
-      );
-      continue;
-    }
-    if (seenSources.has(from)) {
-      warnings.push(
-        `flow.edges: node '${from}' has more than one conditional edge — the pusher tracks one per source node, extra ones will be recreated on every push`,
-      );
-    }
-    seenSources.add(from);
-
-    const code = conditionalEdge.python_code;
-    if ((code.libraries ?? []).length > 0) {
-      warnings.push(
-        `flow.edges: conditional edge from '${from}' uses python libraries — flow-source edge conditions cannot declare libraries; they reset on the next push`,
-      );
-    }
-    const inputMap = coerceInputMap(
-      conditionalEdge.input_map,
-      `flow.edges (conditional from '${from}')`,
-      warnings,
-    );
-
-    builds.push({
-      edge: {
-        from,
-        condition: {
-          code: code.code,
-          ...(code.entrypoint !== 'main' ? { entrypoint: code.entrypoint } : {}),
-          ...(Object.keys(inputMap).length > 0 ? { input_map: inputMap } : {}),
-        },
-      },
-      lockName: from,
-      lockEntry: {
-        backendId: conditionalEdge.id,
-        // Must equal the hash the pusher computes for the body the NEXT
-        // compile emits: emit.ts always sets libraries: [] on edge conditions.
-        contentHash: contentHash({
-          graph: dto.id,
-          source_node_id: conditionalEdge.source_node_id,
-          python_code: { code: code.code, entrypoint: code.entrypoint, libraries: [] },
-          input_map: inputMap,
-        }),
-      },
-    });
-  }
-
-  return builds;
 }
