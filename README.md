@@ -86,6 +86,7 @@ Each plugin release records the exact EpicStaff commit it was verified against i
 | `es-pull-flow` | Import an existing remote flow into local source |
 | `es-catalog` | Manage org entities without a flow: agents, surfaces, collections, tools, venvs, model configs, secrets, key-value tables, labels, recycle bin, versions |
 | `es-voice` | Voice for an agent: voice configs, an agent's voice settings, Twilio voice channels, voice chat history |
+| `es-admin` | Administration: own account and API keys, first-run setup, users, memberships, roles, API keys, organizations, plugins, audit trail |
 
 Start with **es-deliver** for any build request: it decides whether the deliverable is the flow
 alone, the flow plus a new app/UI, or the flow integrated into an existing app — then runs the
@@ -199,7 +200,9 @@ EpicStaff, so a name two venvs share is refused at push. `pull_flow` writes the 
 ```
 
 Webhook and Telegram trigger nodes are pushed without a webhook trigger (path / provider); attach
-one in the EpicStaff editor — a repush keeps it.
+one in the EpicStaff editor — a repush keeps it. Testing a trigger needs neither:
+`run_flow_from_trigger` starts a run at the node with a test payload (a Telegram payload may only use
+the fields selected on the node, which flow source cannot express — select them in the editor).
 
 ## Tools
 
@@ -210,18 +213,25 @@ one in the EpicStaff editor — a repush keeps it.
 | Flows | `list_graphs`, `describe_graph` (with node numbers and who created / last edited the flow and each node), `copy_flow`, `delete_flow`, `set_flow_labels`, `get_flow_persistent_state`, `dump_graph`, `restore_graph` |
 | Versions | `list_graph_versions`, `create_graph_version`, `restore_graph_version` (in place with a backup version, or as a new flow) |
 | Import / export | `export_entities`, `import_entities` — EpicStaff export documents of flows, python tools or MCP tools (export writes a new `.json` file; it replaces an existing one only with `overwrite: true`, never through a symbolic link) |
-| Recycle bin | `list_recycle_bin`, `restore_from_recycle_bin` (by ids, or a whole bin of one kind with `all: true`), `purge_from_recycle_bin` (by ids only; superadmin, `confirm: true`) |
+| Recycle bin | `list_recycle_bin`, `restore_from_recycle_bin` (by ids, or a whole bin of one kind with `all: true`), `purge_from_recycle_bin` (by ids only; superadmin, `confirm: true`), `empty_recycle_bin` (every bin of the active organization; superadmin, `confirm: true` + `organization_id`) |
 | Catalog | `create_agent`, `update_agent`, `get_agent`, `delete_agent`, `create_surface`, `update_surface`, `get_surface`, `delete_surface`, `list_agents`, `list_surfaces` |
 | Tools | `list_tools`, `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`, `update_mcp_tool`, `delete_mcp_tool` |
 | Labels | `list_labels`, `create_label`, `update_label`, `delete_label` (flow and tool label trees) |
+| Saved list filters | `list_filter_presets`, `create_filter_preset`, `update_filter_preset`, `delete_filter_preset` (your own filters of the flows / tools pages) |
 | Venvs | `list_venvs`, `create_venv`, `update_venv`, `delete_venv` |
 | Models | `list_llm_configs`, `list_llm_models`, `create_llm_config`, `update_llm_config`, `delete_llm_config`, `list_embedding_configs`, `create_embedding_config`, `update_embedding_config`, `delete_embedding_config`, `get_settings`, `update_default_models` (incl. the legacy voice / transcription slots), `run_quickstart` |
 | Voice | `list_voice_configs`, `create_voice_config`, `update_voice_config`, `delete_voice_config` (OpenAI Realtime / ElevenLabs / Gemini Live), `create_voice_model`, `delete_voice_model` (custom realtime models), `list_voice_agents`, `set_agent_voice`, `delete_agent_voice`, `list_voice_channels`, `create_voice_channel`, `update_voice_channel`, `delete_voice_channel`, `list_twilio_phone_numbers`, `list_voice_chats`, `get_voice_chat`, `delete_voice_chat` |
 | Secrets | `list_secrets`, `create_secret`, `delete_secret` |
 | Key-value tables | `list_key_value_tables`, `create_key_value_table`, `update_key_value_table`, `delete_key_value_table`, `list_key_value_entries`, `write_key_value_entries` |
-| Knowledge | `list_source_collections`, `create_collection`, `attach_rag`, `delete_collection`, `list_documents`, `upload_documents`, `delete_documents`, `get_collection_status`, `wait_for_collections` |
-| Runs | `run_flow`, `get_session`, `get_session_updates`, `get_session_messages`, `list_sessions`, `stop_session` |
+| Knowledge | `list_source_collections`, `create_collection`, `attach_rag`, `delete_collection`, `list_documents`, `upload_documents`, `import_documents_from_storage`, `delete_documents`, `get_collection_status`, `wait_for_collections`, `estimate_rag_indexing` (tokens / cost, what-if chunking; naive RAG), `list_indexed_chunks` |
+| Runs | `run_flow`, `run_flow_from_trigger` (a webhook / Telegram trigger with a test payload), `list_telegram_trigger_fields`, `get_session`, `get_session_updates`, `get_session_messages`, `list_sessions`, `stop_session` |
+| Code test runs | `run_node_code` (a python node's or webhook trigger's stored code, with your arguments or the last session's input), `get_code_run_result` |
 | Apps | `generate_chat_ui` |
+| Account | `get_my_account`, `update_my_profile`, `list_my_api_keys`, `create_my_api_key` (writes the key to a new 0600 file), `revoke_my_api_key` |
+| First-run setup | `get_setup_status`, `complete_first_setup` (makes the configured account the first superadmin of a fresh instance) |
+| Workspace admin | `admin_list_users`, `admin_create_user`, `admin_set_user_active`, `admin_set_user_superadmin`, `admin_list_memberships`, `admin_add_membership`, `admin_change_membership_role`, `admin_remove_membership`, `admin_list_roles`, `admin_get_role`, `admin_create_role`, `admin_update_role`, `admin_delete_role`, `admin_list_api_keys`, `admin_revoke_api_key`, `admin_list_organizations`, `admin_create_organization`, `admin_rename_organization`, `admin_set_organization_active` |
+| Plugins | `list_plugins`, `list_plugin_activity`, `admin_list_plugins`, `admin_grant_plugin`, `admin_set_plugin_grant_state`, `admin_uninstall_plugin`, `admin_reinstall_plugin` |
+| Audit | `search_audit_log`, `list_audit_presets`, `create_audit_preset`, `update_audit_preset`, `delete_audit_preset` |
 
 Credentials never pass through a tool argument or result: `create_secret`, `api_key_env` on
 `create_llm_config` / `create_embedding_config` / `create_voice_config` / `run_quickstart`, and
@@ -232,6 +242,18 @@ key-value tables, secrets and voice channels go to the recycle bin; LLM / embedd
 an agent's voice settings, voice chats, venvs and labels are deleted for good. Deleting a config clears
 it from whatever used it (`dry_run: true` lists that usage first); it is skipped only when something
 the caller cannot see uses it.
+
+Administration (`es-admin`): the `admin_*` tools are cross-organization (the organization is an
+argument, not the active one). Reads work with the MCP's API key; every change needs a signed-in
+session (`EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD` — EpicStaff refuses API keys for admin changes) and
+`confirm: true`; removals offer `dry_run: true` first. A record outside the organizations you administer
+answers 404, never 403. A new API key or a new account's generated initial password is written to a new
+file (mode 0600; existing paths and symbolic links are refused) and never shown; the audit token is
+used internally only; the key this server runs on cannot be revoked through it. The audit trail is
+read from the auditor at `<EPICSTAFF_BASE_URL>/auditor/` (deployments with the audit trail enabled).
+Plugins add no flow node types. Not exposed on purpose: hard deletes of users and organizations, plugin
+purges, package upload/approval, password resets, reset-user, and the browser-only SSE/WebSocket
+tickets and Swagger token.
 
 Voice is not part of flow source: an agent gets a voice with `set_agent_voice` (a voice config made
 with `create_voice_config`), users talk to it in the EpicStaff Chats page or over a Twilio number
@@ -293,7 +315,26 @@ npm test           # vitest — layout/bulk-save fidelity + language + auth suit
 npm run typecheck
 npm run build      # emit dist/ (committed — the plugin launches dist/index.js)
 npm run gen:types  # regenerate src/models/generated/openapi.d.ts from openapi/schema.json
+npm run parity-check -- ../EpicStaff   # API parity against an EpicStaff checkout (below)
 ```
+
+### API parity check
+
+`npm run parity-check -- <epicstaff-checkout> [--json] [--strict] [--allowlist <file>]` reads the
+checkout's Django URLconf — every `router.register` prefix and `path()` route under `api/`, following
+`include()` from `src/django_app/django_app/urls.py` — and its graph node lists (the bulk-save
+`NODE_TYPE_REGISTRY` keys and the crew `GraphData` `*_node_list` fields), and diffs them against the
+API paths `src/` sends and the node lists `BulkSavePayload` emits. The checkout's files are only read,
+never imported or run.
+
+Every route MCP does not call must be listed in `scripts/parity-allowlist.json` with a category and a
+reason: per-node CRUD (the graph bulk save covers it), the flow assistant (Claude with this server
+replaces it), browser-only and machine-to-machine routes, editor previews, and the backlog of real
+capabilities not exposed yet. The check exits 1 on an unlisted route, on an upstream node list
+push_flow never sends, and on a node list MCP sends that upstream no longer has (a removed or renamed
+node type). It warns about allowlist entries that match no route or whose routes are all covered now;
+`--strict` fails on those too. A router prefix stands for all its routes, so a new `@action` on a
+viewset MCP already calls does not show up — read the upstream diff for those.
 
 ### Live tests (need a running EpicStaff)
 

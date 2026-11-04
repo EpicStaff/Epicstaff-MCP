@@ -16,6 +16,9 @@ import { registerRecycleBinTools } from './recycle-bin.tools.js';
 import { registerVoiceConfigTools } from './voice-config.tools.js';
 import { registerVoiceAgentTools } from './voice-agent.tools.js';
 import { registerVoiceChannelTools } from './voice-channel.tools.js';
+import { registerCodeRunTools } from './code-run.tools.js';
+import { registerFilterPresetTools } from './filter-preset.tools.js';
+import { registerAdministrationTools } from './administration.tools.js';
 
 /**
  * Central tool registration. Each tool category module exports a
@@ -40,4 +43,7 @@ export function registerAllTools(server: McpServer, context: AppContext): void {
   registerVoiceConfigTools(server, context);
   registerVoiceAgentTools(server, context);
   registerVoiceChannelTools(server, context);
+  registerCodeRunTools(server, context);
+  registerFilterPresetTools(server, context);
+  registerAdministrationTools(server, context);
 }

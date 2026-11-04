@@ -97,15 +97,22 @@ the collection will not retrieve anything until indexing **completes**:
 
 Graph RAG requires an `llm_config`; naive RAG needs only an `embedder` (org default when
 omitted). To add documents to an existing collection later, use `upload_documents` (which
-re-indexes), not a new collection.
+re-indexes), not a new collection — or `import_documents_from_storage` for files already in the
+organization's EpicStaff storage (by path or id; a folder brings everything beneath it; files of an
+unsupported type, too large or already present are skipped and listed).
+
+Before an expensive (re-)index of a naive RAG, `estimate_rag_indexing` gives the chunk count,
+embedding tokens and USD cost; pass `chunk_size` / `chunk_overlap` / `chunk_strategy` to price a
+different chunking without saving it. When retrieval misses something, `list_indexed_chunks` shows
+the chunks indexing actually stored for a document (empty or garbled text, chunks too big or small).
 
 ## Tools
 
 - **Surfaces:** `create_surface`, `update_surface`, `get_surface`, `delete_surface`
 - **Agents:** `create_agent`, `update_agent`, `get_agent`, `delete_agent`
 - **Knowledge:** `create_collection`, `attach_rag`, `delete_collection`
-  (plus `list_source_collections`, `upload_documents`, `wait_for_collections` from the
-  knowledge/run tools)
+  (plus `list_source_collections`, `upload_documents`, `import_documents_from_storage`,
+  `estimate_rag_indexing`, `list_indexed_chunks`, `wait_for_collections` from the knowledge/run tools)
 - **Tools:** `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`,
   `update_mcp_tool`, `delete_mcp_tool` (list with `list_tools`). A python tool names its `venv`,
   the `secrets` its code may read, and its `execution_timeout`; an MCP tool is one tool of a
@@ -136,7 +143,11 @@ re-indexes), not a new collection.
   `export_entities` / `import_entities` (EpicStaff export documents of flows, python tools or MCP
   tools — `inspect_only` first; export writes a new `.json` file and replaces an existing one only
   with `overwrite: true`), `get_flow_persistent_state` (read-only persistent variables).
-- **Recycle bin:** `list_recycle_bin`, `restore_from_recycle_bin`, `purge_from_recycle_bin`.
+- **Recycle bin:** `list_recycle_bin`, `restore_from_recycle_bin`, `purge_from_recycle_bin`,
+  `empty_recycle_bin` (every bin of the organization at once — see below).
+- **Saved list filters:** `list_filter_presets`, `create_filter_preset`, `update_filter_preset`,
+  `delete_filter_preset` — the user's own named filters of the EpicStaff flows / tools pages
+  (scope `flow` or `tool`); they change only what those pages list.
 - **Voice:** voice configs, an agent's voice settings, Twilio voice channels and voice chat history
   have their own skill — `es-voice`. `update_default_models` also sets the legacy
   `voice_llm_config` / `transcription_llm_config` slots (`list_voice_configs include_legacy`).
@@ -153,6 +164,9 @@ the matching `update_*` (or pick a new name) — it is never silently swallowed.
 `all: true` instead of `ids` restores every item of that kind — only when the user asks for the whole bin).
 `purge_from_recycle_bin` deletes for good: superadmin-only, needs `confirm: true` — use it only when
 the user explicitly names the items; everything expires on its own after the retention period.
+`empty_recycle_bin` purges EVERY binned item of every kind in the active organization — only when the
+user explicitly asks to empty the whole bin; it needs `confirm: true` and the active
+`organization_id`, and the same superadmin session.
 
 - While it is binned, any flow referencing it via `{ existing: "<name>" }` will **fail its next
   `push_flow`**. Verify no flow depends on it first.

@@ -2,8 +2,8 @@ import type { ApiClient } from '../http/client.js';
 
 /**
  * Session / run API — ported from the frontend's
- * features/flows/services/run-graph-session.service.ts (multipart run-session)
- * and flows-sessions.service.ts (sessions read surface).
+ * features/flows/services/run-graph-session.service.ts (multipart run-session, and the JSON
+ * run-session/test/ trigger test run) and flows-sessions.service.ts (sessions read surface).
  *
  * `answer-to-llm/` (the crew-based human-input reply) was removed upstream with CrewAI
  * (EST-3849); the `wait_for_user` status still exists but has no reply endpoint.
@@ -50,6 +50,22 @@ export interface Paginated<T> {
   results: T[];
 }
 
+/** Trigger node types that support a test run with a hand-written payload (`TestRunNodeType`). */
+export type TestRunNodeType = 'webhook-trigger' | 'telegram-trigger';
+
+/**
+ * Body of `POST run-session/test/` — starts a test run from a trigger node (`RunTestSessionRequest`,
+ * frontend features/flows/models/run-session.model.ts). Backend: SessionTestRunView — needs FLOWS
+ * UPDATE and USE; a webhook payload reaches the flow as `trigger_payload`, a Telegram one as
+ * `telegram_payload` (and may only use the parents/fields selected on the node).
+ */
+export interface RunTestSessionRequest {
+  graph_id: number;
+  node_type: TestRunNodeType;
+  node_id: number;
+  payload: Record<string, unknown>;
+}
+
 export class SessionsApi {
   constructor(private readonly client: ApiClient) {}
 
@@ -68,6 +84,11 @@ export class SessionsApi {
     formData.append('graph_id', String(graphId));
     formData.append('variables', JSON.stringify(initialState));
     return this.client.post('run-session/', { formData });
+  }
+
+  /** POST run-session/test/ (JSON, `runTestSession`): a run started at a trigger node with a test payload. */
+  async runTestSession(request: RunTestSessionRequest): Promise<{ session_id: number }> {
+    return this.client.post('run-session/test/', { body: request });
   }
 
   async getSession(sessionId: number): Promise<GraphSession> {

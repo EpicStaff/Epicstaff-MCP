@@ -18,6 +18,8 @@ One responsibility: a working, org-scoped connection. Every other es-* skill ass
    means those variables are not set (or reached the server as an unexpanded `${VAR}`): the
    user exports them in the shell that launches Claude Code and restarts it. Local tools
    (`init_flow`, `validate_flow`, `build_flow`) work without a connection.
+   A login failure on a brand-new instance may mean it has no account yet: `get_setup_status`
+   (see `es-admin` → First-run setup).
 
 A new session does not strictly need step 1 to reach the right organization — the server
 resolves the saved selection (or the single membership) before its first org-scoped call —

@@ -4,15 +4,17 @@ import { type UserSession, withUserSession } from './user-session.js';
 
 /**
  * Recycle bin API — ported from features/recycle-bin/services/recycle-bin-api.service.ts,
- * constants/recycle-bin-sources.constants.ts, models/recycle-bin.model.ts and
- * services/recycle-bin/recycle-bin-settings-api.service.ts.
+ * services/recycle-bin-bulk.service.ts (`emptyAll`), constants/recycle-bin-sources.constants.ts,
+ * models/recycle-bin.model.ts and services/recycle-bin/recycle-bin-settings-api.service.ts.
  *
  * Every deletable resource has its own bin hanging off its list URL (`<list>/recycle-bin/`), with
  * bulk `restore/` and `purge/` bodies of `{ids}` (1–100). Backend: RecycleBinActionsMixin
- * (tables/views/recycle_bin_mixins.py) — org-scoped; a row of another org is a 404.
+ * (tables/views/recycle_bin_mixins.py) — org-scoped; a row of another org is a 404. Emptying every
+ * bin of the active organization is `recycle-bin/empty/` (RecycleBinEmptyView).
  *
- * Two routes refuse API keys, so they carry the user-session bearer token instead:
- *  - every purge (`purge_permissions`: superadmin only, never an API key — a purge cannot be undone);
+ * Some routes refuse API keys, so they carry the user-session bearer token instead:
+ *  - every purge and the whole-bin empty (`purge_permissions`: superadmin only, never an API key —
+ *    a purge cannot be undone);
  *  - the secrets bin (SecretViewSet is closed to personal API keys).
  */
 
@@ -135,12 +137,30 @@ export interface RecycleBinListQuery {
 /**
  * What a bulk restore acts on: the selected ids (the editor's only form, `RecycleBinSelection`) or
  * `all: true` for every item of the bin (RecycleBinBulkRequestSerializer). MCP sends `all` only to
- * restore — a whole-bin purge is not exposed, it cannot be undone.
+ * restore; a per-kind purge always names its ids. Emptying every bin at once is its own endpoint
+ * (`recycle-bin/empty/`, {@link RecycleBinApi.emptyAll}).
  */
 export type RecycleBinRestoreSelection = { ids: number[] } | { all: true };
 
 export interface GetRecycleBinSettingsResponse {
   retention_days: number;
+}
+
+/** POST recycle-bin/empty/ (superadmin only): one slice of every bin; call again while `remaining`. */
+export interface RecycleBinEmptyResponse {
+  purged_count: number;
+  /** Items still in those bins: left for the next call, or ones that failed. */
+  remaining: number;
+  failed: Array<RecycleBinBulkFailureResponse & { source: RecycleBinSourceKey }>;
+}
+
+/** Every call of an empty run merged (`RecycleBinEmptyResult`, with the failures kept whole). */
+export interface RecycleBinEmptyResult {
+  purgedCount: number;
+  failed: Array<RecycleBinBulkFailureResponse & { source: RecycleBinSourceKey }>;
+  /** Items still binned that did not fail: the run stopped making progress before reaching them. */
+  leftCount: number;
+  calls: number;
 }
 
 export class RecycleBinApi {
@@ -189,6 +209,44 @@ export class RecycleBinApi {
   /** Deployment-wide retention: how many days a deleted item stays restorable. */
   async getSettings(): Promise<GetRecycleBinSettingsResponse> {
     return this.client.get<GetRecycleBinSettingsResponse>('recycle-bin/settings/');
+  }
+
+  /**
+   * One slice of emptying the active organization's whole bin, every kind at once (RecycleBinEmptyView).
+   * Same gates as a purge — superadmin, never an API key — so it always goes with the user session.
+   */
+  async emptySlice(): Promise<RecycleBinEmptyResponse> {
+    return withUserSession(this.session, (bearerToken) =>
+      this.client.post<RecycleBinEmptyResponse>('recycle-bin/empty/', { body: {}, bearerToken }),
+    );
+  }
+
+  /**
+   * Everything in every bin (`RecycleBinBulkService.emptyAll`). Each request purges for a limited time,
+   * so a large bin takes several: call again while items remain and the last call got somewhere (failed
+   * items stay, and are tried again only once). `leftCount` says how many were never reached.
+   */
+  async emptyAll(): Promise<RecycleBinEmptyResult> {
+    const responses: RecycleBinEmptyResponse[] = [];
+    let response = await this.emptySlice();
+    responses.push(response);
+    while (response.remaining > 0 && response.purged_count > 0) {
+      response = await this.emptySlice();
+      responses.push(response);
+    }
+    // A failed item is tried again by the next call: keep its last answer only.
+    const failures = new Map<string, RecycleBinEmptyResponse['failed'][number]>();
+    for (const failure of responses.flatMap((item) => item.failed)) {
+      failures.set(`${failure.source}:${failure.id}`, failure);
+    }
+    // `remaining` counts the failed items too: they are still in the bin.
+    const remaining = responses.at(-1)?.remaining ?? 0;
+    return {
+      purgedCount: responses.reduce((total, item) => total + item.purged_count, 0),
+      failed: [...failures.values()],
+      leftCount: Math.max(0, remaining - failures.size),
+      calls: responses.length,
+    };
   }
 
   /** Route a call through the user session when the backend refuses API keys for it. */

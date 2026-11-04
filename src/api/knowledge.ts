@@ -4,7 +4,9 @@ import type { ApiClient } from '../http/client.js';
 
 /**
  * Knowledge / RAG API — ported from features/knowledge-sources/services/
- * {collections-api,documents-api,naive-rag,graph-rag,rag-indexing}.service.ts.
+ * {collections-api,documents-api,naive-rag,graph-rag,rag-indexing}.service.ts. The indexed-chunk
+ * listing has no frontend consumer: it is backend-derived from
+ * `src/django_app/tables/views/knowledge_views/naive_rag_views.py` (NaiveRagChunkViewSet).
  *
  * The RAG chain is a pipeline, not a single POST:
  * create collection → upload documents → attach strategy → trigger async indexing.
@@ -80,15 +82,92 @@ export interface NaiveRagDocumentConfig {
   naive_rag_document_id: number;
   document_id: number;
   file_name: string;
+  chunk_strategy?: string;
   chunk_size: number;
   chunk_overlap: number;
+  status?: string;
+  total_chunks?: number;
   [key: string]: unknown;
+}
+
+/**
+ * `GET naive-rag/{id}/document-configs/` (`GetNaiveRagDocumentConfigsResponse`): the configs come
+ * wrapped in an envelope, not as a DRF page (NaiveRagDocumentConfigViewSet.list_configs).
+ */
+export interface GetNaiveRagDocumentConfigsResponse {
+  naive_rag_id: number;
+  total_configs: number;
+  configs: NaiveRagDocumentConfig[];
 }
 
 /** `PUT naive-rag/{id}/document-configs/bulk-update/` — per-document chunking fields. */
 export interface NaiveRagChunkingUpdate {
   chunk_size?: number;
   chunk_overlap?: number;
+}
+
+/** NaiveRagDocumentConfig.ChunkStrategy. */
+export const NAIVE_CHUNK_STRATEGIES = ['token', 'character', 'markdown', 'json', 'html', 'csv'] as const;
+export type NaiveChunkStrategy = (typeof NAIVE_CHUNK_STRATEGIES)[number];
+
+/** Backend bounds of a naive document config (tables/constants/knowledge_constants.py). */
+export const NAIVE_CHUNK_SIZE_BOUNDS = { min: 20, max: 8000 } as const;
+export const NAIVE_CHUNK_OVERLAP_BOUNDS = { min: 0, max: 1000 } as const;
+
+/**
+ * Unsaved chunking settings of one document for an estimate (`EstimateDocumentConfig`,
+ * DocumentConfigEstimateOverrideSerializer) — validated like a bulk update, never persisted.
+ */
+export interface EstimateDocumentConfig {
+  document_config_id: number;
+  chunk_size?: number;
+  chunk_overlap?: number;
+  chunk_strategy?: NaiveChunkStrategy;
+  additional_params?: Record<string, unknown>;
+}
+
+/** `POST process-rag-indexing/estimate/` response (`IndexingEstimate`). */
+export interface IndexingEstimate {
+  rag_type: RagType;
+  document_count: number;
+  chunk_count: number;
+  embedding: {
+    tokens: number;
+    /** False when there is no exact tokenizer for the embedding provider and tokens are approximated. */
+    exact: boolean;
+    cost_usd: number | null;
+  };
+}
+
+/** `POST documents/source-collection/{id}/from-storage/` — the skip reasons of StorageDocumentImportService. */
+export type StorageImportSkipReason = 'unsupported_type' | 'too_large' | 'duplicate';
+
+export interface StorageImportSkippedFile {
+  storage_file_id: number;
+  path: string;
+  reason: StorageImportSkipReason;
+}
+
+/** 201 body of `POST documents/source-collection/{id}/from-storage/` (`ImportFromStorageResponse`). */
+export interface ImportFromStorageResponse {
+  message: string;
+  documents: Array<Record<string, unknown>>;
+  skipped: StorageImportSkippedFile[];
+}
+
+/** The most storage ids one import may select (ImportFromStorageSerializer `max_length`, default limits). */
+export const STORAGE_IMPORT_MAX_IDS = 4000;
+
+/** One indexed chunk of a naive RAG document (`naive-rag-document-chunks/`, NaiveRagChunkSerializer). */
+export interface NaiveRagChunk {
+  chunk_id: number;
+  text: string;
+  chunk_index: number;
+  token_count: number | null;
+  overlap_start_index: number | null;
+  overlap_end_index: number | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
 }
 
 function unwrap<T>(response: Paginated<T> | T[]): T[] {
@@ -129,6 +208,18 @@ export class KnowledgeApi {
       formData.append('files', new Blob([new Uint8Array(buffer)]), basename(filePath));
     }
     return this.client.post(`documents/source-collection/${collectionId}/upload/`, { formData });
+  }
+
+  /**
+   * Copy files from the organization's storage into a collection as new documents
+   * (`importFromStorage`). Folder ids import every file beneath them; files the collection cannot take
+   * (unsupported type, too large, already present with the same name and size) come back in `skipped`.
+   * Backend: DocumentManagementViewSet.import_from_storage — Knowledge Sources CREATE + Files READ.
+   */
+  async importFromStorage(collectionId: number, storageFileIds: number[]): Promise<ImportFromStorageResponse> {
+    return this.client.post<ImportFromStorageResponse>(`documents/source-collection/${collectionId}/from-storage/`, {
+      body: { storage_file_ids: storageFileIds },
+    });
   }
 
   /** List the documents of one collection (nested route, returns collection info + documents). */
@@ -204,13 +295,12 @@ export class KnowledgeApi {
     await this.client.post(`naive-rag/${naiveRagId}/document-configs/initialize/`);
   }
 
-  /** List the per-document chunking configs of a naive RAG. */
+  /** List the per-document chunking configs of a naive RAG (`getDocumentConfigs`, the `configs` envelope). */
   async listNaiveRagDocumentConfigs(naiveRagId: number): Promise<NaiveRagDocumentConfig[]> {
-    return unwrap(
-      await this.client.get<Paginated<NaiveRagDocumentConfig> | NaiveRagDocumentConfig[]>(
-        `naive-rag/${naiveRagId}/document-configs/`,
-      ),
-    );
+    const response = await this.client.get<
+      GetNaiveRagDocumentConfigsResponse | Paginated<NaiveRagDocumentConfig> | NaiveRagDocumentConfig[]
+    >(`naive-rag/${naiveRagId}/document-configs/`);
+    return 'configs' in response ? response.configs : unwrap(response);
   }
 
   /**
@@ -251,6 +341,39 @@ export class KnowledgeApi {
       chunking,
     );
     return configs.length;
+  }
+
+  /**
+   * Read-only token and cost estimate of indexing the given document configs of a naive RAG
+   * (`estimateIndexing`, ProcessRagIndexingEstimateView). `documentConfigs` are unsaved chunking
+   * settings to estimate with instead of the stored ones; they are validated but never persisted. Same
+   * permission as indexing itself (Knowledge Sources UPDATE); a graph RAG is refused with a 400.
+   */
+  async estimateIndexing(
+    ragId: number,
+    ragType: RagType,
+    documentConfigIds: number[],
+    documentConfigs?: EstimateDocumentConfig[],
+  ): Promise<IndexingEstimate> {
+    const body = {
+      rag_id: ragId,
+      rag_type: ragType,
+      document_config_ids: documentConfigIds,
+      ...(documentConfigs?.length ? { document_configs: documentConfigs } : {}),
+    };
+    return this.client.post<IndexingEstimate>('process-rag-indexing/estimate/', { body });
+  }
+
+  /** One page of the indexed chunks of a naive RAG document config, in document order. */
+  async listIndexedChunks(
+    documentConfigId: number,
+    limit: number,
+    offset: number,
+  ): Promise<Paginated<NaiveRagChunk>> {
+    const response = await this.client.get<Paginated<NaiveRagChunk> | NaiveRagChunk[]>('naive-rag-document-chunks/', {
+      query: { naive_rag_document_config: documentConfigId, limit, offset },
+    });
+    return Array.isArray(response) ? { count: response.length, results: response } : response;
   }
 
   /** Kick off async indexing; readiness is checked via get_collection_status. */
