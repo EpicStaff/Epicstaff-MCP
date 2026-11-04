@@ -29417,6 +29417,10 @@ var GraphsApi = class {
 import { readFileSync as readFileSync2 } from "node:fs";
 import { basename } from "node:path";
 var SELECTABLE_RAG_STATUSES = "new,processing,completed,warning,partial,outdated";
+var NAIVE_CHUNK_STRATEGIES = ["token", "character", "markdown", "json", "html", "csv"];
+var NAIVE_CHUNK_SIZE_BOUNDS = { min: 20, max: 8e3 };
+var NAIVE_CHUNK_OVERLAP_BOUNDS = { min: 0, max: 1e3 };
+var STORAGE_IMPORT_MAX_IDS = 4e3;
 function unwrap3(response) {
   return Array.isArray(response) ? response : response.results;
 }
@@ -29452,6 +29456,17 @@ var KnowledgeApi = class {
       formData.append("files", new Blob([new Uint8Array(buffer)]), basename(filePath));
     }
     return this.client.post(`documents/source-collection/${collectionId}/upload/`, { formData });
+  }
+  /**
+   * Copy files from the organization's storage into a collection as new documents
+   * (`importFromStorage`). Folder ids import every file beneath them; files the collection cannot take
+   * (unsupported type, too large, already present with the same name and size) come back in `skipped`.
+   * Backend: DocumentManagementViewSet.import_from_storage — Knowledge Sources CREATE + Files READ.
+   */
+  async importFromStorage(collectionId, storageFileIds) {
+    return this.client.post(`documents/source-collection/${collectionId}/from-storage/`, {
+      body: { storage_file_ids: storageFileIds }
+    });
   }
   /** List the documents of one collection (nested route, returns collection info + documents). */
   async listDocuments(collectionId) {
@@ -29519,13 +29534,10 @@ var KnowledgeApi = class {
   async initializeNaiveRagDocumentConfigs(naiveRagId) {
     await this.client.post(`naive-rag/${naiveRagId}/document-configs/initialize/`);
   }
-  /** List the per-document chunking configs of a naive RAG. */
+  /** List the per-document chunking configs of a naive RAG (`getDocumentConfigs`, the `configs` envelope). */
   async listNaiveRagDocumentConfigs(naiveRagId) {
-    return unwrap3(
-      await this.client.get(
-        `naive-rag/${naiveRagId}/document-configs/`
-      )
-    );
+    const response = await this.client.get(`naive-rag/${naiveRagId}/document-configs/`);
+    return "configs" in response ? response.configs : unwrap3(response);
   }
   /**
    * Apply the same chunking parameters to a set of document configs.
@@ -29557,6 +29569,28 @@ var KnowledgeApi = class {
       chunking
     );
     return configs.length;
+  }
+  /**
+   * Read-only token and cost estimate of indexing the given document configs of a naive RAG
+   * (`estimateIndexing`, ProcessRagIndexingEstimateView). `documentConfigs` are unsaved chunking
+   * settings to estimate with instead of the stored ones; they are validated but never persisted. Same
+   * permission as indexing itself (Knowledge Sources UPDATE); a graph RAG is refused with a 400.
+   */
+  async estimateIndexing(ragId, ragType, documentConfigIds, documentConfigs) {
+    const body = {
+      rag_id: ragId,
+      rag_type: ragType,
+      document_config_ids: documentConfigIds,
+      ...documentConfigs?.length ? { document_configs: documentConfigs } : {}
+    };
+    return this.client.post("process-rag-indexing/estimate/", { body });
+  }
+  /** One page of the indexed chunks of a naive RAG document config, in document order. */
+  async listIndexedChunks(documentConfigId, limit, offset) {
+    const response = await this.client.get("naive-rag-document-chunks/", {
+      query: { naive_rag_document_config: documentConfigId, limit, offset }
+    });
+    return Array.isArray(response) ? { count: response.length, results: response } : response;
   }
   /** Kick off async indexing; readiness is checked via get_collection_status. */
   async startIndexing(ragId, ragType) {
@@ -35220,6 +35254,29 @@ var StorageApi = class {
     }
     return match.id;
   }
+  /**
+   * Resolve an org-storage path of a file or a folder ("docs/", "docs/a.pdf") to its backend id
+   * (StorageManager.info: the file row first, else the folder row).
+   */
+  async resolveItemId(itemPath) {
+    const normalized = itemPath.replace(/^\/+/, "");
+    if (normalized.replace(/\/+$/, "") === "") {
+      throw new Error("The storage root has no id \u2014 name the folders or files to import instead.");
+    }
+    let info;
+    try {
+      info = await this.client.get("storage/info/", { query: { path: normalized } });
+    } catch (error2) {
+      if (error2 instanceof ApiError && error2.status === 404) {
+        throw new Error(`Storage path "${itemPath}" not found in the active organization's storage.`);
+      }
+      throw error2;
+    }
+    if (info.id == null) {
+      throw new Error(`Storage path "${itemPath}" has no index row yet \u2014 pass its storage id instead.`);
+    }
+    return info.id;
+  }
 };
 
 // src/api/user-session.ts
@@ -36794,6 +36851,10 @@ var SessionsApi = class {
     formData.append("variables", JSON.stringify(initialState));
     return this.client.post("run-session/", { formData });
   }
+  /** POST run-session/test/ (JSON, `runTestSession`): a run started at a trigger node with a test payload. */
+  async runTestSession(request) {
+    return this.client.post("run-session/test/", { body: request });
+  }
   async getSession(sessionId) {
     return this.client.get(`sessions/${sessionId}/`);
   }
@@ -36853,11 +36914,115 @@ function summarizeMessages(messages) {
   return { count: out.length, messages: out, final_reply: finalReply, final_variables: finalVariables };
 }
 
+// src/api/telegram-trigger-fields.ts
+var TelegramTriggerFieldsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async list() {
+    const response = await this.client.get("telegram-trigger-available-fields/");
+    return response.data;
+  }
+};
+
+// src/tools/catalog-helpers.ts
+var idOrName = external_exports.union([external_exports.number().int(), external_exports.string().min(1)]);
+async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
+  if (typeof ref === "number") return ref;
+  const items = await list();
+  const wanted = ref.trim().toLowerCase();
+  const matches = items.filter((item) => nameOf(item).toLowerCase() === wanted);
+  if (matches.length > 1) {
+    const ids = matches.map(idOf).filter((id2) => id2 !== void 0);
+    throw new Error(
+      `${entityLabel} "${ref}" is ambiguous \u2014 ${matches.length} entries carry that name (ids ${ids.join(", ")}). Pass the numeric backend id instead.`
+    );
+  }
+  const match = matches[0];
+  const id = match ? idOf(match) : void 0;
+  if (id === void 0) {
+    const available = items.map(nameOf).filter(Boolean).slice(0, 30).join(", ");
+    throw new Error(
+      `${entityLabel} "${ref}" not found in the active organization. Available: ${available || "(none)"}. Pass a numeric backend id or an exact existing name.`
+    );
+  }
+  return id;
+}
+function isAlreadyExistsError(error2) {
+  if (error2.status === 409) return true;
+  const haystack = [
+    error2.message,
+    error2.bodyExcerpt ?? "",
+    ...error2.validationErrors?.map((issue2) => `${issue2.field} ${issue2.reason}`) ?? []
+  ].join(" ").toLowerCase();
+  return /already exist|must be unique|unique constraint|duplicate|conflict/.test(haystack);
+}
+async function createOrExplainConflict(create, name, updateToolName) {
+  try {
+    return await create();
+  } catch (error2) {
+    if (error2 instanceof ApiError && isAlreadyExistsError(error2)) {
+      throw new Error(
+        `An entity named "${name}" already exists in this organization (catalog names are org-unique). Use ${updateToolName} to modify the existing one, or choose a different name.`
+      );
+    }
+    throw error2;
+  }
+}
+async function resolveCredential(secrets, credentialEnv, credentialSecret, inputNames = { env: "api_key_env", secret: "api_key_secret" }) {
+  if (credentialEnv !== void 0 && credentialSecret !== void 0) {
+    throw new Error(`Pass either ${inputNames.env} or ${inputNames.secret}, not both.`);
+  }
+  if (credentialEnv !== void 0) {
+    return (await ensureSecretFromEnv(secrets(), secretName(credentialEnv), credentialEnv)).backendId;
+  }
+  if (credentialSecret === null || credentialSecret === void 0) return credentialSecret;
+  const api = secrets();
+  return resolveNamedRef(credentialSecret, "Secret", () => api.list(), (secret) => secret.id, (secret) => secret.name);
+}
+function summarizeAuthored(entity) {
+  const { created_by, last_edited_by, ...rest } = entity;
+  return {
+    ...rest,
+    ...created_by !== void 0 ? { created_by: describeUser(created_by) } : {},
+    ...last_edited_by !== void 0 ? { last_edited_by: describeUser(last_edited_by) } : {}
+  };
+}
+function pickDefined(fields) {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== void 0));
+}
+function recycleBinHint(kind, id) {
+  return `It is in the recycle bin: list_recycle_bin(kind: "${kind}") shows it, restore_from_recycle_bin(kind: "${kind}", ids: [${id}]) brings it back.`;
+}
+
+// src/tools/graph-node-lookup.ts
+function pickGraphNode(candidates, ref, graphId, wantedLabel) {
+  const matches = typeof ref === "number" ? candidates.filter((candidate) => candidate.node.id === ref) : candidates.filter((candidate) => candidate.node.node_name === ref);
+  if (matches.length === 1 && matches[0] !== void 0) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(
+      `Node ${JSON.stringify(ref)} is ambiguous in graph #${graphId}: it matches ${matches.map((match) => `${match.kind} "${match.node.node_name}" (#${match.node.id})`).join(", ")}. Pass node_type to choose one.`
+    );
+  }
+  const available = candidates.map((candidate) => `${candidate.kind} "${candidate.node.node_name}" (id ${candidate.node.id})`).slice(0, 30).join(", ");
+  throw new Error(
+    `No ${wantedLabel} ${JSON.stringify(ref)} in graph #${graphId}. ${available ? `Available: ${available}.` : `The graph has no ${wantedLabel}.`} Push the flow first if the node exists only in local flow source.`
+  );
+}
+
 // src/tools/run.tools.ts
+var TRIGGER_TEST_NODE_TYPES = ["webhook-trigger", "telegram-trigger"];
+var TRIGGER_PAYLOAD_VARIABLE = {
+  "webhook-trigger": "trigger_payload",
+  "telegram-trigger": "telegram_payload"
+};
 var TERMINAL_RAG_STATUSES = /* @__PURE__ */ new Set(["completed", "warning", "failed"]);
 function registerRunTools(server, context) {
   const sessions = new SessionsApi(context.client);
   const knowledge = new KnowledgeApi(context.client);
+  const graphs = new GraphsApi(context.client);
+  const telegramFields = new TelegramTriggerFieldsApi(context.client);
   server.registerTool(
     "run_flow",
     {
@@ -36877,6 +37042,82 @@ function registerRunTools(server, context) {
         session_id: result.session_id,
         next: "Poll get_session_updates until the status is terminal (end/error/stop/expired) or wait_for_user."
       };
+    })
+  );
+  server.registerTool(
+    "run_flow_from_trigger",
+    {
+      title: "Run a flow from a trigger node with a test payload",
+      description: `Start a run at a webhook or Telegram trigger node of a pushed flow with a hand-written payload, as if the webhook / Telegram update had arrived (POST run-session/test/) \u2014 no tunnel, webhook trigger or bot needed. Unlike run_flow (start node + initial_state) this exercises the trigger path: a webhook payload reaches the flow as variables.trigger_payload (through the node's code), a Telegram one as variables.telegram_payload. A Telegram payload looks like an update ({"message": {"text": "hi", ...}}) and may only use the parents and fields selected on the node (list_telegram_trigger_fields; fields are selected in the EpicStaff editor). Omit payload to use the test payload saved on the node. Needs Flows UPDATE and USE. Returns the session_id to poll like run_flow.`,
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the pushed flow."),
+        node: idOrName.describe("The trigger node: its backend id or its node name (the flow-source node key)."),
+        node_type: external_exports.enum(TRIGGER_TEST_NODE_TYPES).optional().describe("Narrow the lookup to webhook or Telegram triggers (needed only when an id matches both)."),
+        payload: external_exports.record(external_exports.unknown()).optional().describe("The test payload (a JSON object). Defaults to the test payload saved on the node.")
+      }
+    },
+    async ({ graph_id, node, node_type, payload }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const graph = await graphs.get(graph_id);
+      const candidates = [
+        ...(graph.webhook_trigger_node_list ?? []).map((webhookNode) => ({
+          kind: "webhook-trigger",
+          node: webhookNode
+        })),
+        ...(graph.telegram_trigger_node_list ?? []).map((telegramNode) => ({
+          kind: "telegram-trigger",
+          node: telegramNode
+        }))
+      ].filter((candidate) => node_type === void 0 || candidate.kind === node_type);
+      const match = pickGraphNode(candidates, node, graph_id, node_type ? `${node_type} node` : "trigger node");
+      const testPayload = payload ?? match.node.test_payload ?? {};
+      let result;
+      try {
+        result = await sessions.runTestSession({
+          graph_id,
+          node_type: match.kind,
+          node_id: match.node.id,
+          payload: testPayload
+        });
+      } catch (error2) {
+        if (error2 instanceof ApiError && error2.status === 400 && match.kind === "telegram-trigger") {
+          throw new Error(
+            `${error2.message}: ${error2.bodyExcerpt ?? ""} \u2014 a Telegram test payload may use only the parents and fields selected on the node (list_telegram_trigger_fields lists what exists; fields are selected in the EpicStaff editor \u2014 flow source cannot express them, so a pushed node starts with none).`
+          );
+        }
+        if (error2 instanceof ApiError && error2.status === 403) {
+          throw new Error("A trigger test run was refused: it needs Flows UPDATE and Flows USE in the active organization.");
+        }
+        throw error2;
+      }
+      return {
+        session_id: result.session_id,
+        node: { kind: match.kind, id: match.node.id, node_name: match.node.node_name },
+        payload_variable: `variables.${TRIGGER_PAYLOAD_VARIABLE[match.kind]}`,
+        ...payload === void 0 ? { payload_source: "the test payload saved on the node" } : {},
+        next: "Poll get_session_updates until the status is terminal, then read get_session_messages."
+      };
+    })
+  );
+  server.registerTool(
+    "list_telegram_trigger_fields",
+    {
+      title: "List Telegram trigger fields",
+      description: "The Telegram update fields a Telegram trigger node can select, per parent (message, callback_query), with their Telegram type and description. A test payload of run_flow_from_trigger may use only the fields selected on the node.",
+      inputSchema: {
+        parent: external_exports.string().optional().describe('Only this parent (e.g. "message").')
+      }
+    },
+    async ({ parent }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const fields = await telegramFields.list();
+      if (parent === void 0) return fields;
+      const selected = fields[parent];
+      if (selected === void 0) {
+        throw new Error(`Unknown parent "${parent}". Parents: ${Object.keys(fields).join(", ")}.`);
+      }
+      return { [parent]: selected };
     })
   );
   server.registerTool(
@@ -37814,6 +38055,32 @@ function registerUiTools(server, context) {
 
 // src/tools/knowledge.tools.ts
 import { existsSync as existsSync4 } from "node:fs";
+var DEFAULT_CHUNK_TEXT_CHARS = 1e3;
+async function naiveRagOf(knowledge, collectionId, purpose) {
+  const collection = await knowledge.getCollection(collectionId);
+  const rags = collection.rag_configurations ?? [];
+  const naive = rags.find((rag) => rag.rag_type === "naive");
+  if (naive !== void 0) return naive.rag_id;
+  throw new Error(
+    rags.length > 0 ? `Collection #${collectionId} has only a graph RAG \u2014 ${purpose} is available for naive RAG only.` : `Collection #${collectionId} has no RAG attached (attach_rag) \u2014 ${purpose} needs a naive RAG.`
+  );
+}
+function selectDocumentConfigs(configs, documents, collectionId) {
+  if (documents === void 0) return configs;
+  return documents.map((document) => {
+    const matches = configs.filter(
+      (config2) => typeof document === "number" ? config2.document_id === document : config2.file_name === document
+    );
+    if (matches.length === 1 && matches[0] !== void 0) return matches[0];
+    if (matches.length > 1) {
+      throw new Error(`Document "${document}" is ambiguous in collection #${collectionId} \u2014 pass its document id.`);
+    }
+    const available = configs.map((config2) => `${config2.file_name} (${config2.document_id})`).slice(0, 30).join(", ");
+    throw new Error(
+      `Document ${JSON.stringify(document)} has no naive RAG config in collection #${collectionId}. Configured documents: ${available || "(none)"}.`
+    );
+  });
+}
 function registerKnowledgeTools(server, context) {
   const knowledge = new KnowledgeApi(context.client);
   server.registerTool(
@@ -37877,82 +38144,136 @@ function registerKnowledgeTools(server, context) {
       };
     })
   );
+  server.registerTool(
+    "import_documents_from_storage",
+    {
+      title: "Import storage files into a knowledge collection",
+      description: `Copy files that are already in the organization's EpicStaff storage into a knowledge collection as documents (no local upload), then (by default) re-trigger indexing like upload_documents. Name each file or folder by storage path ("docs/" or "docs/guide.pdf") or storage id; a folder imports every file beneath it. Files the collection cannot take \u2014 unsupported type, too large, or already present with the same name and size \u2014 are skipped and listed, the rest are imported. Needs Knowledge Sources CREATE and Files READ.`,
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection."),
+        storage: external_exports.array(idOrName).min(1).max(STORAGE_IMPORT_MAX_IDS).describe('Storage files / folders: a path ("docs/guide.pdf", "docs/") or a storage id.'),
+        reindex: external_exports.boolean().optional().describe("Re-trigger indexing of attached RAG strategies after the import (default true).")
+      }
+    },
+    async ({ collection_id, storage: storageRefs, reindex }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const storage = new StorageApi(context.client);
+      const storageIds = /* @__PURE__ */ new Set();
+      for (const ref of storageRefs) {
+        storageIds.add(typeof ref === "number" ? ref : await storage.resolveItemId(ref));
+      }
+      let imported;
+      try {
+        imported = await knowledge.importFromStorage(collection_id, [...storageIds]);
+      } catch (error2) {
+        if (error2 instanceof ApiError && error2.bodyExcerpt?.includes("nothing_to_import")) {
+          throw new Error(
+            `Nothing was imported: every selected file was skipped (unsupported type, too large, or already in the collection with the same name and size). ${error2.bodyExcerpt}`
+          );
+        }
+        throw error2;
+      }
+      const reindexed = reindex === false || imported.documents.length === 0 ? [] : await knowledge.reindexCollection(collection_id);
+      return {
+        message: imported.message,
+        documents: imported.documents,
+        skipped: imported.skipped,
+        reindexed,
+        next: reindex === false ? "Indexing NOT triggered \u2014 the imported documents are not retrievable until you re-index." : reindexed.length > 0 ? "Indexing started. Poll get_collection_status until the RAG status is completed." : "No RAG strategy is attached (or nothing new was imported) \u2014 nothing to index; attach_rag to make it searchable."
+      };
+    })
+  );
+  server.registerTool(
+    "estimate_rag_indexing",
+    {
+      title: "Estimate the cost of indexing a collection",
+      description: "Read-only token and cost estimate of (re-)indexing a collection's naive RAG: document and chunk counts, embedding tokens (exact or approximated) and USD cost when the model price is known. Pass chunk_size / chunk_overlap / chunk_strategy to estimate a what-if chunking without saving it. Nothing is indexed or changed. Not available for graph RAG. Needs Knowledge Sources UPDATE (like indexing).",
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection."),
+        documents: external_exports.array(idOrName).min(1).optional().describe("Only these documents (document id or exact file name \u2014 list_documents). Default: all."),
+        chunk_size: external_exports.number().int().min(NAIVE_CHUNK_SIZE_BOUNDS.min).max(NAIVE_CHUNK_SIZE_BOUNDS.max).optional().describe("What-if chunk size for every selected document."),
+        chunk_overlap: external_exports.number().int().min(NAIVE_CHUNK_OVERLAP_BOUNDS.min).max(NAIVE_CHUNK_OVERLAP_BOUNDS.max).optional().describe("What-if chunk overlap for every selected document."),
+        chunk_strategy: external_exports.enum(NAIVE_CHUNK_STRATEGIES).optional().describe("What-if chunking strategy.")
+      }
+    },
+    async ({ collection_id, documents, chunk_size, chunk_overlap, chunk_strategy }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const ragId = await naiveRagOf(knowledge, collection_id, "an indexing estimate");
+      const configs = selectDocumentConfigs(
+        await knowledge.listNaiveRagDocumentConfigs(ragId),
+        documents,
+        collection_id
+      );
+      if (configs.length === 0) {
+        throw new Error(`Collection #${collection_id} has no documents configured for its naive RAG \u2014 nothing to estimate.`);
+      }
+      const whatIf = {
+        ...chunk_size !== void 0 ? { chunk_size } : {},
+        ...chunk_overlap !== void 0 ? { chunk_overlap } : {},
+        ...chunk_strategy !== void 0 ? { chunk_strategy } : {}
+      };
+      const overrides = Object.keys(whatIf).length > 0 ? configs.map((config2) => ({ document_config_id: config2.naive_rag_document_id, ...whatIf })) : void 0;
+      const estimate = await knowledge.estimateIndexing(
+        ragId,
+        "naive",
+        configs.map((config2) => config2.naive_rag_document_id),
+        overrides
+      );
+      return {
+        collection_id,
+        rag_id: ragId,
+        chunking: overrides !== void 0 ? { what_if: whatIf } : "the saved per-document settings",
+        ...estimate
+      };
+    })
+  );
+  server.registerTool(
+    "list_indexed_chunks",
+    {
+      title: "List the indexed chunks of a document",
+      description: `Read the chunks a collection's naive RAG indexed for one document, in document order \u2014 what retrieval actually searches. Use it to debug retrieval: empty or garbled text, chunks too big or too small. Text is cut at ${DEFAULT_CHUNK_TEXT_CHARS} characters per chunk unless text_chars says otherwise.`,
+      inputSchema: {
+        collection_id: external_exports.number().int().describe("Backend id of the source collection."),
+        document: idOrName.describe("The document: its document id or exact file name (list_documents)."),
+        limit: external_exports.number().int().min(1).max(100).default(20),
+        offset: external_exports.number().int().min(0).default(0),
+        text_chars: external_exports.number().int().min(50).max(2e4).optional().describe(`Characters of each chunk's text to return (default ${DEFAULT_CHUNK_TEXT_CHARS}).`)
+      }
+    },
+    async ({ collection_id, document, limit, offset, text_chars }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const ragId = await naiveRagOf(knowledge, collection_id, "listing indexed chunks");
+      const [config2] = selectDocumentConfigs(await knowledge.listNaiveRagDocumentConfigs(ragId), [document], collection_id);
+      if (config2 === void 0) throw new Error(`Document ${JSON.stringify(document)} not found.`);
+      const page = await knowledge.listIndexedChunks(config2.naive_rag_document_id, limit, offset);
+      const maxChars = text_chars ?? DEFAULT_CHUNK_TEXT_CHARS;
+      return {
+        document: {
+          document_id: config2.document_id,
+          file_name: config2.file_name,
+          document_config_id: config2.naive_rag_document_id,
+          ...config2.status !== void 0 ? { status: config2.status } : {}
+        },
+        count: page.count,
+        offset,
+        chunks: page.results.map((chunk) => ({
+          chunk_index: chunk.chunk_index,
+          token_count: chunk.token_count,
+          text: chunk.text.length > maxChars ? `${chunk.text.slice(0, maxChars)}\u2026` : chunk.text,
+          ...chunk.text.length > maxChars ? { text_length: chunk.text.length } : {},
+          ...Object.keys(chunk.metadata ?? {}).length > 0 ? { metadata: chunk.metadata } : {}
+        })),
+        ...page.count === 0 ? { note: "No chunks stored \u2014 the document has not been indexed yet (get_collection_status)." } : {}
+      };
+    })
+  );
 }
 
 // src/tools/catalog.tools.ts
 import { existsSync as existsSync5 } from "node:fs";
-
-// src/tools/catalog-helpers.ts
-var idOrName = external_exports.union([external_exports.number().int(), external_exports.string().min(1)]);
-async function resolveNamedRef(ref, entityLabel, list, idOf, nameOf) {
-  if (typeof ref === "number") return ref;
-  const items = await list();
-  const wanted = ref.trim().toLowerCase();
-  const matches = items.filter((item) => nameOf(item).toLowerCase() === wanted);
-  if (matches.length > 1) {
-    const ids = matches.map(idOf).filter((id2) => id2 !== void 0);
-    throw new Error(
-      `${entityLabel} "${ref}" is ambiguous \u2014 ${matches.length} entries carry that name (ids ${ids.join(", ")}). Pass the numeric backend id instead.`
-    );
-  }
-  const match = matches[0];
-  const id = match ? idOf(match) : void 0;
-  if (id === void 0) {
-    const available = items.map(nameOf).filter(Boolean).slice(0, 30).join(", ");
-    throw new Error(
-      `${entityLabel} "${ref}" not found in the active organization. Available: ${available || "(none)"}. Pass a numeric backend id or an exact existing name.`
-    );
-  }
-  return id;
-}
-function isAlreadyExistsError(error2) {
-  if (error2.status === 409) return true;
-  const haystack = [
-    error2.message,
-    error2.bodyExcerpt ?? "",
-    ...error2.validationErrors?.map((issue2) => `${issue2.field} ${issue2.reason}`) ?? []
-  ].join(" ").toLowerCase();
-  return /already exist|must be unique|unique constraint|duplicate|conflict/.test(haystack);
-}
-async function createOrExplainConflict(create, name, updateToolName) {
-  try {
-    return await create();
-  } catch (error2) {
-    if (error2 instanceof ApiError && isAlreadyExistsError(error2)) {
-      throw new Error(
-        `An entity named "${name}" already exists in this organization (catalog names are org-unique). Use ${updateToolName} to modify the existing one, or choose a different name.`
-      );
-    }
-    throw error2;
-  }
-}
-async function resolveCredential(secrets, credentialEnv, credentialSecret, inputNames = { env: "api_key_env", secret: "api_key_secret" }) {
-  if (credentialEnv !== void 0 && credentialSecret !== void 0) {
-    throw new Error(`Pass either ${inputNames.env} or ${inputNames.secret}, not both.`);
-  }
-  if (credentialEnv !== void 0) {
-    return (await ensureSecretFromEnv(secrets(), secretName(credentialEnv), credentialEnv)).backendId;
-  }
-  if (credentialSecret === null || credentialSecret === void 0) return credentialSecret;
-  const api = secrets();
-  return resolveNamedRef(credentialSecret, "Secret", () => api.list(), (secret) => secret.id, (secret) => secret.name);
-}
-function summarizeAuthored(entity) {
-  const { created_by, last_edited_by, ...rest } = entity;
-  return {
-    ...rest,
-    ...created_by !== void 0 ? { created_by: describeUser(created_by) } : {},
-    ...last_edited_by !== void 0 ? { last_edited_by: describeUser(last_edited_by) } : {}
-  };
-}
-function pickDefined(fields) {
-  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== void 0));
-}
-function recycleBinHint(kind, id) {
-  return `It is in the recycle bin: list_recycle_bin(kind: "${kind}") shows it, restore_from_recycle_bin(kind: "${kind}", ids: [${id}]) brings it back.`;
-}
-
-// src/tools/catalog.tools.ts
 var toolModeSchema2 = external_exports.enum(["allow", "deny"]).default("allow").describe('Tool permission. "deny" hard-wins over "allow" when surfaces combine.');
 var triStateSchema = external_exports.enum(["allow", "unset", "deny"]).default("unset").describe("Tri-state storage permission. When surfaces combine: deny > allow > unset.");
 var surfaceToolEntrySchema2 = external_exports.strictObject({
@@ -39056,6 +39377,41 @@ var RecycleBinApi = class {
   /** Deployment-wide retention: how many days a deleted item stays restorable. */
   async getSettings() {
     return this.client.get("recycle-bin/settings/");
+  }
+  /**
+   * One slice of emptying the active organization's whole bin, every kind at once (RecycleBinEmptyView).
+   * Same gates as a purge — superadmin, never an API key — so it always goes with the user session.
+   */
+  async emptySlice() {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post("recycle-bin/empty/", { body: {}, bearerToken })
+    );
+  }
+  /**
+   * Everything in every bin (`RecycleBinBulkService.emptyAll`). Each request purges for a limited time,
+   * so a large bin takes several: call again while items remain and the last call got somewhere (failed
+   * items stay, and are tried again only once). `leftCount` says how many were never reached.
+   */
+  async emptyAll() {
+    const responses = [];
+    let response = await this.emptySlice();
+    responses.push(response);
+    while (response.remaining > 0 && response.purged_count > 0) {
+      response = await this.emptySlice();
+      responses.push(response);
+    }
+    const failures = /* @__PURE__ */ new Map();
+    for (const failure of responses.flatMap((item) => item.failed)) {
+      failures.set(`${failure.source}:${failure.id}`, failure);
+    }
+    const remaining = responses.at(-1)?.remaining ?? 0;
+    return {
+      purgedCount: responses.reduce((total, item) => total + item.purged_count, 0),
+      failed: [...failures.values()],
+      leftCount: Math.max(0, remaining - failures.size),
+      calls: responses.length
+    };
   }
   /** Route a call through the user session when the backend refuses API keys for it. */
   async call(source, sessionOnly, request) {
@@ -40276,15 +40632,52 @@ function registerRecycleBinTools(server, context) {
         const result = await recycleBin().purge(kind, ids);
         return { kind: RECYCLE_BIN_SOURCES[kind].kind, ...result };
       } catch (error2) {
-        if (error2 instanceof ApiError && error2.status === 403) {
-          throw new Error(
-            "Purging was refused: EpicStaff lets only a superadmin purge, and only from a signed-in session (EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD, not EPICSTAFF_API_TOKEN). Nothing was deleted; the items expire on their own when their retention runs out."
-          );
-        }
-        throw error2;
+        throw explainPurgeRefusal(error2);
       }
     })
   );
+  server.registerTool(
+    "empty_recycle_bin",
+    {
+      title: "Empty the whole recycle bin",
+      description: "IRREVERSIBLE: permanently delete EVERY item of EVERY bin of the active organization \u2014 flows, agents, surfaces, tools, collections (and their indexes), tables, secrets, voice channels, webhook triggers and storage files. Nothing can be restored afterwards. Superadmin only, through a signed-in session (never an API key). Use only when the user explicitly asks to empty the whole bin; to delete chosen items use purge_from_recycle_bin. Requires confirm: true and organization_id equal to the active organization.",
+      inputSchema: {
+        organization_id: external_exports.number().int().describe("The active organization whose bin is emptied (list_organizations) \u2014 a guard against the wrong org."),
+        confirm: external_exports.literal(true).describe("Must be true: the user explicitly asked to empty the whole recycle bin for good.")
+      }
+    },
+    async ({ organization_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const activeOrgId = await context.org.requireActiveOrg();
+      if (organization_id !== activeOrgId) {
+        throw new Error(
+          `organization_id ${organization_id} is not the active organization (${activeOrgId}). Nothing was deleted \u2014 switch with set_active_organization first if that is the bin to empty.`
+        );
+      }
+      try {
+        const result = await recycleBin().emptyAll();
+        return {
+          organization_id: activeOrgId,
+          purged: result.purgedCount,
+          failed: result.failed,
+          ...result.leftCount > 0 ? {
+            left: result.leftCount,
+            next: "The bin stopped emptying before every item was reached \u2014 call empty_recycle_bin again."
+          } : {}
+        };
+      } catch (error2) {
+        throw explainPurgeRefusal(error2);
+      }
+    })
+  );
+}
+function explainPurgeRefusal(error2) {
+  if (error2 instanceof ApiError && error2.status === 403) {
+    return new Error(
+      "Purging was refused: EpicStaff lets only a superadmin purge, and only from a signed-in session (EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD, not EPICSTAFF_API_TOKEN). Nothing was deleted; the items expire on their own when their retention runs out."
+    );
+  }
+  return error2;
 }
 
 // src/tools/voice-config.tools.ts
@@ -41329,6 +41722,2290 @@ function errorText(error2) {
   return error2 instanceof Error ? error2.message : String(error2);
 }
 
+// src/api/python-code-run.ts
+var POLL_INITIAL_DELAY_MS = 1e3;
+var POLL_INTERVAL_MS = 2e3;
+var POLL_DEADLINE_GRACE_MS = 6e4;
+var MAX_NOT_FOUND_RETRIES = 3;
+var PythonCodeRunApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async runPythonCode(request) {
+    return this.client.post("run-python-code/", { body: request });
+  }
+  async getResult(executionId) {
+    return this.client.get(`python-code-result/${encodeURIComponent(executionId)}/`);
+  }
+  async getLastTestInput(pythonNodeId) {
+    return this.client.get(`pythonnodes/${pythonNodeId}/last-session-input/`);
+  }
+};
+var DEFAULT_TIMING = {
+  initialDelayMs: POLL_INITIAL_DELAY_MS,
+  intervalMs: POLL_INTERVAL_MS,
+  graceMs: POLL_DEADLINE_GRACE_MS,
+  sleep: (milliseconds) => new Promise((resolve2) => setTimeout(resolve2, milliseconds)),
+  now: () => Date.now()
+};
+async function pollPythonCodeResult(api, executionId, executionTimeoutSeconds, timing = {}) {
+  const { initialDelayMs, intervalMs, graceMs, sleep, now } = { ...DEFAULT_TIMING, ...timing };
+  const deadline = now() + executionTimeoutSeconds * 1e3 + graceMs;
+  let notFoundRetries = 0;
+  let lastStatus = "not_found_yet";
+  await sleep(initialDelayMs);
+  for (; ; ) {
+    try {
+      const result = await api.getResult(executionId);
+      notFoundRetries = 0;
+      if (result.status !== "pending") return { finished: true, result };
+      lastStatus = result.status;
+    } catch (error2) {
+      if (!(error2 instanceof ApiError) || error2.status !== 404) throw error2;
+      notFoundRetries += 1;
+      if (notFoundRetries > MAX_NOT_FOUND_RETRIES) {
+        throw new Error(
+          `Execution result ${executionId} not found in the active organization. It may belong to a different organization or have been removed.`
+        );
+      }
+    }
+    if (now() + intervalMs > deadline) return { finished: false, lastStatus };
+    await sleep(intervalMs);
+  }
+}
+
+// src/tools/code-run.tools.ts
+var CODE_RUN_OUTPUT_LIMIT = 2e4;
+var NODE_KINDS = ["python", "webhook-trigger"];
+var TARGET_TYPES = {
+  python: "python_node",
+  "webhook-trigger": "webhook_trigger_node"
+};
+function truncate(value) {
+  if (value === null || value.length <= CODE_RUN_OUTPUT_LIMIT) return { value, truncated: false };
+  return { value: `${value.slice(0, CODE_RUN_OUTPUT_LIMIT)}\u2026`, truncated: true };
+}
+function summarizeCodeRunResult(result) {
+  const stdout = truncate(result.stdout ?? "");
+  const stderr = truncate(result.stderr ?? "");
+  const resultData = truncate(result.result_data);
+  const truncatedFields = [
+    ...stdout.truncated ? ["stdout"] : [],
+    ...stderr.truncated ? ["stderr"] : [],
+    ...resultData.truncated ? ["result_data"] : []
+  ];
+  return {
+    execution_id: result.execution_id,
+    status: result.status,
+    returncode: result.returncode,
+    result_data: resultData.value,
+    stdout: stdout.value,
+    stderr: stderr.value,
+    ...result.finished_at !== void 0 ? { finished_at: result.finished_at } : {},
+    ...truncatedFields.length > 0 ? { truncated: `${truncatedFields.join(", ")} cut at ${CODE_RUN_OUTPUT_LIMIT} characters` } : {}
+  };
+}
+function registerCodeRunTools(server, context) {
+  const graphs = new GraphsApi(context.client);
+  const codeRuns = new PythonCodeRunApi(context.client);
+  const timeoutLimits = new ExecutionTimeoutLimitsApi(context.client);
+  server.registerTool(
+    "run_node_code",
+    {
+      title: "Test-run a node's Python code",
+      description: `Run the Python code EpicStaff has STORED for one node of a pushed flow \u2014 a python node, or a webhook trigger node's code \u2014 with the arguments you pass, outside any session (the editor's code "Run"). Returns status, returncode, result_data, stdout and stderr. push_flow first: local edits are not run. variables are the keyword arguments of the entrypoint; use_last_session_input: true replays what a python node received in the newest ended session instead. Needs Flows UPDATE (a webhook trigger's code also Flows USE). Waits for the result up to the code's execution timeout plus a minute; wait: false returns the execution_id at once (read it with get_code_run_result).`,
+      inputSchema: {
+        graph_id: external_exports.number().int().describe("Backend id of the pushed flow (push_flow / list_graphs)."),
+        node: idOrName.describe("The node: its backend id or its node name (the flow-source node key)."),
+        node_type: external_exports.enum(NODE_KINDS).optional().describe("Narrow the lookup to python or webhook-trigger nodes (needed only when an id matches both)."),
+        variables: external_exports.record(external_exports.unknown()).optional().describe('Keyword arguments of the entrypoint, e.g. {"text": "hello", "limit": 3}. Defaults to {}.'),
+        use_last_session_input: external_exports.boolean().optional().describe("Python nodes only: run with the input the node received in the newest ended session."),
+        wait: external_exports.boolean().default(true).describe("Wait for the result (default) or return the execution_id at once.")
+      }
+    },
+    async ({ graph_id, node, node_type, variables, use_last_session_input, wait }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      if (variables !== void 0 && use_last_session_input === true) {
+        throw new Error("Pass either variables or use_last_session_input: true, not both.");
+      }
+      const graph = await graphs.get(graph_id);
+      const candidates = [
+        ...(graph.python_node_list ?? []).map((pythonNode) => ({ kind: "python", node: pythonNode })),
+        ...(graph.webhook_trigger_node_list ?? []).map((webhookNode) => ({
+          kind: "webhook-trigger",
+          node: webhookNode
+        }))
+      ].filter((candidate) => node_type === void 0 || candidate.kind === node_type);
+      const match = pickGraphNode(candidates, node, graph_id, node_type ? `${node_type} node` : "python or webhook-trigger node");
+      let runVariables = variables ?? {};
+      if (use_last_session_input === true) {
+        if (match.kind !== "python") {
+          throw new Error("use_last_session_input applies to python nodes only \u2014 pass variables for a webhook trigger.");
+        }
+        const lastInput = await codeRuns.getLastTestInput(match.node.id);
+        if (lastInput.input === null) {
+          throw new Error(
+            `No ended session has run python node "${match.node.node_name}" yet (${lastInput.detail}) \u2014 pass variables instead.`
+          );
+        }
+        runVariables = lastInput.input;
+      }
+      let executionId;
+      try {
+        ({ execution_id: executionId } = await codeRuns.runPythonCode({
+          target: { type: TARGET_TYPES[match.kind], id: match.node.id },
+          variables: runVariables
+        }));
+      } catch (error2) {
+        if (error2 instanceof ApiError && error2.status === 403) {
+          throw new Error(
+            `Running stored code was refused: it needs Flows UPDATE in the active organization${match.kind === "webhook-trigger" ? ", and a trigger node's code also Flows USE" : ""}.`
+          );
+        }
+        throw error2;
+      }
+      const ran = {
+        node: { kind: match.kind, id: match.node.id, node_name: match.node.node_name },
+        // The caller knows the variables it passed; a replayed input is worth showing.
+        ...use_last_session_input === true ? { replayed_input: runVariables } : {}
+      };
+      if (!wait) {
+        return { ...ran, execution_id: executionId, next: "Read the result with get_code_run_result(execution_id)." };
+      }
+      const timeoutSeconds = match.node.python_code?.execution_timeout ?? (await timeoutLimits.get()).default_seconds;
+      const outcome = await pollPythonCodeResult(codeRuns, executionId, timeoutSeconds);
+      if (!outcome.finished) {
+        return {
+          ...ran,
+          execution_id: executionId,
+          status: outcome.lastStatus,
+          next: `No result within the code's execution timeout of ${timeoutSeconds} s and a grace period; it may still be running on the server. Check later with get_code_run_result(execution_id).`
+        };
+      }
+      return { ...ran, ...summarizeCodeRunResult(outcome.result) };
+    })
+  );
+  server.registerTool(
+    "get_code_run_result",
+    {
+      title: "Read a code test-run result",
+      description: "The result of a run_node_code run by its execution_id: status (pending / completed / error), returncode, result_data, stdout, stderr. Results are visible only in the organization that started the run.",
+      inputSchema: {
+        execution_id: external_exports.string().min(1).describe("execution_id returned by run_node_code.")
+      }
+    },
+    async ({ execution_id }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const result = await codeRuns.getResult(execution_id);
+      return {
+        ...summarizeCodeRunResult(result),
+        ...result.status === "pending" ? { next: "Still running \u2014 call get_code_run_result again shortly." } : {}
+      };
+    })
+  );
+}
+
+// src/api/filter-presets.ts
+var FILTER_PRESET_PATHS = {
+  flow: "flow-filter-presets/",
+  tool: "tool-filter-presets/"
+};
+var FILTER_BODY_KEYS = {
+  flow: ["sortOrder", "includedFlowIds", "includedLabelIds", "customConditions"],
+  tool: [
+    "showFavoriteOnly",
+    "showNotFavoriteOnly",
+    "sourceBuiltIn",
+    "sourceCustom",
+    "usageBuckets",
+    "unusedOnly",
+    "sortOrder",
+    "includedToolIds",
+    "includedLabelIds",
+    "customConditions"
+  ]
+};
+var FilterPresetsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  /** The caller's presets in the active organization (`getPresets`: one page of up to 1000). */
+  async list(scope) {
+    return unwrap2(
+      await this.client.get(FILTER_PRESET_PATHS[scope], {
+        query: { limit: 1e3 }
+      })
+    );
+  }
+  async create(scope, payload) {
+    return this.client.post(FILTER_PRESET_PATHS[scope], { body: payload });
+  }
+  async update(scope, id, changes) {
+    return this.client.patch(`${FILTER_PRESET_PATHS[scope]}${id}/`, { body: changes });
+  }
+  async delete(scope, id) {
+    await this.client.delete(`${FILTER_PRESET_PATHS[scope]}${id}/`);
+  }
+};
+
+// src/tools/filter-preset.tools.ts
+var scopeSchema = external_exports.enum(["flow", "tool"]).describe('Which list page: "flow" (the flows page) or "tool" (the tools page).');
+var filterBodySchema = external_exports.record(external_exports.unknown()).describe(
+  'The page filter state. flow keys: sortOrder ("default" | "name_asc" | "name_desc" | "last_modified"), includedFlowIds (number[] | null = all), includedLabelIds (number[] | null = all), customConditions (condition groups | null). tool keys: showFavoriteOnly, showNotFavoriteOnly, sourceBuiltIn, sourceCustom, unusedOnly (booleans), usageBuckets (subset of "agent_surface", "shared_surface", "inline_surface"), sortOrder ("default" | "last_modified" | "name_asc" | "name_desc" | "most_used" | "unused_first"), includedToolIds, includedLabelIds (number[] | null), customConditions. Any other key is rejected.'
+);
+var presetRefSchema = idOrName.describe("The preset: its id or exact name (list_filter_presets).");
+function summarizePreset(scope, preset) {
+  return {
+    scope,
+    id: preset.id,
+    name: preset.name,
+    filter_body: preset.filter_body,
+    updated_at: preset.updated_at
+  };
+}
+function registerFilterPresetTools(server, context) {
+  const presets = new FilterPresetsApi(context.client);
+  const resolvePreset = (scope, ref) => resolveNamedRef(ref, `${scope} filter preset`, () => presets.list(scope), (preset) => preset.id, (preset) => preset.name);
+  server.registerTool(
+    "list_filter_presets",
+    {
+      title: "List saved list filters",
+      description: `List your saved filters of the EpicStaff flows or tools page (private to you, in the active organization). filter_body keys \u2014 flow: ${FILTER_BODY_KEYS.flow.join(", ")}; tool: ${FILTER_BODY_KEYS.tool.join(", ")}.`,
+      inputSchema: { scope: scopeSchema }
+    },
+    async ({ scope }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return (await presets.list(scope)).map((preset) => summarizePreset(scope, preset));
+    })
+  );
+  server.registerTool(
+    "create_filter_preset",
+    {
+      title: "Save a list filter",
+      description: "Save a named filter of the EpicStaff flows or tools page for yourself. Names are unique per user and organization. It only shapes what the page lists \u2014 no flow or tool changes.",
+      inputSchema: {
+        scope: scopeSchema,
+        name: external_exports.string().min(1).max(150),
+        filter_body: filterBodySchema
+      }
+    },
+    async ({ scope, name, filter_body }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return summarizePreset(scope, await presets.create(scope, { name, filter_body }));
+    })
+  );
+  server.registerTool(
+    "update_filter_preset",
+    {
+      title: "Update a saved list filter",
+      description: "Rename a saved filter and/or replace its filter_body (the whole body: keys you leave out are dropped).",
+      inputSchema: {
+        scope: scopeSchema,
+        preset: presetRefSchema,
+        name: external_exports.string().min(1).max(150).optional(),
+        filter_body: filterBodySchema.optional()
+      }
+    },
+    async ({ scope, preset, name, filter_body }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const changes = {
+        ...name !== void 0 ? { name } : {},
+        ...filter_body !== void 0 ? { filter_body } : {}
+      };
+      if (Object.keys(changes).length === 0) throw new Error("Nothing to change \u2014 pass name or filter_body.");
+      const presetId = await resolvePreset(scope, preset);
+      return summarizePreset(scope, await presets.update(scope, presetId, changes));
+    })
+  );
+  server.registerTool(
+    "delete_filter_preset",
+    {
+      title: "Delete a saved list filter",
+      description: "Delete one of your saved filters for good (it is not binned). The flows or tools it matched are untouched.",
+      inputSchema: {
+        scope: scopeSchema,
+        preset: presetRefSchema
+      }
+    },
+    async ({ scope, preset }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const presetId = await resolvePreset(scope, preset);
+      await presets.delete(scope, presetId);
+      return { deleted: { scope, id: presetId } };
+    })
+  );
+}
+
+// src/api/profile.ts
+var API_KEY_MAX_EXPIRES_IN_DAYS = 3650;
+var API_KEY_PREFIX_LENGTH = 12;
+function apiKeyPrefix(rawKey) {
+  return rawKey.slice(0, API_KEY_PREFIX_LENGTH);
+}
+var ProfileApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async getProfile() {
+    return this.client.get("profile/");
+  }
+  async updateProfile(changes) {
+    return this.client.patch("profile/", { body: changes });
+  }
+  /** Effective permissions in the active organization (X-Organization-Id). */
+  async getActivePermissions() {
+    return this.client.get("permissions/me/");
+  }
+  /** Effective permissions in every organization the user belongs to. */
+  async getOrgPermissions() {
+    return this.client.get("permissions/me/orgs/");
+  }
+  async getPermissionCatalog() {
+    return this.client.get("permissions/catalog/");
+  }
+  async listApiKeys() {
+    return withUserSession(this.session, (bearerToken) => this.client.get("profile/api-keys/", { bearerToken }));
+  }
+  /**
+   * Mint a personal API key. The response holds the raw key exactly once — callers must hand it
+   * to its destination immediately and never log or return it.
+   */
+  async createApiKey(name, expiresInDays) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post("profile/api-keys/", {
+        bearerToken,
+        // Omitting expires_in_days selects the backend's 90-day default; null means "never expires".
+        body: { name, ...expiresInDays !== void 0 ? { expires_in_days: expiresInDays } : {} }
+      })
+    );
+  }
+  /** Retire a key: it stops authenticating at once and stays listed as `revoked`. */
+  async revokeApiKey(id) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post(`profile/api-keys/${id}/revoke/`, { bearerToken, body: {} })
+    );
+  }
+};
+
+// src/util/secret-file.ts
+import { closeSync as closeSync2, lstatSync as lstatSync2, openSync as openSync2, statSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname4, isAbsolute as isAbsolute5 } from "node:path";
+function assertNewSecretFilePath(path6) {
+  if (!isAbsolute5(path6)) {
+    throw new Error(`${path6} is not an absolute path \u2014 pass the full path of the file to create.`);
+  }
+  let directory;
+  try {
+    directory = statSync(dirname4(path6));
+  } catch {
+    throw new Error(`The directory ${dirname4(path6)} does not exist \u2014 create it first or pick another path.`);
+  }
+  if (!directory.isDirectory()) {
+    throw new Error(`${dirname4(path6)} is not a directory.`);
+  }
+  let existing;
+  try {
+    existing = lstatSync2(path6);
+  } catch {
+    return;
+  }
+  throw new Error(
+    existing.isSymbolicLink() ? `${path6} is a symbolic link \u2014 refusing to write a credential through it. Pick a new file path.` : `${path6} already exists \u2014 a credential is only ever written to a new file. Pick a new file path.`
+  );
+}
+function writeNewSecretFile(path6, content) {
+  let descriptor;
+  try {
+    descriptor = openSync2(path6, "wx", 384);
+  } catch (error2) {
+    const code = error2.code;
+    if (code === "EEXIST") throw new Error(`${path6} already exists \u2014 a credential is only ever written to a new file.`);
+    throw error2;
+  }
+  try {
+    writeFileSync5(descriptor, content, "utf8");
+  } finally {
+    closeSync2(descriptor);
+  }
+}
+
+// src/api/redaction.ts
+var REDACTED_VALUE = "[redacted]";
+async function withRedactedErrors(sensitive, call) {
+  try {
+    return await call();
+  } catch (error2) {
+    if (!(error2 instanceof ApiError)) throw error2;
+    const sensitiveFields = new Set(sensitive.map((input) => input.field));
+    const scrub = (text) => sensitive.reduce((scrubbed, input) => input.value ? scrubbed.split(input.value).join(REDACTED_VALUE) : scrubbed, text);
+    const issues = error2.validationErrors?.map((issue2) => ({
+      field: issue2.field,
+      value: sensitiveFields.has(issue2.field) ? REDACTED_VALUE : issue2.value,
+      reason: scrub(issue2.reason)
+    }));
+    const summary = issues?.length ? issues.map((issue2) => `${issue2.field}: ${issue2.reason}`).join("; ") : void 0;
+    const message = summary ? `Validation failed \u2014 ${summary}` : scrub(`${error2.message}${backendReason(error2.bodyExcerpt)}`);
+    throw new ApiError(error2.status, error2.url, message, issues);
+  }
+}
+function backendReason(bodyExcerpt) {
+  if (!bodyExcerpt) return "";
+  try {
+    const body = JSON.parse(bodyExcerpt);
+    const message = typeof body.message === "string" ? body.message : typeof body.detail === "string" ? body.detail : void 0;
+    if (message === void 0) return "";
+    return typeof body.code === "string" ? ` \u2014 ${body.code}: ${message}` : ` \u2014 ${message}`;
+  } catch {
+    return "";
+  }
+}
+
+// src/tools/admin-helpers.ts
+function confirmFlag(action) {
+  return external_exports.literal(true).describe(`Must be true: the user explicitly asked to ${action}.`);
+}
+function assertConfirmed(confirm, action) {
+  if (confirm !== true) {
+    throw new Error(`Refusing to ${action} without confirm: true \u2014 pass it only when the user explicitly asked for this change.`);
+  }
+}
+function requireSignedInSession(context, operation) {
+  if (context.config.email === void 0 || context.config.password === void 0) {
+    throw new Error(
+      `${operation} needs a signed-in EpicStaff session: EpicStaff accepts API keys only for reading the administration surface (a leaked key must not change who can do what, nor mint or retire keys). Set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD for the MCP server, or do this in the EpicStaff UI.`
+    );
+  }
+}
+var ORG_SCOPED_NOT_FOUND = "not found \u2014 or it belongs to an organization you cannot administer (EpicStaff answers 404, never 403, for records outside your organizations)";
+async function explainRefusals(refusal, work) {
+  try {
+    return await work();
+  } catch (error2) {
+    if (!(error2 instanceof ApiError)) throw error2;
+    const reason = backendReason(error2.bodyExcerpt);
+    if (error2.status === 403) {
+      throw new Error(`EpicStaff refused to ${refusal.action} (HTTP 403${reason}). It needs ${refusal.requirement}.`);
+    }
+    if (error2.status === 404) {
+      throw new Error(`Could not ${refusal.action}: ${refusal.notFound ?? ORG_SCOPED_NOT_FOUND} (HTTP 404${reason}).`);
+    }
+    if ((error2.status === 400 || error2.status === 409) && !error2.validationErrors?.length && reason) {
+      throw new ApiError(error2.status, error2.url, `Could not ${refusal.action} (HTTP ${error2.status}${reason}).`);
+    }
+    throw error2;
+  }
+}
+var userRef = external_exports.union([external_exports.number().int().positive(), external_exports.string().email()]);
+var organizationRef = external_exports.union([external_exports.number().int().positive(), external_exports.string().min(1)]);
+var roleRef = external_exports.union([external_exports.number().int().positive(), external_exports.string().min(1)]);
+var RESOLVE_PAGE_SIZE = 200;
+async function resolveOrganizationId(context, organizations, ref) {
+  if (typeof ref === "number") return ref;
+  const wanted = ref.trim().toLowerCase();
+  const memberOf = (await context.org.resolve()).organizations.filter((org) => org.name.toLowerCase() === wanted);
+  if (memberOf.length === 1 && memberOf[0]) return memberOf[0].id;
+  if (memberOf.length > 1) throw ambiguous("Organization", ref, memberOf.map((org) => org.id));
+  let listed;
+  try {
+    listed = (await organizations.list({ search: ref.trim(), page_size: RESOLVE_PAGE_SIZE })).results;
+  } catch (error2) {
+    if (error2 instanceof ApiError && error2.status === 403) listed = [];
+    else throw error2;
+  }
+  const matches = listed.filter((org) => org.name.toLowerCase() === wanted);
+  if (matches.length > 1) throw ambiguous("Organization", ref, matches.map((org) => org.id));
+  const match = matches[0];
+  if (!match) {
+    throw new Error(`Organization "${ref}" not found among the organizations you can see. Pass its numeric id (admin_list_organizations).`);
+  }
+  return match.id;
+}
+async function resolveUserId(users, ref) {
+  if (typeof ref === "number") return ref;
+  const wanted = ref.trim().toLowerCase();
+  const page = await users.list({ search: ref.trim(), page_size: RESOLVE_PAGE_SIZE });
+  const match = page.results.find((user) => user.email.toLowerCase() === wanted);
+  if (!match) throw new Error(`No account with the email "${ref}" (admin_list_users). Pass its numeric id instead.`);
+  return match.id;
+}
+async function resolveRoleId(roles, ref, orgId) {
+  if (typeof ref === "number") return ref;
+  const listed = await roles.list({
+    ...orgId !== void 0 ? { assignable_org_ids: [orgId] } : {},
+    search: ref.trim(),
+    page_size: RESOLVE_PAGE_SIZE
+  });
+  const wanted = ref.trim().toLowerCase();
+  const matches = [...listed.built_in_roles, ...listed.results].filter((role) => role.name.toLowerCase() === wanted);
+  const unique = [...new Map(matches.map((role) => [role.id, role])).values()];
+  if (unique.length > 1) throw ambiguous("Role", ref, unique.map((role) => role.id));
+  const match = unique[0];
+  if (!match) {
+    const scope = orgId !== void 0 ? ` assignable in organization ${orgId}` : "";
+    throw new Error(`No role named "${ref}"${scope} (admin_list_roles). Pass its numeric id instead.`);
+  }
+  return match.id;
+}
+function ambiguous(kind, ref, ids) {
+  return new Error(`${kind} "${ref}" is ambiguous \u2014 ids ${ids.join(", ")} carry that name. Pass the numeric id.`);
+}
+function summarizeRole(role) {
+  return {
+    id: role.id,
+    name: role.name,
+    description: role.description,
+    built_in: role.is_built_in,
+    organization: role.org ?? (role.scope === "global" ? "global" : null),
+    assigned_count: role.assigned_count,
+    permissions: Object.fromEntries(role.permissions.map((entry) => [entry.resource_type, entry.actions]))
+  };
+}
+function pageOf(page, pageNumber, summarize) {
+  return { count: page.count, page: pageNumber, has_more: Boolean(page.next), items: page.results.map(summarize) };
+}
+
+// src/tools/account.tools.ts
+function summarizeKey(key) {
+  return {
+    id: key.id,
+    name: key.name,
+    prefix: key.prefix,
+    status: key.status,
+    created_at: key.created_at,
+    expires_at: key.expires_at,
+    last_used_at: key.last_used_at,
+    ...key.revoked_at ? { revoked_at: key.revoked_at } : {}
+  };
+}
+function registerAccountTools(server, context) {
+  const profile = () => new ProfileApi(context.client, context.auth);
+  const ownKeyPrefix = () => {
+    const { apiKey } = context.store.get();
+    return apiKey ? apiKeyPrefix(apiKey) : null;
+  };
+  server.registerTool(
+    "get_my_account",
+    {
+      title: "Show my account and permissions",
+      description: "Who the configured EpicStaff user is (email, display name, superadmin or not), the organizations they belong to with their role in each, and the effective permissions there (resource \u2192 actions). Use it to check what an administration tool will be allowed to do before calling it.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const api = profile();
+      const [me, capabilities] = await Promise.all([api.getProfile(), api.getOrgPermissions()]);
+      return {
+        user: {
+          id: me.id,
+          email: me.email,
+          display_name: me.display_name,
+          is_superadmin: me.is_superadmin,
+          is_active: me.is_active
+        },
+        active_organization_id: me.active_organization_id,
+        memberships: me.memberships.map((membership) => ({
+          organization: { id: membership.organization.id, name: membership.organization.name },
+          role: membership.role.name,
+          joined_at: membership.joined_at
+        })),
+        permissions: capabilities.is_superadmin ? "superadmin: every action in every organization" : (capabilities.orgs ?? []).map((scope) => ({
+          organization: scope.org,
+          role: scope.role?.name ?? null,
+          permissions: scope.permissions
+        }))
+      };
+    })
+  );
+  server.registerTool(
+    "update_my_profile",
+    {
+      title: "Update my profile",
+      description: "Change the configured user's display name (the name EpicStaff shows as author and in chats).",
+      inputSchema: {
+        display_name: external_exports.string().max(255).nullable().describe("New display name; null derives it from the email again.")
+      }
+    },
+    async ({ display_name }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const updated = await profile().updateProfile({ display_name });
+      return { user: { id: updated.id, email: updated.email, display_name: updated.display_name } };
+    })
+  );
+  server.registerTool(
+    "list_my_api_keys",
+    {
+      title: "List my API keys",
+      description: "The configured user's personal API keys \u2014 name, prefix, status, expiry, last use; never the keys themselves (EpicStaff stores only a hash). The key this MCP server runs on is marked in_use_by_mcp. Needs a signed-in session (EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD): EpicStaff does not let an API key list keys.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      requireSignedInSession(context, "Listing API keys");
+      await context.auth.ensureAuthenticated();
+      const inUse = ownKeyPrefix();
+      const keys = await profile().listApiKeys();
+      return {
+        keys: keys.map((key) => ({ ...summarizeKey(key), ...key.prefix === inUse ? { in_use_by_mcp: true } : {} }))
+      };
+    })
+  );
+  server.registerTool(
+    "create_my_api_key",
+    {
+      title: "Create a personal API key",
+      description: "Mint a personal API key for the configured user \u2014 it acts with all of that user's permissions. The raw key is written to a NEW file at output_file (mode 0600; an existing path or symbolic link is refused) and is never shown in the conversation; the result names only its prefix. Use it to give an app or script its own EpicStaff credential (X-Api-Key header). Keep the file out of version control. Requires confirm: true.",
+      inputSchema: {
+        name: external_exports.string().min(1).max(255).describe('What the key is for, e.g. "pallet-quote backend".'),
+        output_file: external_exports.string().min(1).describe("Absolute path of the new file to write the key into."),
+        env_var_name: external_exports.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name").optional().describe("Write the key as a dotenv line NAME=<key> instead of the bare key."),
+        expires_in_days: external_exports.number().int().min(1).max(API_KEY_MAX_EXPIRES_IN_DAYS).nullable().optional().describe(`Lifetime in days (1\u2013${API_KEY_MAX_EXPIRES_IN_DAYS}); omit for EpicStaff's 90-day default, null for a key that never expires.`),
+        confirm: confirmFlag("create this API key")
+      }
+    },
+    async ({ name, output_file, env_var_name, expires_in_days }) => runTool(async () => {
+      requireSignedInSession(context, "Creating an API key");
+      assertNewSecretFilePath(output_file);
+      await context.auth.ensureAuthenticated();
+      const api = profile();
+      const created = await api.createApiKey(name, expires_in_days);
+      try {
+        writeNewSecretFile(output_file, env_var_name ? `${env_var_name}=${created.api_key}
+` : `${created.api_key}
+`);
+      } catch (error2) {
+        await api.revokeApiKey(created.id).catch((revokeError) => {
+          logger.warn(`Could not revoke API key ${created.prefix}\u2026 after failing to write it`, revokeError);
+        });
+        throw new Error(
+          `The key was minted but could not be written to ${output_file} (${error2 instanceof Error ? error2.message : String(error2)}); it was revoked again. Nothing usable was created.`
+        );
+      }
+      return {
+        api_key: summarizeKey(created),
+        written_to: output_file,
+        format: env_var_name ? `dotenv line ${env_var_name}=\u2026` : "the bare key",
+        note: "The key is only in that file (mode 0600) \u2014 send it as the X-Api-Key header. Revoke it with revoke_my_api_key."
+      };
+    })
+  );
+  server.registerTool(
+    "revoke_my_api_key",
+    {
+      title: "Revoke one of my API keys",
+      description: "Revoke a personal API key: it stops authenticating at once (apps using it break) and stays listed as revoked. Refuses the key this MCP server itself runs on. Requires confirm: true.",
+      inputSchema: {
+        key: external_exports.union([external_exports.number().int().positive(), external_exports.string().min(1)]).describe("The key: id, exact name, or prefix (list_my_api_keys)."),
+        confirm: confirmFlag("revoke this API key")
+      }
+    },
+    async ({ key }) => runTool(async () => {
+      requireSignedInSession(context, "Revoking an API key");
+      await context.auth.ensureAuthenticated();
+      const api = profile();
+      const keys = await api.listApiKeys();
+      const matches = keys.filter(
+        (candidate) => typeof key === "number" ? candidate.id === key : candidate.name === key || candidate.prefix === key
+      );
+      if (matches.length > 1) {
+        throw new Error(`"${key}" matches ${matches.length} keys (ids ${matches.map((match) => match.id).join(", ")}) \u2014 pass the id.`);
+      }
+      const target = matches[0];
+      if (!target) throw new Error(`No API key "${key}" among yours (list_my_api_keys).`);
+      if (target.prefix === ownKeyPrefix()) {
+        throw new Error(
+          `Key ${target.prefix}\u2026 is the one this MCP server authenticates with \u2014 revoking it would cut the server off. Revoke it in the EpicStaff UI if you really mean to.`
+        );
+      }
+      if (target.status === "revoked") return { api_key: summarizeKey(target), note: "Already revoked." };
+      return { api_key: summarizeKey(await api.revokeApiKey(target.id)) };
+    })
+  );
+}
+
+// src/tools/admin-rbac.tools.ts
+import { randomBytes } from "node:crypto";
+import { unlinkSync } from "node:fs";
+
+// src/api/admin-api-keys.ts
+var AdminApiKeysApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async list(params = {}) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.get("admin/api-keys/", {
+        bearerToken,
+        query: {
+          user: params.user,
+          status: params.status,
+          search: params.search,
+          org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+          page: params.page,
+          page_size: params.page_size
+        }
+      })
+    );
+  }
+  /** Retire a key (authorised by `api_keys` delete): it stops authenticating at once. */
+  async revoke(keyId) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post(`admin/api-keys/${keyId}/revoke/`, { bearerToken, body: {} })
+    );
+  }
+};
+
+// src/api/admin-memberships.ts
+var AdminMembershipsApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async list(params = {}) {
+    return this.client.get("admin/memberships/", {
+      query: {
+        org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+        role_id: params.role_id,
+        status: params.status,
+        search: params.search,
+        page: params.page,
+        page_size: params.page_size
+      }
+    });
+  }
+  async create(request) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post("admin/memberships/", { bearerToken, body: request })
+    );
+  }
+  async changeRole(membershipId, roleId) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.patch(`admin/memberships/${membershipId}/`, { bearerToken, body: { role_id: roleId } })
+    );
+  }
+  /** Remove the user from the organization; the account itself stays. */
+  async remove(membershipId) {
+    await withUserSession(
+      this.session,
+      (bearerToken) => this.client.delete(`admin/memberships/${membershipId}/`, { bearerToken })
+    );
+  }
+};
+
+// src/api/admin-organizations.ts
+var AdminOrganizationsApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async list(params = {}) {
+    return this.client.get("admin/organizations/", {
+      query: { is_active: params.is_active, search: params.search, page: params.page, page_size: params.page_size }
+    });
+  }
+  async create(name) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post("admin/organizations/", { bearerToken, body: { name } })
+    );
+  }
+  async rename(orgId, name) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.patch(`admin/organizations/${orgId}/`, { bearerToken, body: { name } })
+    );
+  }
+  /** Every member loses access to the organization's data until it is reactivated. */
+  async deactivate(orgId) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post(`admin/organizations/${orgId}/deactivate/`, { bearerToken, body: {} })
+    );
+  }
+  async reactivate(orgId) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post(`admin/organizations/${orgId}/reactivate/`, { bearerToken, body: {} })
+    );
+  }
+};
+
+// src/api/admin-roles.ts
+var AdminRolesApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async list(params = {}) {
+    return this.client.get("admin/roles/", {
+      query: {
+        org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+        assignable_org_ids: params.assignable_org_ids?.length ? params.assignable_org_ids.join(",") : void 0,
+        search: params.search,
+        page: params.page,
+        page_size: params.page_size
+      }
+    });
+  }
+  async get(roleId) {
+    return this.client.get(`admin/roles/${roleId}/`);
+  }
+  async create(request) {
+    return withUserSession(this.session, (bearerToken) => this.client.post("admin/roles/", { bearerToken, body: request }));
+  }
+  async update(roleId, changes) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.patch(`admin/roles/${roleId}/`, { bearerToken, body: changes })
+    );
+  }
+  async previewDelete(roleId) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.delete(`admin/roles/${roleId}/`, { bearerToken, query: { dry_run: "true" } })
+    );
+  }
+  /** Delete for good; its members fall back to the built-in Viewer role. */
+  async delete(roleId) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.delete(`admin/roles/${roleId}/`, { bearerToken })
+    );
+  }
+};
+
+// src/api/admin-users.ts
+var ADMIN_PAGE_SIZE_MAX = 200;
+var AdminUsersApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  /**
+   * Intentional divergence: the frontend sends `is_active=` here, which the backend ignores; the
+   * account-state filter UserValidationService.validate_list_users_query reads is `status`.
+   */
+  async list(params = {}) {
+    return this.client.get("admin/users/", {
+      query: {
+        search: params.search,
+        status: params.status,
+        is_superadmin: params.is_superadmin,
+        role_id: params.role_id,
+        org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+        page: params.page,
+        page_size: params.page_size
+      }
+    });
+  }
+  /** Create an account. The password never reaches an error message (see withRedactedErrors). */
+  async create(request) {
+    return withRedactedErrors(
+      [{ field: "password", value: request.password }],
+      () => withUserSession(
+        this.session,
+        (bearerToken) => this.client.post("admin/users/", { bearerToken, body: request })
+      )
+    );
+  }
+  async grantSuperadmin(userId) {
+    return this.action(userId, "grant-superadmin");
+  }
+  async revokeSuperadmin(userId) {
+    return this.action(userId, "revoke-superadmin");
+  }
+  /** The account can no longer sign in; its sessions and API keys stop working. */
+  async deactivate(userId) {
+    return this.action(userId, "deactivate");
+  }
+  async reactivate(userId) {
+    return this.action(userId, "reactivate");
+  }
+  async action(userId, action) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post(`admin/users/${userId}/${action}/`, { bearerToken, body: {} })
+    );
+  }
+};
+
+// src/tools/admin-rbac.tools.ts
+var SUPERADMIN = "superadmin rights";
+var ACCOUNT_STATUSES = ["active", "inactive"];
+var pageShape = {
+  page: external_exports.number().int().min(1).default(1).describe("Page number (1-based)."),
+  page_size: external_exports.number().int().min(1).max(ADMIN_PAGE_SIZE_MAX).default(50).describe(`Page size (max ${ADMIN_PAGE_SIZE_MAX}).`)
+};
+var permissionMapSchema = external_exports.record(external_exports.string().min(1), external_exports.array(external_exports.string().min(1))).describe(
+  'Resource type \u2192 actions, e.g. { "flows": ["read", "use"], "agents": ["read"] }. Resource types and the actions each accepts: admin_list_roles(include_catalog: true). A role cannot grant more than you hold.'
+);
+function toRolePermissions(map) {
+  return Object.entries(map).map(([resource_type, actions]) => ({ resource_type, actions }));
+}
+function summarizeUser(user) {
+  return {
+    id: user.id,
+    email: user.email,
+    display_name: user.display_name,
+    is_superadmin: user.is_superadmin,
+    is_active: user.is_active,
+    memberships: user.memberships.map((membership) => ({
+      organization: { id: membership.organization.id, name: membership.organization.name },
+      role: membership.role.name
+    })),
+    created_at: user.created_at
+  };
+}
+function summarizeMembership(membership) {
+  return {
+    id: membership.id,
+    organization: membership.org,
+    user: { id: membership.user.id, email: membership.user.email, display_name: membership.user.display_name, is_active: membership.user.is_active },
+    role: membership.role,
+    joined_at: membership.joined_at
+  };
+}
+function summarizeAdminKey(key) {
+  return {
+    id: key.id,
+    name: key.name,
+    prefix: key.prefix,
+    status: key.status,
+    owner: key.owner ? { id: key.owner.id, email: key.owner.email } : null,
+    organization_ids: key.org_ids,
+    created_at: key.created_at,
+    expires_at: key.expires_at,
+    last_used_at: key.last_used_at,
+    ...key.revoked_at ? { revoked_at: key.revoked_at } : {}
+  };
+}
+function summarizeOrganization(org) {
+  return {
+    id: org.id,
+    name: org.name,
+    is_active: org.is_active,
+    member_count: org.member_count,
+    ...org.admins ? { admins: org.admins.map((admin) => admin.email) } : {},
+    created_at: org.created_at
+  };
+}
+function generateInitialPassword() {
+  return randomBytes(18).toString("base64url");
+}
+function registerAdminRbacTools(server, context) {
+  const users = () => new AdminUsersApi(context.client, context.auth);
+  const roles = () => new AdminRolesApi(context.client, context.auth);
+  const memberships = () => new AdminMembershipsApi(context.client, context.auth);
+  const apiKeys = () => new AdminApiKeysApi(context.client, context.auth);
+  const organizations = () => new AdminOrganizationsApi(context.client, context.auth);
+  const orgId = (ref) => resolveOrganizationId(context, organizations(), ref);
+  async function findMembership(user, organization) {
+    const organizationId = await orgId(organization);
+    const api = memberships();
+    const isTarget = (membership) => typeof user === "number" ? membership.user.id === user : membership.user.email.toLowerCase() === user.toLowerCase();
+    for (let page = 1; ; page += 1) {
+      const listed = await api.list({
+        org_ids: [organizationId],
+        ...typeof user === "string" ? { search: user } : {},
+        page,
+        page_size: ADMIN_PAGE_SIZE_MAX
+      });
+      const match = listed.results.find(isTarget);
+      if (match) return match;
+      if (!listed.next) break;
+    }
+    throw new Error(`${user} is not a member of organization ${organizationId} (admin_list_memberships).`);
+  }
+  server.registerTool(
+    "admin_list_users",
+    {
+      title: "List workspace users (superadmin)",
+      description: "Every account on the EpicStaff instance with its memberships, newest first. Superadmin only \u2014 an organization admin manages people through admin_list_memberships instead.",
+      inputSchema: {
+        search: external_exports.string().optional().describe("Substring of the email or display name."),
+        status: external_exports.enum(ACCOUNT_STATUSES).optional().describe("Only active or only deactivated accounts."),
+        superadmins_only: external_exports.boolean().optional().describe("true: only superadmins; false: only non-superadmins."),
+        organization: organizationRef.optional().describe("Only members of this organization (id or name)."),
+        role: roleRef.optional().describe("Only users holding this role (id or name)."),
+        ...pageShape
+      }
+    },
+    async ({ search, status, superadmins_only, organization, role, page, page_size }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "list users", requirement: SUPERADMIN }, async () => {
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const roleId = role !== void 0 ? await resolveRoleId(roles(), role, organizationId) : void 0;
+        const listed = await users().list({
+          search,
+          status,
+          is_superadmin: superadmins_only,
+          role_id: roleId,
+          org_ids: organizationId !== void 0 ? [organizationId] : void 0,
+          page,
+          page_size
+        });
+        return pageOf(listed, page, summarizeUser);
+      });
+    })
+  );
+  server.registerTool(
+    "admin_create_user",
+    {
+      title: "Create a user account (superadmin)",
+      description: "Create an EpicStaff account, optionally with its first organization membership. A strong initial password is generated and written to a NEW file at password_file (mode 0600) \u2014 it never appears in the conversation; hand it to the person over a safe channel and have them change it. Superadmin only; to add an EXISTING account to an organization use admin_add_membership. Requires confirm: true.",
+      inputSchema: {
+        email: external_exports.string().email().describe("Login email of the new account."),
+        display_name: external_exports.string().max(255).optional().describe("Display name; omitted \u2192 derived from the email."),
+        organization: organizationRef.optional().describe("Organization (id or name) to add the account to."),
+        role: roleRef.optional().describe("Role in that organization (id or name); default the built-in Member. Needs organization."),
+        password_file: external_exports.string().min(1).describe("Absolute path of the NEW file to write the initial password into."),
+        confirm: confirmFlag("create this account")
+      }
+    },
+    async ({ email: email2, display_name, organization, role, password_file }) => runTool(async () => {
+      requireSignedInSession(context, "Creating a user");
+      await context.auth.ensureAuthenticated();
+      if (role !== void 0 && organization === void 0) {
+        throw new Error("role needs organization: a role is held in an organization.");
+      }
+      assertNewSecretFilePath(password_file);
+      return explainRefusals({ action: "create the user", requirement: SUPERADMIN, notFound: "the organization or role was not found" }, async () => {
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const roleId = role !== void 0 && organizationId !== void 0 ? await resolveRoleId(roles(), role, organizationId) : void 0;
+        const password = generateInitialPassword();
+        writeNewSecretFile(password_file, `${password}
+`);
+        let created;
+        try {
+          created = await users().create({
+            email: email2,
+            password,
+            ...display_name !== void 0 ? { display_name } : {},
+            ...organizationId !== void 0 ? { organization_id: organizationId } : {},
+            ...roleId !== void 0 ? { role_id: roleId } : {}
+          });
+        } catch (error2) {
+          try {
+            unlinkSync(password_file);
+          } catch (unlinkError) {
+            logger.warn(`Could not remove ${password_file} after the account creation failed`, unlinkError);
+          }
+          throw error2;
+        }
+        return {
+          user: summarizeUser(created),
+          initial_password_written_to: password_file,
+          note: "The password is only in that file (mode 0600). Delete the file once it has been handed over."
+        };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_set_user_active",
+    {
+      title: "Deactivate or reactivate an account (superadmin)",
+      description: "active: false DEACTIVATES the account \u2014 the person can no longer sign in and their sessions and API keys stop working (nothing is deleted); active: true restores it. Refuses to deactivate the account this MCP server signs in with. Superadmin only. Requires confirm: true.",
+      inputSchema: {
+        user: userRef.describe("The account: id or email."),
+        active: external_exports.boolean().describe("false = deactivate, true = reactivate."),
+        confirm: confirmFlag("change whether this account can sign in")
+      }
+    },
+    async ({ user, active }) => runTool(async () => {
+      requireSignedInSession(context, active ? "Reactivating a user" : "Deactivating a user");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: active ? "reactivate the user" : "deactivate the user", requirement: SUPERADMIN }, async () => {
+        const api = users();
+        const userId = await resolveUserId(api, user);
+        if (!active && (await new ProfileApi(context.client, context.auth).getProfile()).id === userId) {
+          throw new Error(
+            "That is the account this MCP server signs in with \u2014 deactivating it would lock the server (and you) out. Do it in the EpicStaff UI from another administrator account if you really mean to."
+          );
+        }
+        return { user: summarizeUser(active ? await api.reactivate(userId) : await api.deactivate(userId)) };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_set_user_superadmin",
+    {
+      title: "Grant or revoke superadmin (superadmin)",
+      description: "superadmin: true makes the account a SUPERADMIN \u2014 unrestricted access to every organization, user, plugin and setting of the instance; false takes that back. Superadmin only. Grant it only on an explicit request naming the person. Requires confirm: true.",
+      inputSchema: {
+        user: userRef.describe("The account: id or email."),
+        superadmin: external_exports.boolean().describe("true = grant, false = revoke."),
+        confirm: confirmFlag("change superadmin rights of this account")
+      }
+    },
+    async ({ user, superadmin }) => runTool(async () => {
+      requireSignedInSession(context, superadmin ? "Granting superadmin" : "Revoking superadmin");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: superadmin ? "grant superadmin" : "revoke superadmin", requirement: SUPERADMIN }, async () => {
+        const api = users();
+        const userId = await resolveUserId(api, user);
+        return { user: summarizeUser(superadmin ? await api.grantSuperadmin(userId) : await api.revokeSuperadmin(userId)) };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_list_memberships",
+    {
+      title: "List organization members",
+      description: "Who belongs to which organization with which role, across the organizations whose members you may read (the `memberships: read` permission). Filter by organization, role, account status or a search on email/name.",
+      inputSchema: {
+        organization: organizationRef.optional().describe("Only this organization (id or name)."),
+        role: roleRef.optional().describe("Only members holding this role (id or name)."),
+        status: external_exports.enum(ACCOUNT_STATUSES).optional().describe("Only active or only deactivated accounts."),
+        search: external_exports.string().optional().describe("Substring of the email or display name."),
+        ...pageShape
+      }
+    },
+    async ({ organization, role, status, search, page, page_size }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "list memberships", requirement: "the `memberships: read` permission" }, async () => {
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const roleId = role !== void 0 ? await resolveRoleId(roles(), role, organizationId) : void 0;
+        const listed = await memberships().list({
+          org_ids: organizationId !== void 0 ? [organizationId] : void 0,
+          role_id: roleId,
+          status,
+          search,
+          page,
+          page_size
+        });
+        return pageOf(listed, page, summarizeMembership);
+      });
+    })
+  );
+  server.registerTool(
+    "admin_add_membership",
+    {
+      title: "Add a user to an organization",
+      description: "Give an EXISTING account (by email or id) access to an organization with a role. Needs the `memberships: create` permission there; a role above your own is refused. New accounts: admin_create_user. Requires confirm: true.",
+      inputSchema: {
+        user: userRef.describe("The account: email or id."),
+        organization: organizationRef.describe("The organization: id or name."),
+        role: roleRef.describe("Role in that organization: id or name (built-in: Org Admin, Member, Viewer)."),
+        confirm: confirmFlag("give this account access to the organization")
+      }
+    },
+    async ({ user, organization, role }) => runTool(async () => {
+      requireSignedInSession(context, "Adding a member");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals(
+        { action: "add the member", requirement: "the `memberships: create` permission in that organization" },
+        async () => {
+          const organizationId = await orgId(organization);
+          const roleId = await resolveRoleId(roles(), role, organizationId);
+          const created = await memberships().create({
+            org_id: organizationId,
+            role_id: roleId,
+            ...typeof user === "number" ? { user_id: user } : { email: user }
+          });
+          return { membership: summarizeMembership(created) };
+        }
+      );
+    })
+  );
+  server.registerTool(
+    "admin_change_membership_role",
+    {
+      title: "Change a member's role",
+      description: "Change the role a user holds in an organization (what they may do there changes at once). Needs the `memberships: update` permission; an organization keeps at least one admin. Requires confirm: true.",
+      inputSchema: {
+        user: userRef.describe("The member: email or id."),
+        organization: organizationRef.describe("The organization: id or name."),
+        role: roleRef.describe("The new role: id or name."),
+        confirm: confirmFlag("change this member's role")
+      }
+    },
+    async ({ user, organization, role }) => runTool(async () => {
+      requireSignedInSession(context, "Changing a role");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals(
+        { action: "change the member's role", requirement: "the `memberships: update` permission in that organization" },
+        async () => {
+          const membership = await findMembership(user, organization);
+          const roleId = await resolveRoleId(roles(), role, membership.org.id);
+          return { membership: summarizeMembership(await memberships().changeRole(membership.id, roleId)) };
+        }
+      );
+    })
+  );
+  server.registerTool(
+    "admin_remove_membership",
+    {
+      title: "Remove a user from an organization",
+      description: "Take a user's access to an organization away (the account itself stays; re-add with admin_add_membership). Needs the `memberships: delete` permission; an organization keeps at least one admin. Requires confirm: true.",
+      inputSchema: {
+        user: userRef.describe("The member: email or id."),
+        organization: organizationRef.describe("The organization: id or name."),
+        confirm: confirmFlag("remove this user from the organization")
+      }
+    },
+    async ({ user, organization }) => runTool(async () => {
+      requireSignedInSession(context, "Removing a member");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals(
+        { action: "remove the member", requirement: "the `memberships: delete` permission in that organization" },
+        async () => {
+          const membership = await findMembership(user, organization);
+          await memberships().remove(membership.id);
+          return { removed: summarizeMembership(membership) };
+        }
+      );
+    })
+  );
+  server.registerTool(
+    "admin_list_roles",
+    {
+      title: "List roles",
+      description: "The built-in role templates (Superadmin, Org Admin, Member, Viewer) and the custom roles of the organizations you may read roles in, each with its permissions (resource \u2192 actions) and how many members hold it. include_catalog: true adds every resource type and the actions it accepts \u2014 what admin_create_role and admin_update_role take.",
+      inputSchema: {
+        organization: organizationRef.optional().describe("Only roles of this organization (id or name)."),
+        assignable_only: external_exports.boolean().default(false).describe("With organization: only roles you may assign there."),
+        search: external_exports.string().optional().describe("Substring of the role name."),
+        include_catalog: external_exports.boolean().default(false).describe("Add the permission catalog."),
+        ...pageShape
+      }
+    },
+    async ({ organization, assignable_only, search, include_catalog, page, page_size }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "list roles", requirement: "the `roles: read` permission" }, async () => {
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const scope = organizationId !== void 0 ? [organizationId] : void 0;
+        const listed = await roles().list({
+          ...assignable_only ? { assignable_org_ids: scope } : { org_ids: scope },
+          search,
+          page,
+          page_size
+        });
+        const catalog = include_catalog ? await new ProfileApi(context.client, context.auth).getPermissionCatalog() : void 0;
+        return {
+          built_in_roles: listed.built_in_roles.map(summarizeRole),
+          custom_roles: pageOf(listed, page, summarizeRole),
+          ...catalog ? {
+            permission_catalog: catalog.resource_types.map((type) => ({
+              resource_type: type.code,
+              label: type.label,
+              actions: type.applicable_actions,
+              ...type.platform_actions.length > 0 ? { superadmin_only_actions: type.platform_actions } : {}
+            }))
+          } : {}
+        };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_get_role",
+    {
+      title: "Show a role",
+      description: "One role with its permissions (resource \u2192 actions) and how many members hold it.",
+      inputSchema: {
+        role: roleRef.describe("The role: id or exact name."),
+        organization: organizationRef.optional().describe("Organization of a custom role given by name (disambiguates).")
+      }
+    },
+    async ({ role, organization }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "read the role", requirement: "the `roles: read` permission" }, async () => {
+        const api = roles();
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        return { role: summarizeRole(await api.get(await resolveRoleId(api, role, organizationId))) };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_create_role",
+    {
+      title: "Create a custom role",
+      description: "Create a custom role in one organization from a permission map (resource type \u2192 actions). Needs the `roles: create` permission there, and a role cannot grant more than you hold. Assign it with admin_add_membership / admin_change_membership_role. Requires confirm: true.",
+      inputSchema: {
+        organization: organizationRef.describe("The organization the role belongs to: id or name."),
+        name: external_exports.string().min(1).describe("Role name, unique in the organization (built-in names are reserved)."),
+        description: external_exports.string().nullable().optional(),
+        permissions: permissionMapSchema,
+        confirm: confirmFlag("create this role")
+      }
+    },
+    async ({ organization, name, description, permissions }) => runTool(async () => {
+      requireSignedInSession(context, "Creating a role");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "create the role", requirement: "the `roles: create` permission in that organization" }, async () => {
+        const created = await roles().create({
+          org_id: await orgId(organization),
+          name,
+          ...description !== void 0 ? { description } : {},
+          permissions: toRolePermissions(permissions)
+        });
+        return { role: summarizeRole(created) };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_update_role",
+    {
+      title: "Update a custom role",
+      description: "Rename a custom role, change its description, or REPLACE its permissions (the map you pass becomes the whole set \u2014 every member holding it gains or loses access at once). Built-in roles are immutable. Needs the `roles: update` permission. Requires confirm: true.",
+      inputSchema: {
+        role: roleRef.describe("The role: id or exact name."),
+        organization: organizationRef.optional().describe("Organization of a role given by name (disambiguates)."),
+        name: external_exports.string().min(1).optional(),
+        description: external_exports.string().nullable().optional(),
+        permissions: permissionMapSchema.optional(),
+        confirm: confirmFlag("change this role")
+      }
+    },
+    async ({ role, organization, name, description, permissions }) => runTool(async () => {
+      requireSignedInSession(context, "Updating a role");
+      await context.auth.ensureAuthenticated();
+      if (name === void 0 && description === void 0 && permissions === void 0) {
+        throw new Error("Nothing to change \u2014 pass name, description and/or permissions.");
+      }
+      return explainRefusals({ action: "update the role", requirement: "the `roles: update` permission in its organization" }, async () => {
+        const api = roles();
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const roleId = await resolveRoleId(api, role, organizationId);
+        const updated = await api.update(roleId, {
+          ...name !== void 0 ? { name } : {},
+          ...description !== void 0 ? { description } : {},
+          ...permissions !== void 0 ? { permissions: toRolePermissions(permissions) } : {}
+        });
+        return { role: summarizeRole(updated) };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_delete_role",
+    {
+      title: "Delete a custom role",
+      description: "Delete a custom role FOR GOOD (roles have no recycle bin); its members fall back to the built-in Viewer role. dry_run: true lists who would be reassigned without deleting. Needs the `roles: delete` permission. The real delete requires confirm: true.",
+      inputSchema: {
+        role: roleRef.describe("The role: id or exact name."),
+        organization: organizationRef.optional().describe("Organization of a role given by name (disambiguates)."),
+        dry_run: external_exports.boolean().default(false).describe("Only report the members that would be reassigned."),
+        confirm: external_exports.literal(true).optional().describe("Required unless dry_run: the user explicitly asked to delete this role.")
+      }
+    },
+    async ({ role, organization, dry_run, confirm }) => runTool(async () => {
+      requireSignedInSession(context, "Deleting a role");
+      await context.auth.ensureAuthenticated();
+      if (!dry_run) assertConfirmed(confirm, "delete a role");
+      return explainRefusals({ action: "delete the role", requirement: "the `roles: delete` permission in its organization" }, async () => {
+        const api = roles();
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const roleId = await resolveRoleId(api, role, organizationId);
+        if (dry_run) return { dry_run: true, preview: await api.previewDelete(roleId) };
+        return { deleted_role_id: roleId, ...await api.delete(roleId), reassigned_to: "Viewer" };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_list_api_keys",
+    {
+      title: "List users' API keys",
+      description: "Every user's API keys you may oversee (the `api_keys: read` permission), with owner, status and last use \u2014 never the keys themselves. Needs a signed-in session: EpicStaff does not let an API key list keys.",
+      inputSchema: {
+        owner_id: external_exports.number().int().positive().optional().describe("Only keys of this user id."),
+        status: external_exports.enum(["active", "expired", "revoked"]).optional(),
+        search: external_exports.string().optional().describe("Substring of the key name or prefix."),
+        organization: organizationRef.optional().describe("Only keys of members of this organization (id or name)."),
+        ...pageShape
+      }
+    },
+    async ({ owner_id, status, search, organization, page, page_size }) => runTool(async () => {
+      requireSignedInSession(context, "Listing API keys");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "list API keys", requirement: "the `api_keys: read` permission" }, async () => {
+        const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+        const listed = await apiKeys().list({
+          user: owner_id,
+          status,
+          search,
+          org_ids: organizationId !== void 0 ? [organizationId] : void 0,
+          page,
+          page_size
+        });
+        return pageOf(listed, page, summarizeAdminKey);
+      });
+    })
+  );
+  server.registerTool(
+    "admin_revoke_api_key",
+    {
+      title: "Revoke a user's API key",
+      description: "Revoke any user's API key you may oversee (the `api_keys: delete` permission): it stops authenticating at once and whatever uses it breaks. Refuses the key this MCP server itself runs on. Requires confirm: true.",
+      inputSchema: {
+        key_id: external_exports.number().int().positive().describe("Key id (admin_list_api_keys)."),
+        confirm: confirmFlag("revoke this API key")
+      }
+    },
+    async ({ key_id }) => runTool(async () => {
+      requireSignedInSession(context, "Revoking an API key");
+      await context.auth.ensureAuthenticated();
+      const { apiKey } = context.store.get();
+      if (apiKey) {
+        const inUse = apiKeyPrefix(apiKey);
+        const own = (await new ProfileApi(context.client, context.auth).listApiKeys()).find((key) => key.prefix === inUse);
+        if (own?.id === key_id) {
+          throw new Error(
+            `Key ${own.prefix}\u2026 is the one this MCP server authenticates with \u2014 revoking it would cut the server off. Revoke it in the EpicStaff UI if you really mean to.`
+          );
+        }
+      }
+      return explainRefusals({ action: "revoke the API key", requirement: "the `api_keys: delete` permission" }, async () => ({
+        api_key: summarizeAdminKey(await apiKeys().revoke(key_id))
+      }));
+    })
+  );
+  server.registerTool(
+    "admin_list_organizations",
+    {
+      title: "List organizations (admin view)",
+      description: "Organizations you may administer (superadmin: all, deactivated ones included) with member counts and admins. For the organizations you work in and the active one, use list_organizations.",
+      inputSchema: {
+        search: external_exports.string().optional().describe("Substring of the organization name."),
+        is_active: external_exports.boolean().optional().describe("Only active (true) or only deactivated (false) organizations."),
+        ...pageShape
+      }
+    },
+    async ({ search, is_active, page, page_size }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      return explainRefusals(
+        { action: "list organizations", requirement: "the `organizations: read` permission" },
+        async () => pageOf(await organizations().list({ search, is_active, page, page_size }), page, summarizeOrganization)
+      );
+    })
+  );
+  server.registerTool(
+    "admin_create_organization",
+    {
+      title: "Create an organization (superadmin)",
+      description: "Create a new, empty organization. Superadmin only. Add people with admin_add_membership (give at least one person Org Admin). Requires confirm: true.",
+      inputSchema: {
+        name: external_exports.string().min(1).max(255).describe("Organization name, unique on the instance."),
+        confirm: confirmFlag("create this organization")
+      }
+    },
+    async ({ name }) => runTool(async () => {
+      requireSignedInSession(context, "Creating an organization");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "create the organization", requirement: SUPERADMIN }, async () => ({
+        organization: summarizeOrganization(await organizations().create(name))
+      }));
+    })
+  );
+  server.registerTool(
+    "admin_rename_organization",
+    {
+      title: "Rename an organization",
+      description: "Rename an organization (the `organizations: update` permission there). Requires confirm: true.",
+      inputSchema: {
+        organization: organizationRef.describe("The organization: id or current name."),
+        name: external_exports.string().min(1).max(255).describe("The new name, unique on the instance."),
+        confirm: confirmFlag("rename this organization")
+      }
+    },
+    async ({ organization, name }) => runTool(async () => {
+      requireSignedInSession(context, "Renaming an organization");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals(
+        { action: "rename the organization", requirement: "the `organizations: update` permission in it" },
+        async () => ({ organization: summarizeOrganization(await organizations().rename(await orgId(organization), name)) })
+      );
+    })
+  );
+  server.registerTool(
+    "admin_set_organization_active",
+    {
+      title: "Deactivate or reactivate an organization (superadmin)",
+      description: "active: false DEACTIVATES an organization \u2014 its members lose access to everything in it until it is reactivated (nothing is deleted); active: true restores it. The last active organization cannot be deactivated. Superadmin only. Requires confirm: true.",
+      inputSchema: {
+        organization: organizationRef.describe("The organization: id or name."),
+        active: external_exports.boolean().describe("false = deactivate, true = reactivate."),
+        confirm: confirmFlag("change whether this organization is usable")
+      }
+    },
+    async ({ organization, active }) => runTool(async () => {
+      requireSignedInSession(context, active ? "Reactivating an organization" : "Deactivating an organization");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals(
+        { action: active ? "reactivate the organization" : "deactivate the organization", requirement: SUPERADMIN },
+        async () => {
+          const organizationId = await orgId(organization);
+          const api = organizations();
+          const updated = active ? await api.reactivate(organizationId) : await api.deactivate(organizationId);
+          const wasActiveContext = !active && context.store.get().activeOrgId === organizationId;
+          return {
+            organization: summarizeOrganization(updated),
+            ...wasActiveContext ? { warning: "This was the active organization of this MCP session \u2014 pick another with set_active_organization." } : {}
+          };
+        }
+      );
+    })
+  );
+}
+
+// src/api/audit.ts
+var TOKEN_REFRESH_MARGIN_MS = 3e4;
+var AUDITOR_SESSIONS_SEARCH_PATH = "../auditor/api/audit/sessions/search";
+var AuditApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  cached = null;
+  /**
+   * Search the active organization's session audit trail. `orgId` must be the organization the
+   * client currently sends as X-Organization-Id — the token is minted for, and cached per, it.
+   */
+  async searchSessions(orgId, request) {
+    const search = async (token) => this.client.post(AUDITOR_SESSIONS_SEARCH_PATH, { bearerToken: token, body: request });
+    try {
+      return await search(await this.token(orgId));
+    } catch (error2) {
+      if (error2 instanceof ApiError && error2.status === 401) {
+        this.clear();
+        return search(await this.token(orgId));
+      }
+      throw error2;
+    }
+  }
+  /** Forget the token (organization switch, rejection). */
+  clear() {
+    this.cached = null;
+  }
+  async token(orgId) {
+    const cached2 = this.cached;
+    if (cached2 && cached2.orgId === orgId && Date.now() < cached2.expiresAt - TOKEN_REFRESH_MARGIN_MS) {
+      return cached2.token;
+    }
+    const minted = await this.client.post("audit/token/", { body: {} });
+    this.cached = { orgId, token: minted.token, expiresAt: Date.now() + minted.expires_in * 1e3 };
+    return minted.token;
+  }
+};
+
+// src/api/audit-presets.ts
+var AuditPresetsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  /** The caller's own presets plus every shared one. */
+  async list() {
+    return unwrap2(
+      await this.client.get("audit-filter-presets/", { query: { limit: 1e3 } })
+    );
+  }
+  async create(name, filterBody, isShared) {
+    return this.client.post("audit-filter-presets/", {
+      body: { name, filter_body: filterBody, is_shared: isShared }
+    });
+  }
+  async update(id, changes) {
+    return this.client.patch(`audit-filter-presets/${id}/`, { body: changes });
+  }
+  async delete(id) {
+    await this.client.delete(`audit-filter-presets/${id}/`);
+  }
+};
+
+// src/tools/audit.tools.ts
+var AUDIT_VALUE_MAX_CHARS = 2e3;
+var AUDIT_PAGE_SIZE_MAX = 200;
+var AUDITOR_UNREACHABLE = 'the audit trail is not reachable at <EpicStaff address>/auditor/. It runs only where the deployment enables it (COMPOSE_PROFILES with "auditor", AUDIT_TRAIL_ENABLED=true), and the MCP must reach EpicStaff through its web entry point (EPICSTAFF_BASE_URL = the address of the UI, not the Django port)';
+var filtersSchema = external_exports.record(external_exports.string(), external_exports.unknown()).describe(
+  'A filter tree: {"op": "and"|"or", "children": [...]} | {"op": "not", "child": {...}} | {"field": "...", "op": "...", "value": ...}. Fields: id, session_id, status (completed|failed), kind (session|node|event), name, flow_name, node_type, run_type, event_time, error, agent, tool, task, prompt, message_text, duration, and input.<key> / output.<key> / details.<key>. Ops: equals, not_equal, in, not_in, contains, not_contains, starts_with, ends_with, gt, gte, lt, lte, is_empty, is_not_empty (+ key_exists, key_not_exists, key_equals_value, key_not_equals, null, not_null on input/output/details paths).'
+);
+var querySchema = external_exports.string().min(1).describe(
+  'Text form of the same filter, e.g. `status = "failed" and flow_name : "Quote"` or `(tool = "Web_Search_Tool" or agent = "Researcher") and not duration < 10`. Operators: = != : !: > < >= <= in (\u2026) / not in (\u2026), is empty, is not empty, starts with, ends with; and / or / not; parentheses.'
+);
+var matchScopeSchema = external_exports.object({
+  ancestors: external_exports.boolean().optional().describe("Add the session / node rows that own each returned row."),
+  children: external_exports.boolean().optional().describe("A matched session brings its whole tree; a matched node its events."),
+  rows_before: external_exports.number().int().min(0).max(20).optional().describe("Add the N rows before each match in its session."),
+  full_session_history: external_exports.boolean().optional().describe("Return the full tree of every session with a match.")
+}).describe("Which rows come back around a match (not filter conditions).");
+function clipAuditValues(value) {
+  if (typeof value === "string") {
+    return value.length > AUDIT_VALUE_MAX_CHARS ? `${value.slice(0, AUDIT_VALUE_MAX_CHARS)}\u2026 (+${value.length - AUDIT_VALUE_MAX_CHARS} chars)` : value;
+  }
+  if (Array.isArray(value)) return value.map(clipAuditValues);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clipAuditValues(item)]));
+  }
+  return value;
+}
+function searchBodyOf(preset) {
+  const { ui_state: _uiState, cursor: _cursor, size: _size2, ...search } = preset.filter_body;
+  return search;
+}
+function summarizePreset2(preset) {
+  return {
+    id: preset.id,
+    name: preset.name,
+    shared: preset.is_shared,
+    yours: preset.is_owner,
+    author: preset.created_by_name,
+    search: searchBodyOf(preset),
+    updated_at: preset.updated_at
+  };
+}
+function exclusiveFilter(query, filters) {
+  if (query !== void 0 && filters !== void 0) {
+    throw new Error("Pass query or filters, not both \u2014 they are two forms of the same filter.");
+  }
+  return query !== void 0 ? { query } : filters !== void 0 ? { filters } : {};
+}
+function registerAuditTools(server, context) {
+  const audit = new AuditApi(context.client);
+  const presets = new AuditPresetsApi(context.client);
+  const resolvePreset = async (ref) => {
+    const listed = await presets.list();
+    const id = await resolveNamedRef(ref, "Audit preset", async () => listed, (preset2) => preset2.id, (preset2) => preset2.name);
+    const preset = listed.find((candidate) => candidate.id === id);
+    if (!preset) throw new Error(`Audit preset ${ref} not found among yours and the shared ones (list_audit_presets).`);
+    return preset;
+  };
+  const auditRead = { requirement: "the `audit: read` permission in the active organization" };
+  server.registerTool(
+    "search_audit_log",
+    {
+      title: "Search the audit trail",
+      description: `Search the active organization's session audit trail \u2014 sessions, node runs and events with their inputs, outputs, errors, agents, tools and prompts \u2014 newest first. Filter with query (text) or filters (tree), or reuse a saved preset (list_audit_presets); none of them lists everything. Long values are cut to ${AUDIT_VALUE_MAX_CHARS} characters. Page on with cursor = next_cursor. Needs \`audit: read\`; the trail only reaches back as far as your retention allows.`,
+      inputSchema: {
+        query: querySchema.optional(),
+        filters: filtersSchema.optional(),
+        preset: idOrName.optional().describe("A saved audit preset (id or name) to search with."),
+        match_scope: matchScopeSchema.optional(),
+        size: external_exports.number().int().min(1).max(AUDIT_PAGE_SIZE_MAX).default(20).describe(`Rows per page (max ${AUDIT_PAGE_SIZE_MAX}).`),
+        cursor: external_exports.string().optional().describe("next_cursor of the previous page.")
+      }
+    },
+    async ({ query, filters, preset, match_scope, size, cursor }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      const orgId = await context.org.requireActiveOrg();
+      if (preset !== void 0 && (query !== void 0 || filters !== void 0)) {
+        throw new Error("Pass a preset or a query / filters, not both.");
+      }
+      return explainRefusals({ action: "search the audit trail", ...auditRead, notFound: AUDITOR_UNREACHABLE }, async () => {
+        const base = preset !== void 0 ? searchBodyOf(await resolvePreset(preset)) : exclusiveFilter(query, filters);
+        const request = {
+          ...base,
+          ...match_scope !== void 0 ? { match_scope } : {},
+          size,
+          ...cursor !== void 0 ? { cursor } : {}
+        };
+        let page;
+        try {
+          page = await audit.searchSessions(orgId, request);
+        } catch (error2) {
+          if (error2 instanceof ApiError && [502, 503, 504].includes(error2.status)) {
+            throw new Error(`Could not search the audit trail (HTTP ${error2.status}): ${AUDITOR_UNREACHABLE}.`);
+          }
+          throw error2;
+        }
+        return {
+          returned: page.items.length,
+          items: page.items.map(clipAuditValues),
+          next_cursor: page.next_cursor,
+          ...page.partial ? {
+            partial: true,
+            note: "Fewer rows than size: the duration filter hit its scan limit before filling the page \u2014 continue with next_cursor, or narrow the other conditions."
+          } : {}
+        };
+      });
+    })
+  );
+  server.registerTool(
+    "list_audit_presets",
+    {
+      title: "List audit presets",
+      description: "Saved audit searches of the active organization: yours and the ones colleagues shared. Use one with search_audit_log(preset). Needs `audit: read`.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return explainRefusals({ action: "list audit presets", ...auditRead }, async () => ({
+        presets: (await presets.list()).map(summarizePreset2)
+      }));
+    })
+  );
+  server.registerTool(
+    "create_audit_preset",
+    {
+      title: "Save an audit search",
+      description: "Save an audit search (query or filters, plus match_scope) under a name, private to you or shared with the organization (sharing cannot be undone). Names are unique per author. Needs `audit: read`.",
+      inputSchema: {
+        name: external_exports.string().min(1).max(150),
+        query: querySchema.optional(),
+        filters: filtersSchema.optional(),
+        match_scope: matchScopeSchema.optional(),
+        shared: external_exports.boolean().default(false).describe("Share with everyone in the organization who may read the audit trail.")
+      }
+    },
+    async ({ name, query, filters, match_scope, shared }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const body = { ...exclusiveFilter(query, filters), ...match_scope !== void 0 ? { match_scope } : {} };
+      return explainRefusals({ action: "save the audit preset", ...auditRead }, async () => ({
+        preset: summarizePreset2(await presets.create(name, body, shared))
+      }));
+    })
+  );
+  server.registerTool(
+    "update_audit_preset",
+    {
+      title: "Update an audit preset",
+      description: "Rename one of YOUR audit presets, replace its search (query / filters / match_scope \u2014 the editor's saved panel layout is dropped with it), or share it (one-way). Needs `audit: read`.",
+      inputSchema: {
+        preset: idOrName.describe("Your preset: id or name."),
+        name: external_exports.string().min(1).max(150).optional(),
+        query: querySchema.optional(),
+        filters: filtersSchema.optional(),
+        match_scope: matchScopeSchema.optional(),
+        share: external_exports.literal(true).optional().describe("Share it with the organization (cannot be undone).")
+      }
+    },
+    async ({ preset, name, query, filters, match_scope, share }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const filter = exclusiveFilter(query, filters);
+      const searchChanged = Object.keys(filter).length > 0 || match_scope !== void 0;
+      if (name === void 0 && !searchChanged && share === void 0) {
+        throw new Error("Nothing to change \u2014 pass name, query / filters / match_scope and/or share.");
+      }
+      return explainRefusals({ action: "update the audit preset", ...auditRead, notFound: "only the author can change a preset" }, async () => {
+        const current = await resolvePreset(preset);
+        if (!current.is_owner) throw new Error(`"${current.name}" is ${current.created_by_name}'s preset \u2014 only its author can change it.`);
+        const currentSearch = searchBodyOf(current);
+        const filterBody = searchChanged ? {
+          // A new filter replaces the old one entirely; otherwise the old one stays.
+          ...Object.keys(filter).length > 0 ? filter : currentSearch.query !== void 0 ? { query: currentSearch.query } : currentSearch.filters !== void 0 ? { filters: currentSearch.filters } : {},
+          ...(match_scope ?? currentSearch.match_scope) !== void 0 ? { match_scope: match_scope ?? currentSearch.match_scope } : {}
+        } : void 0;
+        const updated = await presets.update(current.id, {
+          ...name !== void 0 ? { name } : {},
+          ...filterBody !== void 0 ? { filter_body: filterBody } : {},
+          ...share ? { is_shared: true } : {}
+        });
+        return { preset: summarizePreset2(updated) };
+      });
+    })
+  );
+  server.registerTool(
+    "delete_audit_preset",
+    {
+      title: "Delete an audit preset",
+      description: "Delete one of YOUR audit presets for good (no recycle bin); colleagues lose it too if it was shared.",
+      inputSchema: {
+        preset: idOrName.describe("Your preset: id or name.")
+      }
+    },
+    async ({ preset }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return explainRefusals({ action: "delete the audit preset", ...auditRead, notFound: "only the author can delete a preset" }, async () => {
+        const current = await resolvePreset(preset);
+        if (!current.is_owner) throw new Error(`"${current.name}" is ${current.created_by_name}'s preset \u2014 only its author can delete it.`);
+        await presets.delete(current.id);
+        return { deleted: { id: current.id, name: current.name } };
+      });
+    })
+  );
+}
+
+// src/api/first-setup.ts
+var FirstSetupApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async getStatus() {
+    return this.client.get("auth/first-setup/", { skipAuth: true });
+  }
+  /**
+   * Create the first superadmin and the default organization. The response's access token (and the
+   * refresh cookie it sets) are discarded: the MCP signs in through its normal login afterwards.
+   * The password never reaches an error message.
+   */
+  async complete(request) {
+    const response = await withRedactedErrors(
+      [{ field: "password", value: request.password }],
+      () => this.client.post("auth/first-setup/", { skipAuth: true, body: request })
+    );
+    return { user: response.user, organization: response.organization };
+  }
+};
+
+// src/tools/first-setup.tools.ts
+var CLI_SETUP_HINT = 'If this instance has no account yet, its first-setup page is closed (FIRST_SETUP_MODE is not "open" \u2014 the safe default for a reachable server): create the superadmin on the server with the create_superadmin management command instead.';
+function registerFirstSetupTools(server, context) {
+  const setup = new FirstSetupApi(context.client);
+  server.registerTool(
+    "get_setup_status",
+    {
+      title: "Check whether EpicStaff needs first-run setup",
+      description: "Ask the EpicStaff instance whether it still needs its first superadmin (a fresh install with no accounts). Use it when check_connection fails to log in on a new instance. Needs no login.",
+      inputSchema: {}
+    },
+    async () => runTool(async () => {
+      const status = await setup.getStatus();
+      return {
+        ...status,
+        next: status.needs_setup ? "complete_first_setup creates the first superadmin with the EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD this MCP server is configured with \u2014 only on an explicit request of the instance owner." : `Nothing to set up over the API. ${CLI_SETUP_HINT} Otherwise log in with an existing account (check_connection).`
+      };
+    })
+  );
+  server.registerTool(
+    "complete_first_setup",
+    {
+      title: "Create the first superadmin of a fresh instance",
+      description: "On a brand-new EpicStaff instance that asks for setup (get_setup_status: needs_setup), create its FIRST SUPERADMIN \u2014 full control of the instance \u2014 from the EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD this MCP server is configured with, plus the default organization. Refused when the instance already has an account or its setup page is closed. Run it only when the owner of the instance asks for it. Requires confirm: true.",
+      inputSchema: {
+        display_name: external_exports.string().max(255).optional().describe("Display name of the superadmin; omitted \u2192 from the email."),
+        confirm: confirmFlag("set up this EpicStaff instance with the configured account as its superadmin")
+      }
+    },
+    async ({ display_name }) => runTool(async () => {
+      const { email: email2, password } = context.config;
+      if (email2 === void 0 || password === void 0) {
+        throw new Error(
+          "First setup creates the superadmin from EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD, and this MCP server is configured with an API token only. Set the two variables to the account you want, restart, and retry."
+        );
+      }
+      const status = await setup.getStatus();
+      if (!status.needs_setup) {
+        throw new Error(`This instance does not ask for first setup (setup_mode: ${status.setup_mode}); nothing was sent. ${CLI_SETUP_HINT}`);
+      }
+      const result = await setup.complete({ email: email2, password, ...display_name !== void 0 ? { display_name } : {} });
+      return {
+        superadmin: result.user,
+        organization: result.organization,
+        next: "Call check_connection: the MCP now logs in with that account and selects the organization."
+      };
+    })
+  );
+}
+
+// src/api/plugins.ts
+var PLUGIN_ACTIVITY_PAGE_SIZE_MAX = 200;
+var PluginsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  /** The plugins the caller may open in the active organization (empty for a non-member superadmin). */
+  async listAvailable() {
+    return this.client.get("plugins/available/");
+  }
+  /** One page of the active organization's plugin events, newest first (`audit: read`). */
+  async listActivity(query = {}) {
+    return this.client.get("plugins/activity/", {
+      query: { page: query.page, page_size: query.page_size, plugin: query.plugin, action: query.action }
+    });
+  }
+  /** The plugin backends acting in the active organization and their declared access (`audit: read`). */
+  async listServiceAccounts() {
+    return this.client.get("plugins/service-accounts/");
+  }
+};
+
+// src/api/plugins-admin.ts
+var PluginsAdminApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async list() {
+    return this.call((bearerToken) => this.client.get("admin/plugins/", { bearerToken }));
+  }
+  async get(identifier) {
+    return this.call((bearerToken) => this.client.get(pluginPath(identifier), { bearerToken }));
+  }
+  /** What uninstalling or deleting the plugin affects. Read-only. */
+  async purgePreview(identifier) {
+    return this.call(
+      (bearerToken) => this.client.get(`admin/plugins/${encodeURIComponent(identifier)}/purge-preview/`, { bearerToken })
+    );
+  }
+  /** Take the plugin out of service everywhere; its data is kept for the grace period (409 `plugin_not_uninstallable`). */
+  async uninstall(identifier) {
+    return this.call((bearerToken) => this.client.post(`admin/plugins/${encodeURIComponent(identifier)}/uninstall/`, { bearerToken }));
+  }
+  /** Bring an uninstalled plugin back (409 `plugin_not_uninstalling`). */
+  async reinstall(identifier) {
+    return this.call((bearerToken) => this.client.post(`admin/plugins/${encodeURIComponent(identifier)}/reinstall/`, { bearerToken }));
+  }
+  /** One page of the plugin's grants, sorted by organization name. */
+  async listGrants(identifier, page, pageSize) {
+    return this.call(
+      (bearerToken) => this.client.get(`admin/plugins/${encodeURIComponent(identifier)}/grants/`, {
+        bearerToken,
+        query: { page, page_size: pageSize }
+      })
+    );
+  }
+  async createGrant(identifier, organizationId) {
+    return this.call(
+      (bearerToken) => this.client.post(`admin/plugins/${encodeURIComponent(identifier)}/grants/`, {
+        bearerToken,
+        body: { organization_id: organizationId }
+      })
+    );
+  }
+  /** What suspending the grant would stop in its organization. Read-only. */
+  async suspendPreview(identifier, grantId) {
+    return this.call(
+      (bearerToken) => this.client.get(`admin/plugins/${encodeURIComponent(identifier)}/grants/${grantId}/suspend-preview/`, { bearerToken })
+    );
+  }
+  /** Its runs, keys and pages stop at once; its data stays for the grace period (409 `grant_not_suspendable`). */
+  async suspendGrant(identifier, grantId) {
+    return this.call((bearerToken) => this.client.post(`admin/plugins/${encodeURIComponent(identifier)}/grants/${grantId}/suspend/`, { bearerToken }));
+  }
+  /** Back to `active` — or `install_failed` when its install never finished (409 `grant_not_suspended`). */
+  async resumeGrant(identifier, grantId) {
+    return this.call((bearerToken) => this.client.post(`admin/plugins/${encodeURIComponent(identifier)}/grants/${grantId}/resume/`, { bearerToken }));
+  }
+  /** One page of the plugin's events in every organization and deployment-wide. */
+  async listActivity(identifier, query = {}) {
+    return this.call(
+      (bearerToken) => this.client.get(`admin/plugins/${encodeURIComponent(identifier)}/activity/`, {
+        bearerToken,
+        query: {
+          page: query.page,
+          page_size: query.page_size,
+          organization_id: query.organization_id,
+          action: query.action
+        }
+      })
+    );
+  }
+  call(request) {
+    return withUserSession(this.session, request);
+  }
+};
+function pluginPath(identifier) {
+  return `admin/plugins/${encodeURIComponent(identifier)}/`;
+}
+
+// src/tools/plugin.tools.ts
+var PLUGINS_OFF = "the plugin platform is switched off on this deployment (PLUGINS_ENABLED) or no such plugin / grant exists";
+var SUPERADMIN2 = "superadmin rights and a signed-in session";
+var PLUGIN_GRANT_PAGE_SIZE = 200;
+var pluginIdentifier = external_exports.string().min(1).max(100).describe('Plugin identifier, e.g. "weather" (list_plugins / admin_list_plugins).');
+function summarizePlugin(plugin) {
+  return {
+    identifier: plugin.identifier,
+    name: plugin.name,
+    description: plugin.description,
+    state: plugin.state,
+    trust: plugin.trust,
+    current_version: plugin.current_version,
+    active_grants: plugin.grant_count,
+    needs_attention: plugin.needs_attention,
+    ...plugin.pending_package ? { pending_package: plugin.pending_package } : {},
+    ...plugin.upgrade ? { upgrade: plugin.upgrade } : {},
+    ...plugin.purge_after ? { data_deleted_after: plugin.purge_after } : {}
+  };
+}
+function summarizePackage(review) {
+  return {
+    version: review.version,
+    trust: review.trust,
+    signature: review.signature,
+    publisher: review.publisher,
+    contents: review.contents,
+    access: review.access.map((entry) => ({ resource_type: entry.resource_type, actions: entry.actions, reason: entry.reason })),
+    user_permissions: review.user_permissions.map((permission) => ({ action: permission.action, label: permission.label })),
+    outbound_hosts: review.outbound_hosts,
+    public_paths: review.public_paths,
+    settings: review.settings.map((setting) => ({ key: setting.key, type: setting.type, label: setting.label, required: setting.required })),
+    warnings: review.warnings
+  };
+}
+function summarizeDetail(detail) {
+  return {
+    ...summarizePlugin(detail),
+    allowed_actions: detail.allowed_actions,
+    ...detail.current_package ? { current_package: summarizePackage(detail.current_package) } : {},
+    ...detail.uninstall_requested_at ? { uninstall_requested_at: detail.uninstall_requested_at } : {},
+    ...detail.purge_progress ? { purge_progress: detail.purge_progress } : {},
+    ...detail.open_upgrade ? { open_upgrade: detail.open_upgrade } : {}
+  };
+}
+function summarizeGrant(grant) {
+  return {
+    id: grant.id,
+    organization: grant.organization,
+    state: grant.state,
+    allowed_actions: grant.allowed_actions,
+    installed_version: grant.installed_version,
+    granted_at: grant.granted_at,
+    granted_by: grant.granted_by?.email ?? null,
+    owned_resource_count: grant.owned_resource_count,
+    ...grant.suspended_at ? { suspended_at: grant.suspended_at, suspension_cause: grant.suspension_cause } : {},
+    ...grant.purge_after ? { data_deleted_after: grant.purge_after } : {},
+    ...grant.last_hook_error ? { last_hook_error: grant.last_hook_error } : {}
+  };
+}
+function summarizeEvent(event) {
+  return {
+    id: event.id,
+    at: event.created_at,
+    plugin: event.plugin.identifier,
+    organization: event.organization,
+    actor: event.actor.label,
+    ...event.on_behalf_of ? { on_behalf_of: event.on_behalf_of.label } : {},
+    action: event.action,
+    ...event.request ? { request: event.request } : {},
+    ...event.target ? { target: event.target } : {},
+    ...Object.keys(event.detail).length > 0 ? { detail: event.detail } : {}
+  };
+}
+function registerPluginTools(server, context) {
+  const plugins = new PluginsApi(context.client);
+  const admin = () => new PluginsAdminApi(context.client, context.auth);
+  const orgId = (ref) => resolveOrganizationId(context, new AdminOrganizationsApi(context.client, context.auth), ref);
+  async function findGrant(api, identifier, organization) {
+    const organizationId = await orgId(organization);
+    for (let page = 1; ; page += 1) {
+      const listed = await api.listGrants(identifier, page, PLUGIN_GRANT_PAGE_SIZE);
+      const match = listed.results.find((grant) => grant.organization.id === organizationId);
+      if (match) return match;
+      if (!listed.next) break;
+    }
+    throw new Error(`Plugin "${identifier}" is not granted to organization ${organizationId} (admin_list_plugins with plugin).`);
+  }
+  server.registerTool(
+    "list_plugins",
+    {
+      title: "List plugins of the active organization",
+      description: "The plugins (apps) you may open in the active organization, with your permissions in each and whether it is ready or in maintenance. include_service_accounts: true adds the plugin backends acting in the organization and what each may do there (resource \u2192 actions, outbound hosts) \u2014 needs `audit: read`. Plugins add no flow node types.",
+      inputSchema: {
+        include_service_accounts: external_exports.boolean().default(false)
+      }
+    },
+    async ({ include_service_accounts }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      return explainRefusals({ action: "list plugins", requirement: "membership of the active organization", notFound: PLUGINS_OFF }, async () => {
+        const available = await plugins.listAvailable();
+        const result = {
+          plugins: available.map((plugin) => ({
+            identifier: plugin.identifier,
+            name: plugin.name,
+            description: plugin.description,
+            availability: plugin.availability,
+            your_permissions: plugin.permissions,
+            ...plugin.development ? { development: true } : {}
+          }))
+        };
+        if (include_service_accounts) {
+          try {
+            result.service_accounts = (await plugins.listServiceAccounts()).map((account) => ({
+              plugin: account.plugin.identifier,
+              grant_state: account.grant_state,
+              key_last_used_at: account.key_last_used_at,
+              access: account.access.map((entry) => ({ resource_type: entry.resource_type, actions: entry.actions, reason: entry.reason })),
+              outbound_hosts: account.outbound_hosts,
+              has_database: account.has_database
+            }));
+          } catch (error2) {
+            if (!(error2 instanceof ApiError && error2.status === 403)) throw error2;
+            result.service_accounts = "not available \u2014 needs the `audit: read` permission in this organization";
+          }
+        }
+        return result;
+      });
+    })
+  );
+  server.registerTool(
+    "list_plugin_activity",
+    {
+      title: "List plugin activity",
+      description: "What plugins did and what was done to them, newest first: their service accounts' API requests, grants, install hooks, suspensions, upgrades. Default: the active organization (needs `audit: read`). all_organizations: true (superadmin, signed-in session, plugin required) shows one plugin in every organization plus deployment-wide events.",
+      inputSchema: {
+        plugin: pluginIdentifier.optional(),
+        action: external_exports.string().optional().describe('Only this action, e.g. "api_request", "grant_suspended", "install_hook_failed".'),
+        all_organizations: external_exports.boolean().default(false),
+        organization: organizationRef.optional().describe("With all_organizations: only this organization."),
+        page: external_exports.number().int().min(1).default(1),
+        page_size: external_exports.number().int().min(1).max(PLUGIN_ACTIVITY_PAGE_SIZE_MAX).default(50)
+      }
+    },
+    async ({ plugin, action, all_organizations, organization, page, page_size }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      if (all_organizations) {
+        requireSignedInSession(context, "Reading plugin activity across organizations");
+        if (plugin === void 0) throw new Error("all_organizations needs plugin: the deployment-wide view is per plugin.");
+        return explainRefusals({ action: "read the plugin activity", requirement: SUPERADMIN2, notFound: PLUGINS_OFF }, async () => {
+          const organizationId = organization !== void 0 ? await orgId(organization) : void 0;
+          const listed = await admin().listActivity(plugin, { page, page_size, organization_id: organizationId, action });
+          return pageOf(listed, page, summarizeEvent);
+        });
+      }
+      if (organization !== void 0) throw new Error("organization filters all_organizations only; the default view is the active organization.");
+      await context.org.requireActiveOrg();
+      return explainRefusals(
+        { action: "read the plugin activity", requirement: "the `audit: read` permission in the active organization", notFound: PLUGINS_OFF },
+        async () => pageOf(await plugins.listActivity({ page, page_size, plugin, action }), page, summarizeEvent)
+      );
+    })
+  );
+  server.registerTool(
+    "admin_list_plugins",
+    {
+      title: "List installed plugins (superadmin)",
+      description: "Every plugin on the deployment with its state, version, trust and active grants. With plugin: its details \u2014 what its package declares (access to EpicStaff resources, outbound hosts, public paths, settings, review warnings), the actions its state allows, and its grants to organizations. Superadmin, signed-in session.",
+      inputSchema: {
+        plugin: pluginIdentifier.optional(),
+        grants_page: external_exports.number().int().min(1).default(1).describe("With plugin: page of its grants.")
+      }
+    },
+    async ({ plugin, grants_page }) => runTool(async () => {
+      requireSignedInSession(context, "Administering plugins");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "list plugins", requirement: SUPERADMIN2, notFound: PLUGINS_OFF }, async () => {
+        const api = admin();
+        if (plugin === void 0) return { plugins: (await api.list()).map(summarizePlugin) };
+        const [detail, grants] = await Promise.all([api.get(plugin), api.listGrants(plugin, grants_page, 50)]);
+        return { plugin: summarizeDetail(detail), grants: pageOf(grants, grants_page, summarizeGrant) };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_grant_plugin",
+    {
+      title: "Grant a plugin to an organization (superadmin)",
+      description: "Make an installed plugin available in an organization: its members can open it, and its backend's service account may act there within the access the plugin declares (admin_list_plugins with plugin shows it) \u2014 review that first. Superadmin, signed-in session. Requires confirm: true.",
+      inputSchema: {
+        plugin: pluginIdentifier,
+        organization: organizationRef.describe("The organization: id or name."),
+        confirm: confirmFlag("grant this plugin to the organization")
+      }
+    },
+    async ({ plugin, organization }) => runTool(async () => {
+      requireSignedInSession(context, "Granting a plugin");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "grant the plugin", requirement: SUPERADMIN2, notFound: PLUGINS_OFF }, async () => ({
+        grant: summarizeGrant(await admin().createGrant(plugin, await orgId(organization)))
+      }));
+    })
+  );
+  server.registerTool(
+    "admin_set_plugin_grant_state",
+    {
+      title: "Suspend or resume a plugin's grant (superadmin)",
+      description: 'state "suspended": the plugin stops in that organization at once \u2014 its runs, keys and pages \u2014 and its data there is kept only for the grace period; "active" resumes it. dry_run: true (suspend only) reports what suspending would stop. Superadmin, signed-in session. The real change requires confirm: true.',
+      inputSchema: {
+        plugin: pluginIdentifier,
+        organization: organizationRef.describe("The organization of the grant: id or name."),
+        state: external_exports.enum(["suspended", "active"]),
+        dry_run: external_exports.boolean().default(false),
+        confirm: external_exports.literal(true).optional().describe("Required unless dry_run: the user explicitly asked for this change.")
+      }
+    },
+    async ({ plugin, organization, state, dry_run, confirm }) => runTool(async () => {
+      requireSignedInSession(context, "Changing a plugin grant");
+      await context.auth.ensureAuthenticated();
+      if (dry_run && state !== "suspended") throw new Error("dry_run previews a suspension only.");
+      if (!dry_run) assertConfirmed(confirm, state === "suspended" ? "suspend a plugin grant" : "resume a plugin grant");
+      return explainRefusals(
+        { action: state === "suspended" ? "suspend the grant" : "resume the grant", requirement: SUPERADMIN2, notFound: PLUGINS_OFF },
+        async () => {
+          const api = admin();
+          const grant = await findGrant(api, plugin, organization);
+          if (dry_run) return { dry_run: true, grant: summarizeGrant(grant), would_stop: await api.suspendPreview(plugin, grant.id) };
+          const updated = state === "suspended" ? await api.suspendGrant(plugin, grant.id) : await api.resumeGrant(plugin, grant.id);
+          return { grant: summarizeGrant(updated) };
+        }
+      );
+    })
+  );
+  server.registerTool(
+    "admin_uninstall_plugin",
+    {
+      title: "Uninstall a plugin (superadmin)",
+      description: "Take a plugin out of service in EVERY organization at once (pages, backend, service accounts stop); its data is kept until data_kept_until, so admin_reinstall_plugin can bring it back until then \u2014 after that it is deleted for good. dry_run: true reports the organizations and data affected. Superadmin, signed-in session. The real uninstall requires confirm: true.",
+      inputSchema: {
+        plugin: pluginIdentifier,
+        dry_run: external_exports.boolean().default(false),
+        confirm: external_exports.literal(true).optional().describe("Required unless dry_run: the user explicitly asked to uninstall this plugin.")
+      }
+    },
+    async ({ plugin, dry_run, confirm }) => runTool(async () => {
+      requireSignedInSession(context, "Uninstalling a plugin");
+      await context.auth.ensureAuthenticated();
+      if (!dry_run) assertConfirmed(confirm, "uninstall a plugin");
+      return explainRefusals({ action: "uninstall the plugin", requirement: SUPERADMIN2, notFound: PLUGINS_OFF }, async () => {
+        const api = admin();
+        const { verification_phrase: _phrase, ...preview } = await api.purgePreview(plugin);
+        if (dry_run) return { dry_run: true, affects: preview };
+        return { plugin: summarizeDetail(await api.uninstall(plugin)), data_kept_until: preview.data_kept_until };
+      });
+    })
+  );
+  server.registerTool(
+    "admin_reinstall_plugin",
+    {
+      title: "Reinstall an uninstalled plugin (superadmin)",
+      description: "Bring back a plugin uninstalled with admin_uninstall_plugin while its data is still kept: the grants the uninstall suspended resume (grants suspended on their own stay suspended). Superadmin, signed-in session. Requires confirm: true.",
+      inputSchema: {
+        plugin: pluginIdentifier,
+        confirm: confirmFlag("reinstall this plugin")
+      }
+    },
+    async ({ plugin }) => runTool(async () => {
+      requireSignedInSession(context, "Reinstalling a plugin");
+      await context.auth.ensureAuthenticated();
+      return explainRefusals({ action: "reinstall the plugin", requirement: SUPERADMIN2, notFound: PLUGINS_OFF }, async () => ({
+        plugin: summarizeDetail(await admin().reinstall(plugin))
+      }));
+    })
+  );
+}
+
+// src/tools/administration.tools.ts
+function registerAdministrationTools(server, context) {
+  registerAccountTools(server, context);
+  registerFirstSetupTools(server, context);
+  registerAdminRbacTools(server, context);
+  registerPluginTools(server, context);
+  registerAuditTools(server, context);
+}
+
 // src/tools/registry.ts
 function registerAllTools(server, context) {
   registerAuthOrgTools(server, context);
@@ -41347,6 +44024,9 @@ function registerAllTools(server, context) {
   registerVoiceConfigTools(server, context);
   registerVoiceAgentTools(server, context);
   registerVoiceChannelTools(server, context);
+  registerCodeRunTools(server, context);
+  registerFilterPresetTools(server, context);
+  registerAdministrationTools(server, context);
 }
 
 // src/index.ts
@@ -41398,7 +44078,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.4.0"
+      version: "1.4.1"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
