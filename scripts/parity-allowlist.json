@@ -1,0 +1,346 @@
+{
+  "$comment": "EpicStaff API routes MCP intentionally does not call (npm run parity-check). Each entry: a glob over the normalized route (relative to /api/, parameters as {}, a router prefix as <prefix>/*), a category and the reason. Categories: per-node-crud, flow-assistant, machine-to-machine, browser-only, never-expose, ui-preview, backlog.",
+  "routes": [
+    {
+      "pattern": "pythonnodes/*",
+      "category": "per-node-crud",
+      "reason": "Nodes are created, updated and deleted through the graph bulk save (graphs/{id}/save/), as the editor does; the per-node CRUD route is not needed. The node's last-session-input route is used separately (run_node_code)."
+    },
+    {
+      "pattern": "startnodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "endnodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "subgraph-nodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "agentnodetasks/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "edges/*",
+      "category": "per-node-crud",
+      "reason": "Edges are saved with the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "graph-notes/*",
+      "category": "per-node-crud",
+      "reason": "Notes are saved with the graph bulk save (graph_note_list)."
+    },
+    {
+      "pattern": "file-extractor-nodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "audio-transcription-nodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "knowledge-nodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "decision-table-node/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "webhook-trigger-nodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "schedule-trigger-nodes/*",
+      "category": "per-node-crud",
+      "reason": "Covered by the graph bulk save (graphs/{id}/save/)."
+    },
+    {
+      "pattern": "tasknodes/*",
+      "category": "per-node-crud",
+      "reason": "CRUD is covered by the graph bulk save. Its `combine` action (the editor's combined surface view of a node) is not used."
+    },
+    {
+      "pattern": "agentnodes/*",
+      "category": "per-node-crud",
+      "reason": "CRUD is covered by the graph bulk save. Its `combine` action (the editor's combined surface view of a node) is not used."
+    },
+    {
+      "pattern": "classification-decision-table-node/*",
+      "category": "per-node-crud",
+      "reason": "CRUD is covered by the graph bulk save. Its export / explain / explanations actions (CSV-JSON export and LLM explanations of the table's steps in the editor panel) are not exposed yet."
+    },
+    {
+      "pattern": "telegram-trigger-nodes/*",
+      "category": "per-node-crud",
+      "reason": "CRUD is covered by the graph bulk save. Its webhook-info / register-webhook actions (Telegram webhook registration status) are not exposed yet \u2014 a backlog item for Telegram triggers."
+    },
+    {
+      "pattern": "flow-assistants/*",
+      "category": "flow-assistant",
+      "reason": "The in-product flow assistant is deliberately not supported: Claude / Codex with this MCP server replace it."
+    },
+    {
+      "pattern": "plugin-nodes/*",
+      "category": "machine-to-machine",
+      "reason": "The plugin node agent's API (desired state, packages, hook jobs, reports) \u2014 authenticated with node credentials, never by a user."
+    },
+    {
+      "pattern": "plugin-runtime/*",
+      "category": "machine-to-machine",
+      "reason": "Called by a running plugin with its service-account credential."
+    },
+    {
+      "pattern": "plugin-gateway/*",
+      "category": "machine-to-machine",
+      "reason": "Gateway auth checks the reverse proxy makes before forwarding to a plugin."
+    },
+    {
+      "pattern": "plugin-public/*",
+      "category": "machine-to-machine",
+      "reason": "Public plugin config, icons and JWKS served to plugin frontends and verifiers."
+    },
+    {
+      "pattern": "auth/plugin-*",
+      "category": "machine-to-machine",
+      "reason": "The plugin sign-in hand-off (authorize / token exchange) between EpicStaff and a plugin app."
+    },
+    {
+      "pattern": "plugins/{}/login-organizations/",
+      "category": "machine-to-machine",
+      "reason": "Organizations offered during the plugin sign-in hand-off."
+    },
+    {
+      "pattern": "auth/introspect/",
+      "category": "machine-to-machine",
+      "reason": "Token introspection for EpicStaff's own services."
+    },
+    {
+      "pattern": "internal/*",
+      "category": "machine-to-machine",
+      "reason": "Key-value table reads and writes of a running session (the crew runtime), not a user API."
+    },
+    {
+      "pattern": "notify/email/",
+      "category": "machine-to-machine",
+      "reason": "The transport of the notification_tool an agent calls at run time (throttled, plugins refused). A tool for it would make MCP a mail relay; flows send mail through that tool."
+    },
+    {
+      "pattern": "run-session/subscribe/*",
+      "category": "browser-only",
+      "reason": "The browser's SSE stream of a run; MCP polls sessions/{id}/get-updates/ and reads graph-session-messages/ instead."
+    },
+    {
+      "pattern": "auth/sse-ticket/",
+      "category": "browser-only",
+      "reason": "Single-use ticket for opening the SSE stream from a browser."
+    },
+    {
+      "pattern": "auth/ws-ticket/",
+      "category": "browser-only",
+      "reason": "Single-use ticket for opening a WebSocket from a browser (voice chats)."
+    },
+    {
+      "pattern": "init-realtime/",
+      "category": "browser-only",
+      "reason": "Starts a voice session and returns the connection key for the realtime WebSocket audio stream (the Chats page). MCP has no audio channel, the key is useless to it, and starting one takes a run slot; the voice tools never surface connection keys."
+    },
+    {
+      "pattern": "auth/logout/",
+      "category": "browser-only",
+      "reason": "Ends the browser's cookie session; MCP authenticates with an API key and keeps its refresh cookie private."
+    },
+    {
+      "pattern": "auth/swagger-token/",
+      "category": "browser-only",
+      "reason": "Token for the Swagger UI."
+    },
+    {
+      "pattern": "auth/password-reset/*",
+      "category": "browser-only",
+      "reason": "Forgotten-password e-mail flow: the link in the mail is opened in a browser."
+    },
+    {
+      "pattern": "profile/password-change/*",
+      "category": "browser-only",
+      "reason": "Password change confirmed through an e-mailed code \u2014 a person's account action, not delegated to an agent."
+    },
+    {
+      "pattern": "profile/avatar/",
+      "category": "browser-only",
+      "reason": "Profile picture upload."
+    },
+    {
+      "pattern": "profile/tours/*",
+      "category": "browser-only",
+      "reason": "Marks an onboarding tour of the web UI as completed."
+    },
+    {
+      "pattern": "auth/reset-user/",
+      "category": "never-expose",
+      "reason": "Superadmin-only wipe of EVERY user account on the instance (JWT only by design). Too destructive to put behind an agent tool."
+    },
+    {
+      "pattern": "naive-rag/{}/document-configs/{}/process-chunking/*",
+      "category": "ui-preview",
+      "reason": "The knowledge editor's chunk preview before indexing. MCP offers estimate_rag_indexing (what-if chunking) and list_indexed_chunks (what indexing stored)."
+    },
+    {
+      "pattern": "naive-rag/{}/document-configs/{}/chunks/*",
+      "category": "ui-preview",
+      "reason": "Preview chunks of the knowledge editor (list / search / by ids). MCP reads the indexed chunks (naive-rag-document-chunks/) instead."
+    },
+    {
+      "pattern": "documents/*",
+      "category": "backlog",
+      "reason": "DocumentViewSet: one document's detail / preview / download and copying documents to another collection. MCP lists (source-collections/{id}/documents/), uploads, imports from storage and bulk-deletes documents; the rest is not exposed yet."
+    },
+    {
+      "pattern": "naive-rag/{}/",
+      "category": "backlog",
+      "reason": "Read or detach one naive RAG. Collections are read through source-collections/; detaching a RAG is not exposed yet (delete_collection removes the whole collection)."
+    },
+    {
+      "pattern": "graph-rag/{}/",
+      "category": "backlog",
+      "reason": "Read or detach one graph RAG \u2014 not exposed yet (see naive-rag/{}/)."
+    },
+    {
+      "pattern": "naive-rag/{}/document-configs/{}/",
+      "category": "backlog",
+      "reason": "Read / update / delete one document's chunking config. MCP applies chunking to every document (bulk-update) and reads them all (document-configs/); per-document edits are not exposed yet."
+    },
+    {
+      "pattern": "naive-rag/{}/document-configs/bulk-delete/",
+      "category": "backlog",
+      "reason": "Removing documents from a naive RAG without deleting them \u2014 not exposed yet."
+    },
+    {
+      "pattern": "graph-rag/{}/documents/*",
+      "category": "backlog",
+      "reason": "Graph RAG document selection (list / initialize / remove). Not exposed yet; also what a full-collection graph indexing needs to send its document ids."
+    },
+    {
+      "pattern": "process-rag-indexing/{}/{}/cancel/",
+      "category": "backlog",
+      "reason": "Cancel a running indexing \u2014 not exposed yet."
+    },
+    {
+      "pattern": "naive-rag/suggest-search-params/",
+      "category": "backlog",
+      "reason": "Suggested search settings for a surface's knowledge entry (editor helper) \u2014 not exposed yet."
+    },
+    {
+      "pattern": "graph-rag/suggest-search-params/",
+      "category": "backlog",
+      "reason": "Suggested graph search settings for a surface's knowledge entry (editor helper) \u2014 not exposed yet."
+    },
+    {
+      "pattern": "admin/plugins/packages/*",
+      "category": "never-expose",
+      "reason": "Plugin package upload, approval and rejection install third-party code; that review stays with a person in the UI."
+    },
+    {
+      "pattern": "admin/plugins/*/backups/*",
+      "category": "never-expose",
+      "reason": "Plugin backup restore is irreversible and the UI asks for a typed verification phrase an agent would simply fill in."
+    },
+    {
+      "pattern": "admin/plugins/*/grants/*/purge-preview/",
+      "category": "never-expose",
+      "reason": "Belongs to the irreversible plugin data purge, which stays in the UI."
+    },
+    {
+      "pattern": "admin/plugins/*/org-removed-jobs/*",
+      "category": "never-expose",
+      "reason": "Data-removal job controls for uninstalled plugins; operational, left to the UI."
+    },
+    {
+      "pattern": "admin/plugins/*/retry-removal/",
+      "category": "never-expose",
+      "reason": "Data-removal job control; operational, left to the UI."
+    },
+    {
+      "pattern": "admin/plugins/*/grants/*/retry-hook/",
+      "category": "backlog",
+      "reason": "Plugin operations control not yet exposed."
+    },
+    {
+      "pattern": "admin/plugins/*/limits/",
+      "category": "backlog",
+      "reason": "Plugin operational control (settings, limits, restarts, upgrades, development mode); left to the UI for now."
+    },
+    {
+      "pattern": "admin/plugins/*/restart/",
+      "category": "backlog",
+      "reason": "Plugin operational control (settings, limits, restarts, upgrades, development mode); left to the UI for now."
+    },
+    {
+      "pattern": "admin/plugins/*/runtime/",
+      "category": "backlog",
+      "reason": "Plugin operational control (settings, limits, restarts, upgrades, development mode); left to the UI for now."
+    },
+    {
+      "pattern": "admin/plugins/*/settings/",
+      "category": "backlog",
+      "reason": "Plugin operational control (settings, limits, restarts, upgrades, development mode); left to the UI for now."
+    },
+    {
+      "pattern": "admin/plugins/*/upgrade/*",
+      "category": "backlog",
+      "reason": "Plugin operational control (settings, limits, restarts, upgrades, development mode); left to the UI for now."
+    },
+    {
+      "pattern": "admin/plugins/*/development/*",
+      "category": "backlog",
+      "reason": "Plugin operational control (settings, limits, restarts, upgrades, development mode); left to the UI for now."
+    },
+    {
+      "pattern": "admin/plugin-role-permissions/*",
+      "category": "backlog",
+      "reason": "Per-plugin role permission matrix; left to the UI for now."
+    },
+    {
+      "pattern": "plugins/activity/*/",
+      "category": "backlog",
+      "reason": "Single plugin-activity event detail; the list endpoint is covered by list_plugin_activity."
+    },
+    {
+      "pattern": "admin/organizations/*/retention/",
+      "category": "backlog",
+      "reason": "Retention settings are a UI-only feature for now."
+    },
+    {
+      "pattern": "admin/memberships/assignable-users/",
+      "category": "backlog",
+      "reason": "User picker for the membership dialog; admin_list_users covers the need."
+    },
+    {
+      "pattern": "auth/admin/password-reset/",
+      "category": "never-expose",
+      "reason": "Sets another user's credentials; belongs in the UI or the emailed reset flow."
+    },
+    {
+      "pattern": "profile/api-keys/*/",
+      "category": "backlog",
+      "reason": "API key detail; list and revoke are covered."
+    },
+    {
+      "pattern": "admin/plugins/*/grants/*/",
+      "category": "backlog",
+      "reason": "Single grant detail and its delete; the list, create, suspend and resume calls are covered, and deleting a grant purges data, which stays in the UI."
+    }
+  ],
+  "nodeLists": []
+}

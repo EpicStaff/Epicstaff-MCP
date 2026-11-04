@@ -199,15 +199,69 @@ export function registerRecycleBinTools(server: McpServer, context: AppContext):
           const result = await recycleBin().purge(kind, ids);
           return { kind: RECYCLE_BIN_SOURCES[kind].kind, ...result };
         } catch (error) {
-          if (error instanceof ApiError && error.status === 403) {
-            throw new Error(
-              'Purging was refused: EpicStaff lets only a superadmin purge, and only from a signed-in session ' +
-                '(EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD, not EPICSTAFF_API_TOKEN). Nothing was deleted; the items ' +
-                'expire on their own when their retention runs out.',
-            );
-          }
-          throw error;
+          throw explainPurgeRefusal(error);
         }
       }),
   );
+
+  server.registerTool(
+    'empty_recycle_bin',
+    {
+      title: 'Empty the whole recycle bin',
+      description:
+        'IRREVERSIBLE: permanently delete EVERY item of EVERY bin of the active organization — flows, agents, ' +
+        'surfaces, tools, collections (and their indexes), tables, secrets, voice channels, webhook triggers and ' +
+        'storage files. Nothing can be restored afterwards. Superadmin only, through a signed-in session (never an ' +
+        'API key). Use only when the user explicitly asks to empty the whole bin; to delete chosen items use ' +
+        'purge_from_recycle_bin. Requires confirm: true and organization_id equal to the active organization.',
+      inputSchema: {
+        organization_id: z
+          .number()
+          .int()
+          .describe('The active organization whose bin is emptied (list_organizations) — a guard against the wrong org.'),
+        confirm: z
+          .literal(true)
+          .describe('Must be true: the user explicitly asked to empty the whole recycle bin for good.'),
+      },
+    },
+    async ({ organization_id }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        const activeOrgId = await context.org.requireActiveOrg();
+        if (organization_id !== activeOrgId) {
+          throw new Error(
+            `organization_id ${organization_id} is not the active organization (${activeOrgId}). Nothing was deleted — ` +
+              'switch with set_active_organization first if that is the bin to empty.',
+          );
+        }
+        try {
+          const result = await recycleBin().emptyAll();
+          return {
+            organization_id: activeOrgId,
+            purged: result.purgedCount,
+            failed: result.failed,
+            ...(result.leftCount > 0
+              ? {
+                  left: result.leftCount,
+                  next: 'The bin stopped emptying before every item was reached — call empty_recycle_bin again.',
+                }
+              : {}),
+          };
+        } catch (error) {
+          throw explainPurgeRefusal(error);
+        }
+      }),
+  );
+}
+
+/** A refused purge (403) explained: superadmin only, signed-in session only; anything else unchanged. */
+function explainPurgeRefusal(error: unknown): unknown {
+  if (error instanceof ApiError && error.status === 403) {
+    return new Error(
+      'Purging was refused: EpicStaff lets only a superadmin purge, and only from a signed-in session ' +
+        '(EPICSTAFF_USERNAME / EPICSTAFF_PASSWORD, not EPICSTAFF_API_TOKEN). Nothing was deleted; the items ' +
+        'expire on their own when their retention runs out.',
+    );
+  }
+  return error;
 }

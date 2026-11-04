@@ -1,9 +1,28 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import { GraphsApi } from '../api/graphs.js';
 import { KnowledgeApi } from '../api/knowledge.js';
-import { SessionsApi, TERMINAL_SESSION_STATUSES, summarizeMessages } from '../api/sessions.js';
+import { SessionsApi, TERMINAL_SESSION_STATUSES, type TestRunNodeType, summarizeMessages } from '../api/sessions.js';
+import { TelegramTriggerFieldsApi } from '../api/telegram-trigger-fields.js';
+import { ApiError } from '../http/errors.js';
+import type { TelegramTriggerNodeDto } from '../models/nodes/telegram-trigger-node.js';
+import type { WebhookTriggerNodeDto } from '../models/nodes/webhook-trigger-node.js';
 import { runTool } from './auth-org.tools.js';
+import { idOrName } from './catalog-helpers.js';
+import { pickGraphNode } from './graph-node-lookup.js';
+
+const TRIGGER_TEST_NODE_TYPES = ['webhook-trigger', 'telegram-trigger'] as const satisfies readonly TestRunNodeType[];
+
+type TriggerNode =
+  | { kind: 'webhook-trigger'; node: WebhookTriggerNodeDto }
+  | { kind: 'telegram-trigger'; node: TelegramTriggerNodeDto };
+
+/** The state variable a test payload reaches the flow as (each strategy's `build_variables`). */
+const TRIGGER_PAYLOAD_VARIABLE: Record<TestRunNodeType, string> = {
+  'webhook-trigger': 'trigger_payload',
+  'telegram-trigger': 'telegram_payload',
+};
 
 /**
  * RAG indexing statuses that mean a strategy has stopped progressing:
@@ -30,6 +49,8 @@ interface CollectionRagStatus {
 export function registerRunTools(server: McpServer, context: AppContext): void {
   const sessions = new SessionsApi(context.client);
   const knowledge = new KnowledgeApi(context.client);
+  const graphs = new GraphsApi(context.client);
+  const telegramFields = new TelegramTriggerFieldsApi(context.client);
 
   server.registerTool(
     'run_flow',
@@ -60,6 +81,106 @@ export function registerRunTools(server: McpServer, context: AppContext): void {
           session_id: result.session_id,
           next: 'Poll get_session_updates until the status is terminal (end/error/stop/expired) or wait_for_user.',
         };
+      }),
+  );
+
+  server.registerTool(
+    'run_flow_from_trigger',
+    {
+      title: 'Run a flow from a trigger node with a test payload',
+      description:
+        'Start a run at a webhook or Telegram trigger node of a pushed flow with a hand-written payload, as if the ' +
+        'webhook / Telegram update had arrived (POST run-session/test/) — no tunnel, webhook trigger or bot needed. ' +
+        'Unlike run_flow (start node + initial_state) this exercises the trigger path: a webhook payload reaches ' +
+        'the flow as variables.trigger_payload (through the node\'s code), a Telegram one as ' +
+        'variables.telegram_payload. A Telegram payload looks like an update ({"message": {"text": "hi", ...}}) ' +
+        'and may only use the parents and fields selected on the node (list_telegram_trigger_fields; fields are ' +
+        'selected in the EpicStaff editor). Omit payload to use the test payload saved on the node. Needs Flows ' +
+        'UPDATE and USE. Returns the session_id to poll like run_flow.',
+      inputSchema: {
+        graph_id: z.number().int().describe('Backend id of the pushed flow.'),
+        node: idOrName.describe('The trigger node: its backend id or its node name (the flow-source node key).'),
+        node_type: z
+          .enum(TRIGGER_TEST_NODE_TYPES)
+          .optional()
+          .describe('Narrow the lookup to webhook or Telegram triggers (needed only when an id matches both).'),
+        payload: z
+          .record(z.unknown())
+          .optional()
+          .describe('The test payload (a JSON object). Defaults to the test payload saved on the node.'),
+      },
+    },
+    async ({ graph_id, node, node_type, payload }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        await context.org.requireActiveOrg();
+        const graph = await graphs.get(graph_id);
+        const candidates: TriggerNode[] = [
+          ...(graph.webhook_trigger_node_list ?? []).map((webhookNode) => ({
+            kind: 'webhook-trigger' as const,
+            node: webhookNode,
+          })),
+          ...(graph.telegram_trigger_node_list ?? []).map((telegramNode) => ({
+            kind: 'telegram-trigger' as const,
+            node: telegramNode,
+          })),
+        ].filter((candidate) => node_type === undefined || candidate.kind === node_type);
+        const match = pickGraphNode(candidates, node, graph_id, node_type ? `${node_type} node` : 'trigger node');
+        const testPayload = payload ?? match.node.test_payload ?? {};
+
+        let result: { session_id: number };
+        try {
+          result = await sessions.runTestSession({
+            graph_id,
+            node_type: match.kind,
+            node_id: match.node.id,
+            payload: testPayload,
+          });
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 400 && match.kind === 'telegram-trigger') {
+            throw new Error(
+              `${error.message}: ${error.bodyExcerpt ?? ''} — a Telegram test payload may use only the parents and ` +
+                'fields selected on the node (list_telegram_trigger_fields lists what exists; fields are selected ' +
+                'in the EpicStaff editor — flow source cannot express them, so a pushed node starts with none).',
+            );
+          }
+          if (error instanceof ApiError && error.status === 403) {
+            throw new Error('A trigger test run was refused: it needs Flows UPDATE and Flows USE in the active organization.');
+          }
+          throw error;
+        }
+        return {
+          session_id: result.session_id,
+          node: { kind: match.kind, id: match.node.id, node_name: match.node.node_name },
+          payload_variable: `variables.${TRIGGER_PAYLOAD_VARIABLE[match.kind]}`,
+          ...(payload === undefined ? { payload_source: 'the test payload saved on the node' } : {}),
+          next: 'Poll get_session_updates until the status is terminal, then read get_session_messages.',
+        };
+      }),
+  );
+
+  server.registerTool(
+    'list_telegram_trigger_fields',
+    {
+      title: 'List Telegram trigger fields',
+      description:
+        'The Telegram update fields a Telegram trigger node can select, per parent (message, callback_query), with ' +
+        'their Telegram type and description. A test payload of run_flow_from_trigger may use only the fields ' +
+        'selected on the node.',
+      inputSchema: {
+        parent: z.string().optional().describe('Only this parent (e.g. "message").'),
+      },
+    },
+    async ({ parent }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        const fields = await telegramFields.list();
+        if (parent === undefined) return fields;
+        const selected = fields[parent];
+        if (selected === undefined) {
+          throw new Error(`Unknown parent "${parent}". Parents: ${Object.keys(fields).join(', ')}.`);
+        }
+        return { [parent]: selected };
       }),
   );
 

@@ -204,13 +204,18 @@ class MockBackend {
       return { status: 200, body: { message: 'Index config updated' } };
     if (/^POST \/api\/naive-rag\/\d+\/document-configs\/initialize\/$/.test(key))
       return { status: 200, body: { message: 'ok', configs_created: 0, configs_existing: 2, new_configs: [] } };
+    // Mirrors NaiveRagDocumentConfigViewSet.list_configs: the configs come in an envelope, not a page.
     if (/^GET \/api\/naive-rag\/\d+\/document-configs\/$/.test(key))
       return {
         status: 200,
-        body: [
-          { naive_rag_document_id: 11, document_id: 1, file_name: 'a.md', chunk_size: 1000, chunk_overlap: 150 },
-          { naive_rag_document_id: 12, document_id: 2, file_name: 'b.md', chunk_size: 1000, chunk_overlap: 150 },
-        ],
+        body: {
+          naive_rag_id: Number(path.split('/')[3]),
+          total_configs: 2,
+          configs: [
+            { naive_rag_document_id: 11, document_id: 1, file_name: 'a.md', chunk_size: 1000, chunk_overlap: 150 },
+            { naive_rag_document_id: 12, document_id: 2, file_name: 'b.md', chunk_size: 1000, chunk_overlap: 150 },
+          ],
+        },
       };
     if (/^PUT \/api\/naive-rag\/\d+\/document-configs\/bulk-update\/$/.test(key))
       return { status: 200, body: { message: 'Successfully updated 2 config(s)', updated_count: 2, failed_count: 0 } };

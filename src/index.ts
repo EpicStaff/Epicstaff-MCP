@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   const server = new McpServer(
     {
       name: 'epicstaff',
-      version: '1.4.0',
+      version: '1.4.1',
     },
     { instructions: EPICSTAFF_INSTRUCTIONS },
   );
