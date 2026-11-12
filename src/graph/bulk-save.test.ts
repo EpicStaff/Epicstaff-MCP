@@ -28,13 +28,9 @@ function baseNode(id: string, backendId: number | null, nodeName: string, x: num
   };
 }
 
+/** Only the position is persisted for a non-note node (EpicStaff 1.5.0). */
 function metadataOf(node: GraphNodeBase): Record<string, unknown> {
-  return {
-    position: node.position,
-    color: node.color,
-    icon: node.icon,
-    size: node.size,
-  };
+  return { position: node.position };
 }
 
 const emptyDeleted = {
@@ -269,7 +265,13 @@ describe('buildBulkSavePayload', () => {
           node_name: 'Note',
           graph: 42,
           content: 'hello',
-          metadata: { ...metadataOf(desiredNote), backgroundColor: '#222222' },
+          metadata: {
+            ...metadataOf(desiredNote),
+            size: desiredNote.size,
+            backgroundColor: '#222222',
+            fontSize: null,
+            linkedRegion: null,
+          },
         },
       ],
       classification_decision_table_node_list: [],

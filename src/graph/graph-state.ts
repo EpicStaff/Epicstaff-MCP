@@ -13,6 +13,7 @@ import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import type { KeyValueNodeData } from '../models/nodes/key-value-node.js';
 import type { KnowledgeRetrieverNodeData } from '../models/nodes/knowledge-retriever-node.js';
 import type { CustomPythonCode } from '../models/nodes/python-node.js';
+import type { NoteLinkedRegion } from '../models/nodes/note-node.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
 import type { TelegramTriggerFieldWrite } from '../models/nodes/telegram-trigger-node.js';
 import type {
@@ -93,7 +94,7 @@ export interface EndGraphNode extends GraphNodeBase {
 
 export interface NoteGraphNode extends GraphNodeBase {
   type: 'note';
-  data: { content: string; backgroundColor?: string };
+  data: { content: string; backgroundColor?: string; fontSize?: number; linkedRegion?: NoteLinkedRegion };
 }
 
 export interface FileExtractorGraphNode extends GraphNodeBase {

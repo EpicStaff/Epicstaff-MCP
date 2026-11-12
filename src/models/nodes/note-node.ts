@@ -12,8 +12,20 @@ export interface GraphNoteDto extends AuthorshipFields {
   metadata: Record<string, unknown>;
 }
 
-/** Note metadata carries the note's background color alongside the standard node metadata. */
-export type GraphNoteMetadataWrite = NodeDtoMetadata & { backgroundColor: string | null };
+export interface NoteLinkedRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A note is user-resizable and user-styled, so unlike other nodes it persists more than its position. */
+export type GraphNoteMetadataWrite = NodeDtoMetadata & {
+  size: { width: number; height: number };
+  backgroundColor: string | null;
+  fontSize: number | null;
+  linkedRegion: NoteLinkedRegion | null;
+};
 
 export interface GraphNoteWrite {
   node_name: string;

@@ -28,7 +28,7 @@ import type {
   TelegramTriggerGraphNode,
   WebhookTriggerGraphNode,
 } from './graph-state.js';
-import { toNodeMetadata } from './metadata.js';
+import { toNodeMetadata, toNoteMetadata } from './metadata.js';
 import { storedPythonCode } from './python-code-text.js';
 import { canonicalJson } from '../flow-source/lockfile.js';
 
@@ -337,7 +337,7 @@ function toNoteComparable(node: NoteGraphNode): unknown {
   return {
     node_name: node.node_name,
     content: node.data.content,
-    metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null },
+    metadata: toNoteMetadata(node),
   };
 }
 

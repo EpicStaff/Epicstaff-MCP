@@ -6,20 +6,13 @@ import type { GraphNodeBase, GraphNodeType, GraphState, TaskGraphNode } from './
 import { buildBulkSavePayload } from './bulk-save.js';
 import { buildRemoteState, collectOrphanEdgeIds, remoteNodeUuid } from './remote-state.js';
 
+/** Node metadata as EpicStaff 1.5.0 saves it: the position only. */
 interface FixtureMeta {
   position: { x: number; y: number };
-  color: string;
-  icon: string;
-  size: { width: number; height: number };
 }
 
 function meta(x: number, y: number): FixtureMeta {
-  return {
-    position: { x, y },
-    color: '#123456',
-    icon: 'ti-node',
-    size: { width: 200, height: 100 },
-  };
+  return { position: { x, y } };
 }
 
 function desiredBase(
@@ -34,9 +27,10 @@ function desiredBase(
     backendId,
     node_name: nodeName,
     position: m.position,
-    color: m.color,
-    icon: m.icon,
-    size: m.size,
+    // The compiler's constants: never stored, so they must not make the node differ from the remote.
+    color: '#123456',
+    icon: 'ti-node',
+    size: { width: 200, height: 100 },
     ...(nodeNumber != null ? { nodeNumber } : {}),
     input_map: {},
     output_variable_path: null,
@@ -82,6 +76,8 @@ function withCompiledUuids(state: GraphState): GraphState {
 const mStart = meta(0, 0);
 const mPython = meta(100, 0);
 const mNote = meta(600, 0);
+const noteSize = { width: 420, height: 260 };
+const noteLinkedRegion = { x: 10, y: 20, width: 300, height: 200 };
 const mTask = meta(400, 0);
 const mAgent = meta(250, 120);
 const mDt = meta(250, -120);
@@ -226,7 +222,13 @@ function makeDto(): GraphDto {
       },
     ],
     graph_note_list: [
-      { id: 3, node_name: 'Note', graph: 42, content: 'hello', metadata: { ...mNote, backgroundColor: '#222222' } },
+      { id: 3, node_name: 'Note', graph: 42, content: 'hello', metadata: {
+        ...mNote,
+        size: noteSize,
+        backgroundColor: '#222222',
+        fontSize: 18,
+        linkedRegion: noteLinkedRegion,
+      } },
     ],
     decision_table_node_list: [
       {
@@ -445,8 +447,9 @@ function makeDesired(): GraphState {
       },
       {
         ...desiredBase('note', 3, 'Note', mNote),
+        size: noteSize,
         type: 'note',
-        data: { content: 'hello', backgroundColor: '#222222' },
+        data: { content: 'hello', backgroundColor: '#222222', fontSize: 18, linkedRegion: noteLinkedRegion },
       },
       {
         ...desiredBase('decision-table', 7, 'Router', mDt),
@@ -721,6 +724,26 @@ describe('buildRemoteState', () => {
     const nodeDiff = getNodeDiff(remote, desired);
     expectEmptyNodeDiff(nodeDiff, 'classificationDecisionTableNodes');
     expect(nodeDiff.classificationDecisionTableNodes.toUpdate).toHaveLength(1);
+  });
+
+  it("a note's font size is persisted: changing it is an update that writes the note's full metadata", () => {
+    const remote = buildRemoteState(makeDto());
+    const desired = makeDesired();
+    const note = desired.nodes.find((node) => node.type === 'note');
+    if (note?.type !== 'note') return expect.unreachable('note missing');
+    note.data.fontSize = 24;
+
+    const nodeDiff = getNodeDiff(remote, desired);
+    expectEmptyNodeDiff(nodeDiff, 'noteNodes');
+    expect(nodeDiff.noteNodes.toUpdate).toHaveLength(1);
+    const payload = buildBulkSavePayload({ graphId: 42, desired, remote, saveVersion: 1 });
+    expect(payload.graph_note_list[0]!.metadata).toStrictEqual({
+      position: mNote.position,
+      size: noteSize,
+      backgroundColor: '#222222',
+      fontSize: 24,
+      linkedRegion: noteLinkedRegion,
+    });
   });
 
   it('carries System One prompt fields from the read to the restore payload, inventing no kind', () => {

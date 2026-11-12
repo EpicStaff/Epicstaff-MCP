@@ -504,6 +504,11 @@ export function inheritUnrepresentableFields(desired: GraphState, remote: GraphS
     } else if (node.type === 'note' && previous.type === 'note') {
       // GraphNote has no node_name column — the name lives only in flow source / the lockfile.
       previous.node_name = node.node_name;
+      // Flow source cannot state a note's size or styling; keep what the editor saved.
+      node.size = previous.size;
+      node.data.backgroundColor ??= previous.data.backgroundColor;
+      node.data.fontSize ??= previous.data.fontSize;
+      node.data.linkedRegion ??= previous.data.linkedRegion;
     }
   }
 }

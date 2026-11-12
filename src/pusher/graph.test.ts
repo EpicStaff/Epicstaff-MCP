@@ -54,6 +54,12 @@ function remoteState(): GraphState {
       data: { table: { condition_groups: [] } },
       explanations: { step: { text: 'why', fingerprint: 'f', generatedBy: 'gpt' } },
     },
+    {
+      ...base('r-note', 5, 'note'),
+      size: { width: 420, height: 260 },
+      type: 'note',
+      data: { content: 'hi', backgroundColor: '#ffd1d1', fontSize: 18, linkedRegion: { x: 1, y: 2, width: 3, height: 4 } },
+    },
   ];
   return { nodes, edges: [] };
 }
@@ -69,18 +75,19 @@ function compiledState(): GraphState {
     },
     { ...base('d-bot', 3, 'bot'), type: 'telegram-trigger', data: { telegram_bot_api_key_secret_id: null, webhook_trigger: null, fields: [] } },
     { ...base('d-cdt', 4, 'classify'), type: 'classification-decision-table', data: { table: { condition_groups: [] } } },
+    { ...base('d-note', 5, 'note'), type: 'note', data: { content: 'hi' } },
   ];
   return { nodes, edges: [] };
 }
 
 describe('inheritUnrepresentableFields', () => {
-  it('keeps the venv, timeouts, test payloads, storage access, telegram fields and CDT explanations set in the editor', () => {
+  it('keeps the venv, timeouts, test payloads, storage access, telegram fields, CDT explanations and note styling set in the editor', () => {
     const remote = remoteState();
     const desired = compiledState();
 
     inheritUnrepresentableFields(desired, remote);
 
-    const [python, hook, bot, cdt] = desired.nodes;
+    const [python, hook, bot, cdt, note] = desired.nodes;
     expect(python?.type === 'python' && python.data).toMatchObject({ id: 11, venv_id: 4, execution_timeout: 90, secret_ids: [3] });
     expect(hook?.type === 'webhook-trigger' && hook.data).toMatchObject({
       webhook_trigger: 33,
@@ -94,6 +101,14 @@ describe('inheritUnrepresentableFields', () => {
     ]);
     expect(cdt?.type === 'classification-decision-table' && cdt.explanations).toEqual({
       step: { text: 'why', fingerprint: 'f', generatedBy: 'gpt' },
+    });
+
+    expect(note?.size).toEqual({ width: 420, height: 260 });
+    expect(note?.type === 'note' && note.data).toEqual({
+      content: 'hi',
+      backgroundColor: '#ffd1d1',
+      fontSize: 18,
+      linkedRegion: { x: 1, y: 2, width: 3, height: 4 },
     });
 
     // Nothing the source did not change is rewritten.

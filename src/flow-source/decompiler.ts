@@ -29,7 +29,8 @@
  *    back to paths without the storage API);
  *  - decision-table grid condition groups (flattened into one expression),
  *    manipulations and error routes; CDT prompts / pre-post computation /
- *    route codes; note background colors; edge waypoints.
+ *    route codes; edge waypoints; note size, background color, font size and linked
+ *    region (kept on repush).
  *
  * Lock seeding matches what the pusher writes (src/pusher/graph.ts): node
  * entries under `nodes.<node_name>` carry the backend id and `contentHash({})`
@@ -835,12 +836,9 @@ function buildNodeBody(
       return { type: 'end', position };
     }
 
-    case 'note': {
-      if (typeof metadataOf(entry.dto)['backgroundColor'] === 'string') {
-        warnings.push(`${atPath}: note background color is not representable in flow source and resets on the next push`);
-      }
+    case 'note':
+      // Its size and styling are not representable either, but the pusher keeps them on repush.
       return { type: 'note', position, text: entry.dto.content };
-    }
 
     case 'file-extractor':
       return {

@@ -33,7 +33,7 @@ import type {
   GraphState,
   ScheduleTriggerGraphNode,
 } from './graph-state.js';
-import { toNodeMetadata } from './metadata.js';
+import { toNodeMetadata, toNoteMetadata } from './metadata.js';
 import { isNumberedNodeType } from './node-number.js';
 
 /**
@@ -515,7 +515,7 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       node_name: node.node_name,
       graph: graphId,
       content: node.data.content,
-      metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null },
+      metadata: toNoteMetadata(node),
     })),
     classification_decision_table_node_list: nodeItems(nodeDiff.classificationDecisionTableNodes, (node) =>
       buildCdtNodePayload(node, graphId, desired.nodes, idMap, desired.edges)

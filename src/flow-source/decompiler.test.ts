@@ -19,13 +19,9 @@ import { contentHash, readLock } from './lockfile.js';
 // wire-list order.
 // ---------------------------------------------------------------------------
 
+/** Node metadata as EpicStaff 1.5.0 saves it: the position only. */
 function nodeMetadata(x: number, y: number): Record<string, unknown> {
-  return {
-    position: { x, y },
-    color: '#685fff',
-    icon: 'ti ti-robot',
-    size: { width: 320, height: 80 },
-  };
+  return { position: { x, y } };
 }
 
 const PYTHON_CODE = 'def main(x):\n    return x\n';

@@ -33,6 +33,7 @@ import {
   type ClassificationDecisionTableNodeDto,
 } from '../models/nodes/classification-decision-table-node.js';
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
+import type { NoteLinkedRegion } from '../models/nodes/note-node.js';
 import type { CustomPythonCode, DeclaredSecretRef, GetPythonCodeDto } from '../models/nodes/python-node.js';
 import type { ScheduleTriggerNodeDto } from '../models/nodes/schedule-trigger-node.js';
 import type {
@@ -431,12 +432,16 @@ export function buildRemoteState(dto: GraphDto): GraphState {
     ...(dto.graph_note_list ?? []).map((node): GraphNode => {
       const metadata = (node.metadata ?? {}) as Record<string, unknown>;
       const backgroundColor = typeof metadata['backgroundColor'] === 'string' ? metadata['backgroundColor'] : undefined;
+      const fontSize = typeof metadata['fontSize'] === 'number' ? metadata['fontSize'] : undefined;
+      const linkedRegion = (metadata['linkedRegion'] ?? undefined) as NoteLinkedRegion | undefined;
       return {
         ...baseNode('note', node),
         type: 'note',
         data: {
           content: node.content,
           ...(backgroundColor !== undefined ? { backgroundColor } : {}),
+          ...(fontSize !== undefined ? { fontSize } : {}),
+          ...(linkedRegion !== undefined ? { linkedRegion } : {}),
         },
       };
     }),
