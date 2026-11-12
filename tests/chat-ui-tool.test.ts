@@ -28,7 +28,7 @@ describe('generate_chat_ui', () => {
       return new Response('{}', { status: 404 });
     });
     const context = createContext(loadConfig(ENV));
-    context.store.update({ apiKey: STORED_KEY, keyPrefix: 'es-store', activeOrgId: 3 });
+    context.store.update({ apiKeys: { 3: { key: STORED_KEY, prefix: 'es-store' } }, activeOrgId: 3 });
     ({ client, call } = await connectTools(context));
   });
 

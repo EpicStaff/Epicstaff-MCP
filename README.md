@@ -19,13 +19,18 @@ The plugin bundles the MCP server as built JS — no npm install needed at use t
    - `EPICSTAFF_BASE_URL` — EpicStaff base URL (e.g. `http://127.0.0.1`)
    - `EPICSTAFF_API_TOKEN` — a pre-issued API key, **or**
    - `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD` — your EpicStaff login (a dedicated API key
-     is minted on first use)
-3. With login credentials, the first tool call logs in, mints a dedicated API key
-   (`POST /api/profile/api-keys/`), and persists it in `~/.es_mcp/` together with the login's
-   refresh token. If that key is later revoked or expires, the replacement is minted with the
-   stored session (refreshed through the refresh token) — a new login happens only when the
-   session is gone too, and a key that is rejected right after minting is never re-minted in a
-   loop. With `EPICSTAFF_API_TOKEN`, the token is used directly. Unset variables that reach the
+     per organization is minted on first use)
+3. EpicStaff binds every API key to one organization and acts in that organization whatever
+   `X-Organization-Id` says. With login credentials, the server therefore keeps one key per
+   organization: the first tool call in an organization logs in, mints a dedicated key for it
+   (`POST /api/profile/api-keys/` with `org_id`), and persists it in `~/.es_mcp/` together with the
+   login's refresh token; `set_active_organization` switches to that organization's key (minted on
+   first use there). While several organizations exist and none is chosen yet, requests carry the
+   login session and nothing is minted. If a key is later revoked or expires, the replacement is
+   minted with the stored session (refreshed through the refresh token) — a new login happens only
+   when the session is gone too, and a key that is rejected right after minting is never re-minted
+   in a loop. With `EPICSTAFF_API_TOKEN` alone, the token is used directly and the server is fixed
+   to the token's organization (`set_active_organization` refuses any other). Unset variables that reach the
    server as a literal `${VAR}` count as unset; with a missing or invalid configuration the server
    still starts and every backend tool returns the configuration error (local tools keep working).
 4. Credentials a flow needs (LLM API keys, a Telegram bot token) come from environment variables
@@ -37,8 +42,9 @@ The plugin bundles the MCP server as built JS — no npm install needed at use t
    refreshed through the refresh token rather than by logging in again. Secrets are immutable: if
    an env value changes, delete the old `es-mcp:<ENV_NAME>` secret in EpicStaff and push again.
 
-Organizations are resolved automatically (`GET /api/profile/`) before the first org-scoped call
-of every server process. One org → auto-selected; several → pick with `set_active_organization`.
+Organizations are resolved automatically (`GET /api/profile/`, read with the login session — an API
+key sees only its own organization there) before the first org-scoped call of every server process.
+One org → auto-selected; several → pick with `set_active_organization`.
 
 ## Versioning & compatibility
 
@@ -103,7 +109,8 @@ backend — so it works from `file://` or any static host with no backend change
 read from, and set `reset_variables` to clear downstream state each turn (so `persistent_variables`
 graphs don't carry a stale answer forward). Open the emitted file; the gear icon edits API base /
 key / org / graph id (persisted in `localStorage`). The file carries **no API key** unless you pass
-`embed_api_key: true` — then it contains the MCP user's long-lived key in plain text (the result
+`embed_api_key: true` — then it contains the MCP user's long-lived key for the active organization
+in plain text (the result
 says so); keep such a file private and never host or commit it. It is one option `es-deliver` reaches for when
 a flow's interaction shape is conversational; non-chat apps are built to fit their own shape (form,
 dashboard, batch runner, …) against the same run-session contract — which is also what
@@ -244,7 +251,8 @@ it from whatever used it (`dry_run: true` lists that usage first); it is skipped
 the caller cannot see uses it.
 
 Administration (`es-admin`): the `admin_*` tools are cross-organization (the organization is an
-argument, not the active one). Reads work with the MCP's API key; every change needs a signed-in
+argument, not the active one). Reads use the signed-in session when there is one (an API key sees
+only its own organization; an `EPICSTAFF_API_TOKEN`-only server reads with it); every change needs a signed-in
 session (`EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD` — EpicStaff refuses API keys for admin changes) and
 `confirm: true`; removals offer `dry_run: true` first. A record outside the organizations you administer
 answers 404, never 403. A new API key or a new account's generated initial password is written to a new
@@ -340,9 +348,9 @@ viewset MCP already calls does not show up — read the upstream diff for those.
 
 Configured only through the environment — `EPICSTAFF_BASE_URL`, `EPICSTAFF_USERNAME`,
 `EPICSTAFF_PASSWORD`, plus `STRESS_OPENAI_KEY` for the LLM steps. EpicStaff allows **5 active API
-keys per user**: point `ES_MCP_STATE_DIR` at one directory and reuse it for every run, so the stored
-key is reused instead of minting a new one into a fresh state dir. The regression suite revokes the
-keys it minted itself when it finishes (never one it did not mint) and puts the pre-existing key back;
+keys per user and organization**: point `ES_MCP_STATE_DIR` at one directory and reuse it for every run,
+so the stored keys are reused instead of minting new ones into a fresh state dir. The regression suite
+revokes the keys it minted itself when it finishes (never one it did not mint) and puts the pre-existing keys back;
 `REG_KEEP=1` skips that cleanup.
 
 ```bash

@@ -1,7 +1,8 @@
 import { hostname } from 'node:os';
+import { apiKeyPrefix } from '../api/profile.js';
 import type { UserSession } from '../api/user-session.js';
 import type { Config } from '../config.js';
-import type { StateStore } from '../state/store.js';
+import { type StateStore, activeApiKey } from '../state/store.js';
 import { logger } from '../util/logger.js';
 import type { EpicStaffClient } from './client.js';
 import { ApiError } from './errors.js';
@@ -11,17 +12,23 @@ import { ApiError } from './errors.js';
  * (frontend services/auth/auth.service.ts) against the backend's rbac auth views
  * (src/django_app/rbac/views/{auth,api_keys}.py), adapted for a long-running client:
  *
- *   1. If a persisted API key exists, validate it (GET auth/api-key/validate/).
- *   2. Otherwise obtain a user session — the stored JWT access token while it is unexpired,
- *      else a refresh through the stored refresh cookie, and only when both fail a login with
- *      credentials (POST auth/login/ → access token in the body, refresh token in the HttpOnly
- *      refresh cookie, see REFRESH_COOKIE_NAMES) — then either:
- *      a. mint a dedicated API key (POST profile/api-keys/ with the access token — the
- *         raw key is returned exactly once), persist it; or
+ * EpicStaff binds a user API key to one organization and acts in it whatever X-Organization-Id
+ * says, so the server holds one key per organization (StateStore `apiKeys`) and works with the
+ * active organization's:
+ *
+ *   1. If a persisted key for the active organization exists, validate it (GET auth/api-key/validate/).
+ *   2. Otherwise settle the active organization (OrgService) and obtain a user session — the stored
+ *      JWT access token while it is unexpired, else a refresh through the stored refresh cookie,
+ *      and only when both fail a login with credentials (POST auth/login/ → access token in the
+ *      body, refresh token in the HttpOnly refresh cookie, see REFRESH_COOKIE_NAMES) — then either:
+ *      a. mint a dedicated API key for that organization (POST profile/api-keys/ with the access
+ *         token and `org_id` — the raw key is returned exactly once), persist it; or
  *      b. if profile/api-keys/ doesn't exist (a legacy backend that predates the
  *         API-key system — 404), authenticate every request with
  *         `Authorization: Bearer <access>` instead (`jwtOnly`), refreshing it via
  *         auth/refresh/ each bootstrap.
+ *      While no organization is chosen (several memberships, no selection yet) nothing is
+ *      minted: requests carry the JWT until set_active_organization picks one.
  *
  * The JWT session from the login is kept in both cases: some routes reject API keys
  * outright (`secrets/` — DenyApiKeyAuth), and {@link UserSession} serves them a bearer
@@ -49,7 +56,14 @@ interface ApiKeyMintResponse {
   name: string;
   prefix: string;
   expires_at: string | null;
+  org_id: number;
   api_key: string;
+}
+
+/** `GET auth/api-key/validate/` response — the field MCP reads. */
+interface ApiKeyValidateResponse {
+  /** The organization a user API key is bound to (null for the SYSTEM key). */
+  org_id?: number | null;
 }
 
 /**
@@ -116,8 +130,15 @@ function isJwtExpired(token: string, nowSeconds: number = Date.now() / 1000): bo
 export class AuthService implements UserSession {
   private bootstrapPromise: Promise<string> | null = null;
   private sessionPromise: Promise<string> | null = null;
-  /** When this process last minted an API key (loop guard, see MIN_REMINT_INTERVAL_MS). */
-  private lastMintAt: number | null = null;
+  /** When this process last minted an API key, per organization (loop guard, see MIN_REMINT_INTERVAL_MS). */
+  private readonly lastMintAt = new Map<number, number>();
+  /** Installed by org.ts — settles the active organization before a key is minted for it. */
+  private resolveOrgContext: (() => Promise<void>) | null = null;
+  /**
+   * The organization EPICSTAFF_API_TOKEN is bound to when it is the only credential: the server
+   * can act nowhere else (set_active_organization refuses other organizations).
+   */
+  pinnedOrgId: number | null = null;
 
   constructor(
     private readonly config: Config,
@@ -125,6 +146,15 @@ export class AuthService implements UserSession {
     private readonly client: EpicStaffClient,
   ) {
     client.onUnauthorized(() => this.forceRemint());
+  }
+
+  onOrgContextNeeded(handler: () => Promise<void>): void {
+    this.resolveOrgContext = handler;
+  }
+
+  /** {@link UserSession}: login credentials are configured, so a JWT session can be opened. */
+  hasUserSession(): boolean {
+    return this.config.email !== undefined && this.config.password !== undefined;
   }
 
   /** Ensure a working credential exists; validate/refresh the stored one or establish fresh. */
@@ -183,66 +213,102 @@ export class AuthService implements UserSession {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
     }
-    // Drop only the rejected credential. In API-key mode the JWT session is a different
-    // credential and stays usable for minting the replacement key without a login; in
-    // JWT-only mode the access token IS the rejected credential.
-    if (this.store.get().jwtOnly) {
-      this.store.update({ bearerAccessToken: null });
+    // Drop only the rejected credential — the one the client sent. An API key is replaced through
+    // the JWT session without a login; without a key for the active organization (JWT-only mode,
+    // no organization chosen yet) the access token IS the rejected credential.
+    const { activeOrgId } = this.store.get();
+    if (activeOrgId !== null && activeApiKey(this.store.get())) {
+      this.setOrgKey(activeOrgId, null);
     } else {
-      this.store.update({ apiKey: null, keyPrefix: null });
+      this.store.update({ bearerAccessToken: null });
     }
     return this.ensureAuthenticated();
   }
 
   private async bootstrap(): Promise<string> {
     if (this.config.apiToken !== undefined) {
-      return this.useProvidedToken(this.config.apiToken);
+      const token = await this.useProvidedToken(this.config.apiToken);
+      if (token !== null) return token;
     }
-    const { apiKey, bearerRefreshToken, jwtOnly } = this.store.get();
-    if (apiKey && (await this.isKeyValid())) {
-      return apiKey;
-    }
-    if (jwtOnly && !apiKey && bearerRefreshToken) {
-      const refreshed = await this.refreshSession(bearerRefreshToken);
+    let state = this.store.get();
+    if (state.jwtOnly && state.bearerRefreshToken) {
+      const refreshed = await this.refreshSession(state.bearerRefreshToken);
       if (refreshed !== null) return refreshed;
     }
-    return this.establishCredential();
+    if (!activeApiKey(state)) {
+      // A key belongs to one organization: settle which (drop a stale selection, auto-select a
+      // single membership) before looking for its key or minting one.
+      await this.resolveOrgContext?.();
+      state = this.store.get();
+    }
+    const held = activeApiKey(state);
+    if (held && (await this.validate(held.key)) !== null) {
+      return held.key;
+    }
+    if (state.activeOrgId === null) {
+      // Several organizations and none chosen yet: work with the JWT until set_active_organization.
+      return this.accessToken();
+    }
+    return this.establishCredential(state.activeOrgId);
   }
 
   /**
-   * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the
-   * pre-issued key directly. Seeded into the store so the client attaches it
-   * as X-Api-Key like any minted key. Falls back to credential login only
-   * when the token is rejected AND credentials are configured.
+   * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the pre-issued key directly,
+   * held as the key of the organization auth/api-key/validate/ names. As the only credential it
+   * pins the server to that organization. Next to login credentials it serves its own organization
+   * and the credential flow takes over elsewhere — or everywhere, when the token is rejected.
+   * Returns null when the credential flow should continue.
    */
-  private async useProvidedToken(token: string): Promise<string> {
-    this.store.update({ apiKey: token, keyPrefix: token.slice(0, 8), jwtOnly: false });
-    if (await this.isKeyValid()) {
-      return token;
+  private async useProvidedToken(token: string): Promise<string | null> {
+    const validated = await this.validate(token);
+    if (this.hasUserSession()) {
+      if (validated === null) {
+        logger.info('EPICSTAFF_API_TOKEN was rejected — falling back to credential login');
+        return null;
+      }
+      if (typeof validated.org_id === 'number') {
+        this.setOrgKey(validated.org_id, token);
+        if (this.store.get().activeOrgId === null) this.store.update({ activeOrgId: validated.org_id });
+      }
+      return activeApiKey(this.store.get())?.key === token ? token : null;
     }
-    this.store.update({ apiKey: null, keyPrefix: null });
-    if (this.config.email !== undefined && this.config.password !== undefined) {
-      logger.info('EPICSTAFF_API_TOKEN was rejected — falling back to credential login');
-      return this.establishCredential();
+    if (validated === null) {
+      throw new Error(
+        'EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, ' +
+          'or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted.',
+      );
     }
-    throw new Error(
-      'EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, ' +
-        'or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted.',
-    );
+    if (typeof validated.org_id !== 'number') {
+      throw new Error(
+        'EPICSTAFF_API_TOKEN is not bound to an organization (the system key?). Use a personal API key ' +
+          '(EpicStaff → Profile → API keys), or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD instead.',
+      );
+    }
+    this.pinnedOrgId = validated.org_id;
+    this.setOrgKey(validated.org_id, token);
+    this.store.update({ activeOrgId: validated.org_id, jwtOnly: false });
+    return token;
   }
 
-  private async isKeyValid(): Promise<boolean> {
+  /** `key`'s details from auth/api-key/validate/, or null when the server rejects it. */
+  private async validate(key: string): Promise<ApiKeyValidateResponse | null> {
     try {
-      // Validate route authenticates via the API key itself (X-Api-Key attached by the client).
-      await this.client.get('auth/api-key/validate/');
-      return true;
+      return await this.client.get<ApiKeyValidateResponse>('auth/api-key/validate/', { apiKey: key });
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-        logger.info('Stored API key is no longer valid — re-minting');
-        return false;
+        logger.info(`API key ${apiKeyPrefix(key)}… is no longer valid`);
+        return null;
       }
       throw error;
     }
+  }
+
+  /** Hold `key` as `orgId`'s API key, or drop that organization's key (null). */
+  private setOrgKey(orgId: number, key: string | null): void {
+    const apiKeys = { ...this.store.get().apiKeys };
+    if (key === null) delete apiKeys[orgId];
+    else apiKeys[orgId] = { key, prefix: apiKeyPrefix(key) };
+    this.store.update({ apiKeys });
   }
 
   /**
@@ -317,31 +383,32 @@ export class AuthService implements UserSession {
   }
 
   /**
-   * Mint a dedicated API key with the user's JWT session. The session comes from the store
-   * when possible (unexpired access token, else a cookie refresh) — a login happens only when
+   * Mint a dedicated API key for `orgId` with the user's JWT session. The session comes from the
+   * store when possible (unexpired access token, else a cookie refresh) — a login happens only when
    * neither works, because LoginThrottle allows just a handful per minute.
    */
-  private async establishCredential(): Promise<string> {
-    this.assertNotRemintLoop();
+  private async establishCredential(orgId: number): Promise<string> {
+    this.assertNotRemintLoop(orgId);
     const storedAccess = this.store.get().bearerAccessToken;
     const access = await this.accessToken();
     try {
-      return await this.mintWith(access);
+      return await this.mintWith(access, orgId);
     } catch (error) {
       // A stored access token can be revoked server-side before its `exp` (logout elsewhere).
       // Drop it and renew once — refresh cookie, else login — then retry the mint.
       if (error instanceof ApiError && error.status === 401 && access === storedAccess) {
         logger.info('Stored access token was rejected while minting — renewing the session');
         this.store.update({ bearerAccessToken: null });
-        return this.mintWith(await this.renewAccessToken());
+        return this.mintWith(await this.renewAccessToken(), orgId);
       }
       throw error;
     }
   }
 
-  private assertNotRemintLoop(): void {
-    if (this.lastMintAt === null) return;
-    const ageMs = Date.now() - this.lastMintAt;
+  private assertNotRemintLoop(orgId: number): void {
+    const lastMintAt = this.lastMintAt.get(orgId);
+    if (lastMintAt === undefined) return;
+    const ageMs = Date.now() - lastMintAt;
     if (ageMs < MIN_REMINT_INTERVAL_MS) {
       throw new Error(
         `The API key this server minted ${Math.round(ageMs / 1000)}s ago was rejected right away — not minting ` +
@@ -351,24 +418,23 @@ export class AuthService implements UserSession {
     }
   }
 
-  private async mintWith(access: string): Promise<string> {
+  private async mintWith(access: string, orgId: number): Promise<string> {
     const { bearerRefreshToken } = this.store.get();
     try {
       // Raw key is returned exactly once (server stores only hash + prefix) — persist immediately.
       // The route is JWT-only (DenyApiKeyAuth) — hence the bearer token.
       const minted = await this.client.post<ApiKeyMintResponse>('profile/api-keys/', {
         bearerToken: access,
-        body: { name: `es-mcp (${hostname()})` },
+        body: { name: `es-mcp (${hostname()})`, org_id: orgId },
       });
-      this.lastMintAt = Date.now();
+      this.lastMintAt.set(orgId, Date.now());
       this.store.update({
-        apiKey: minted.api_key,
-        keyPrefix: minted.prefix,
+        apiKeys: { ...this.store.get().apiKeys, [orgId]: { key: minted.api_key, prefix: minted.prefix } },
         bearerAccessToken: access,
         bearerRefreshToken,
         jwtOnly: false,
       });
-      logger.info(`Minted API key ${minted.prefix}… and persisted it`);
+      logger.info(`Minted API key ${minted.prefix}… for organization ${orgId} and persisted it`);
       return minted.api_key;
     } catch (error) {
       if (!(error instanceof ApiError && error.status === 404)) {
@@ -378,8 +444,7 @@ export class AuthService implements UserSession {
       // instead — the client uses the JWT whenever jwtOnly is set (see client.ts buildHeaders).
       logger.info('profile/api-keys/ not found — this backend has no API-key system; using JWT bearer auth instead');
       this.store.update({
-        apiKey: null,
-        keyPrefix: null,
+        apiKeys: {},
         bearerAccessToken: access,
         bearerRefreshToken,
         jwtOnly: true,

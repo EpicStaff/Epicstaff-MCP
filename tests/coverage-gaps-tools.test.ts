@@ -96,7 +96,7 @@ describe('coverage-gap tools (mock backend)', () => {
     });
 
     const context = createContext(loadConfig(ENV));
-    context.store.update({ apiKey: 'stored-key', keyPrefix: 'stored-k', activeOrgId: 1 });
+    context.store.update({ apiKeys: { 1: { key: 'stored-key', prefix: 'stored-k' } }, activeOrgId: 1 });
     ({ client, call } = await connectTools(context));
   });
 

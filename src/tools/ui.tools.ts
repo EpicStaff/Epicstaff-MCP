@@ -60,9 +60,11 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
         if (!isAbsolute(output_path)) {
           throw new Error('output_path must be an absolute path to a .html file.');
         }
-        const apiKey = await context.auth.ensureAuthenticated();
+        await context.auth.ensureAuthenticated();
         const embedKey = embed_api_key === true;
         const orgId = await context.org.requireActiveOrg();
+        // Re-run once the org is settled: the page needs that org's key (EpicStaff acts in a key's own org).
+        const apiKey = embedKey ? await context.auth.ensureAuthenticated() : '';
 
         const light = await graphs.listLight();
         const graph = light.find((candidate) => candidate.id === graph_id);
@@ -75,7 +77,7 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
           graphId: graph_id,
           graphName: graph.name,
           orgId,
-          apiKey: embedKey ? apiKey : '',
+          apiKey,
           title,
           subtitle: subtitle ?? (graph.description || undefined),
           inputPath: input_path,

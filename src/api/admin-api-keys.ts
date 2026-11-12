@@ -14,8 +14,6 @@ import { type UserSession, withUserSession } from './user-session.js';
 /** `GetApiKeyWithOwnerResponse` — never the key itself, only its prefix. */
 export interface AdminApiKey extends ApiKeyDto {
   owner: { id: number; email: string; display_name: string | null; avatar_url: string | null } | null;
-  /** The owner's organizations the caller can see. */
-  org_ids: number[];
 }
 
 export interface ListAdminApiKeysParams {

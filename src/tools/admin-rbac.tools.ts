@@ -90,7 +90,7 @@ function summarizeAdminKey(key: AdminApiKey): Record<string, unknown> {
     prefix: key.prefix,
     status: key.status,
     owner: key.owner ? { id: key.owner.id, email: key.owner.email } : null,
-    organization_ids: key.org_ids,
+    organization: { id: key.org_id, name: key.org_name },
     created_at: key.created_at,
     expires_at: key.expires_at,
     last_used_at: key.last_used_at,
@@ -652,11 +652,12 @@ export function registerAdminRbacTools(server: McpServer, context: AppContext): 
       runTool(async () => {
         requireSignedInSession(context, 'Revoking an API key');
         await context.auth.ensureAuthenticated();
-        const { apiKey } = context.store.get();
-        if (apiKey) {
-          const inUse = apiKeyPrefix(apiKey);
-          const own = (await new ProfileApi(context.client, context.auth).listApiKeys()).find((key) => key.prefix === inUse);
-          if (own?.id === key_id) {
+        const inUse = Object.values(context.store.get().apiKeys).map((held) => apiKeyPrefix(held.key));
+        if (inUse.length > 0) {
+          const own = (await new ProfileApi(context.client, context.auth).listApiKeys()).find(
+            (key) => key.id === key_id && inUse.includes(key.prefix),
+          );
+          if (own) {
             throw new Error(
               `Key ${own.prefix}… is the one this MCP server authenticates with — revoking it would cut the server off. ` +
                 'Revoke it in the EpicStaff UI if you really mean to.',

@@ -4,6 +4,7 @@ import type { AppContext } from '../context.js';
 import { err, ok, toContent } from '../util/result.js';
 import { ApiError } from '../http/errors.js';
 import { ConfigurationError } from '../config.js';
+import { activeApiKey } from '../state/store.js';
 
 /** Wrap a tool handler: run it, render the ToolResult envelope, normalize thrown errors. */
 export async function runTool<T>(work: () => Promise<T>): Promise<ReturnType<typeof toContent>> {
@@ -68,14 +69,15 @@ export function registerAuthOrgTools(server: McpServer, context: AppContext): vo
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         const orgStatus = await context.org.resolve();
-        const { apiKey, keyPrefix, bearerAccessToken } = context.store.get();
+        const state = context.store.get();
+        const held = activeApiKey(state);
         const authMode =
-          context.config.apiToken !== undefined ? 'api-token' : apiKey ? 'api-key' : bearerAccessToken ? 'jwt-bearer' : 'unknown';
+          context.config.apiToken !== undefined ? 'api-token' : held ? 'api-key' : state.bearerAccessToken ? 'jwt-bearer' : 'unknown';
         return {
           apiUrl: context.config.apiUrl,
           user: context.config.email ?? 'api-token',
           authMode,
-          apiKeyPrefix: keyPrefix,
+          apiKeyPrefix: held?.prefix ?? null,
           organizations: orgStatus.organizations,
           activeOrgId: orgStatus.activeOrgId,
           ...(orgStatus.selectionRequired && {
@@ -107,8 +109,10 @@ export function registerAuthOrgTools(server: McpServer, context: AppContext): vo
     {
       title: 'Set active organization',
       description:
-        'Select the active organization. All subsequent API calls carry it as X-Organization-Id; ' +
-        'flows and entities are created inside it. Required before any create/push when the user has several organizations.',
+        'Select the active organization. All subsequent API calls act in it — with the API key of that organization ' +
+        '(EpicStaff binds every key to one organization; the server mints one on first use) and X-Organization-Id; ' +
+        'flows and entities are created inside it. Required before any create/push when the user has several organizations. ' +
+        'A server configured with EPICSTAFF_API_TOKEN alone is fixed to the organization of that token.',
       inputSchema: {
         organization_id: z.number().int().describe('Organization id from list_organizations'),
       },

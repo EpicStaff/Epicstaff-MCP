@@ -25,7 +25,8 @@ yet: then start at **First-run setup**.
   — tell the user where it is. The audit token is minted and used internally; it never appears.
 - **Changes need a signed-in session.** EpicStaff lets an API key only *read* the admin surface. With
   `EPICSTAFF_API_TOKEN` only, every change below is refused before anything is sent — the user sets
-  `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD` or does it in the UI.
+  `EPICSTAFF_USERNAME` / `EPICSTAFF_PASSWORD` or does it in the UI. Such a key is bound to one
+  organization, and its reads see only that organization.
 - **404 is not "missing" on the admin surface.** A record in an organization the user cannot administer
   answers 404, never 403 — say "not found or not yours to administer", don't guess. A 403 names the right
   that is missing (superadmin, or e.g. `memberships: create` in that organization).

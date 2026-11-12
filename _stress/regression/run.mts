@@ -25,6 +25,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { loadConfig } from '../../src/config.js';
 import { createContext } from '../../src/context.js';
 import { readLock } from '../../src/flow-source/lockfile.js';
+import { activeApiKey } from '../../src/state/store.js';
 
 // ---------------------------------------------------------------------------------------------
 // Setup
@@ -150,8 +151,7 @@ class Server {
     await this.client.close();
     await this.transport.close().catch(() => undefined);
     // Remember every API key prefix the plugin stored during this run (to revoke our own mints).
-    const { keyPrefix } = restContext().store.get();
-    if (keyPrefix) seenKeyPrefixes.add(keyPrefix);
+    for (const held of Object.values(restContext().store.get().apiKeys)) seenKeyPrefixes.add(held.prefix);
   }
 }
 
@@ -248,12 +248,11 @@ const trackGraph = (response: ToolResponse): void => {
   if (typeof id === 'number') created.graphs.add(id);
 };
 
-// The key the state dir held BEFORE any server of this run started (reused, never revoked). Every
-// key stored after this point — phase A included — was minted by this run and is revoked on cleanup.
-const initialKey = (() => {
-  const { apiKey, keyPrefix } = restContext().store.get();
-  return apiKey && keyPrefix ? { apiKey, keyPrefix } : null;
-})();
+// The keys (one per organization) the state dir held BEFORE any server of this run started (reused,
+// never revoked). Every key stored after this point — phase A included — was minted by this run and
+// is revoked on cleanup.
+const initialKeys = restContext().store.get().apiKeys;
+const initialPrefixes = Object.values(initialKeys).map((held) => held.prefix);
 
 // ---------------------------------------------------------------------------------------------
 // A. Startup without configuration (issues 6, 7)
@@ -980,22 +979,23 @@ await server.close();
 {
   const context = restContext();
   const state = context.store.get();
+  const storedPrefix = activeApiKey(state)?.prefix;
   const keysBefore = await listApiKeys();
   const ownStoredKey =
-    state.keyPrefix && state.keyPrefix !== initialKey?.keyPrefix
-      ? keysBefore.find((key) => !key.revoked && key.prefix === state.keyPrefix)
+    storedPrefix && !initialPrefixes.includes(storedPrefix)
+      ? keysBefore.find((key) => !key.revoked && key.prefix === storedPrefix)
       : undefined;
   if (ownStoredKey) {
     await withUserSession((session, bearerToken) =>
       session.client.post(`profile/api-keys/${ownStoredKey.id}/revoke/`, { bearerToken }),
     );
   } else {
-    context.store.update({ apiKey: 'es-regression-invalid-key', keyPrefix: 'es-regre' });
+    context.store.update({ apiKeys: { ...state.apiKeys, [state.activeOrgId ?? 0]: { key: 'es-regression-invalid-key', prefix: 'es-regre' } } });
   }
   const activeBefore = (await listApiKeys()).filter((key) => !key.revoked).length;
   const fresh = await Server.start(process.env);
   await step(fresh, '#5 invalid stored key: reconnects with a new key', 'check_connection', {}, (result) =>
-    (result.ok && result.data.authMode === 'api-key' && result.data.apiKeyPrefix !== state.keyPrefix) || failure(result),
+    (result.ok && result.data.authMode === 'api-key' && result.data.apiKeyPrefix !== storedPrefix) || failure(result),
   );
   assertion('#5 ...minted through the stored session, without a login', 'check_connection',
     /Minted API key/.test(fresh.log) && !/Logging in/.test(fresh.log), 'expected a mint and no login in the server log');
@@ -1010,8 +1010,8 @@ await server.close();
 
 if (process.env.REG_KEEP !== '1') {
   // A stored key known to be dead (e.g. a failed #5) would make every cleanup call try to mint.
-  if (restContext().store.get().apiKey === 'es-regression-invalid-key' && initialKey) {
-    restContext().store.update({ apiKey: initialKey.apiKey, keyPrefix: initialKey.keyPrefix });
+  if (activeApiKey(restContext().store.get())?.key === 'es-regression-invalid-key') {
+    restContext().store.update({ apiKeys: initialKeys });
   }
   const context = restContext();
   const failures: string[] = [];
@@ -1030,16 +1030,15 @@ if (process.env.REG_KEEP !== '1') {
   console.log(`cleanup: ${created.graphs.size} graph(s) + core entities removed${failures.length ? `; ${failures.length} failed: ${failures.join('; ')}` : ''}`);
 
   // API keys this run minted (every stored prefix except the one the state dir started with).
-  const minted = [...seenKeyPrefixes].filter((prefix) => prefix !== initialKey?.keyPrefix);
+  const minted = [...seenKeyPrefixes].filter((prefix) => !initialPrefixes.includes(prefix));
   const ours = (await listApiKeys()).filter((key) => !key.revoked && minted.includes(key.prefix));
   for (const key of ours) {
     await withUserSession((session, bearerToken) =>
       session.client.post(`profile/api-keys/${key.id}/revoke/`, { bearerToken }),
     ).catch((error: Error) => failures.push(`revoke key #${key.id}: ${error.message}`));
   }
-  // Put the pre-existing key back so the next run reuses it instead of minting.
-  if (initialKey) restContext().store.update({ apiKey: initialKey.apiKey, keyPrefix: initialKey.keyPrefix });
-  else restContext().store.update({ apiKey: null, keyPrefix: null });
+  // Put the pre-existing keys back so the next run reuses them instead of minting.
+  restContext().store.update({ apiKeys: initialKeys });
   const activeAtEnd = (await listApiKeys()).filter((key) => !key.revoked).length;
   console.log(`cleanup: revoked ${ours.length} API key(s) minted by this run; ${activeAtEnd} active key(s) remain for this user`);
 }

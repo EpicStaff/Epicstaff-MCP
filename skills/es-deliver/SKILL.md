@@ -103,7 +103,8 @@ Per invocation:
    step-by-step result.
 
 Auth from a browser or external app: `Authorization: ApiKey <key>` + `X-Organization-Id: <id>`
-(both CORS-allowed; `X-Api-Key` is not).
+(both CORS-allowed; `X-Api-Key` is not). The key must be one created in that organization — EpicStaff
+binds every API key to one organization and acts there (`create_my_api_key` with `org_id`).
 
 Done when: the flow works AND its chosen wrapper (none / new app / integration) is delivered and
 verified.

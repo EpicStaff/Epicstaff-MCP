@@ -3,8 +3,8 @@
  *
  *   tsx scripts/generate-chat-ui.ts <spec.json> <out.html>
  *
- * Connection creds (apiUrl, apiKey, orgId) are read from the persisted es_mcp state in
- * ~/.es_mcp (or $ES_MCP_STATE_DIR). The spec.json supplies the flow-specific fields
+ * Connection creds (apiUrl, orgId and that organization's apiKey — EpicStaff binds a key to one
+ * organization) are read from the persisted es_mcp state in ~/.es_mcp (or $ES_MCP_STATE_DIR). The spec.json supplies the flow-specific fields
  * (graphId, graphName, title, inputPath, replyPath, resetVariables, welcome, ...).
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -17,9 +17,10 @@ function loadCreds(): { apiUrl: string; apiKey: string; orgId: number } {
   const files = readdirSync(dir).filter((file) => file.endsWith('.json'));
   if (files.length === 0) throw new Error(`No es_mcp state file found in ${dir}. Connect first.`);
   const state = JSON.parse(readFileSync(join(dir, files[0]!), 'utf8'));
-  if (!state.apiKey) throw new Error('Persisted state has no apiKey — connect first.');
   if (state.activeOrgId == null) throw new Error('Persisted state has no activeOrgId — select an organization.');
-  return { apiUrl: state.baseUrl, apiKey: state.apiKey, orgId: state.activeOrgId };
+  const apiKey = state.apiKeys?.[state.activeOrgId]?.key;
+  if (!apiKey) throw new Error('Persisted state has no API key for the active organization — connect first.');
+  return { apiUrl: state.baseUrl, apiKey, orgId: state.activeOrgId };
 }
 
 const [, , specPath, outPath] = process.argv;

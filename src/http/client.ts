@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import type { StateStore } from '../state/store.js';
+import { type StateStore, activeApiKey } from '../state/store.js';
 import { logger } from '../util/logger.js';
 import { ApiError, toApiError } from './errors.js';
 
@@ -8,8 +8,10 @@ import { ApiError, toApiError } from './errors.js';
  *
  * Mirrors the Angular interceptor chain
  * (core/interceptors/auth.interceptor.ts + active-org.interceptor.ts):
- *  - auth:   attach `X-Api-Key` to every non-auth request (the headless analogue of
- *            `Authorization: Bearer`); on 401 run a single-flight re-auth and retry once.
+ *  - auth:   attach the active organization's `X-Api-Key` to every non-auth request (the
+ *            headless analogue of `Authorization: Bearer`) — EpicStaff binds a user API key to
+ *            one organization — or the user's JWT while no key is held for it; on 401 run a
+ *            single-flight re-auth and retry once.
  *  - org:    attach `X-Organization-Id` when an active org is selected; skipped for
  *            auth endpoints and admin organization routes, same rules as the frontend.
  *            The frontend resolves the active org once at startup (ProfileService.bootstrapUser);
@@ -25,6 +27,8 @@ export interface RequestOptions {
   skipAuth?: boolean;
   /** Use a one-off bearer token instead of the API key (minting the key, JWT-only routes). */
   bearerToken?: string;
+  /** Use this API key instead of the active organization's (validating a key). */
+  apiKey?: string;
   /** Cookies to send (the backend reads the refresh token only from its HttpOnly cookie). */
   cookies?: Record<string, string>;
   /** Receives the raw response headers (auth reads `Set-Cookie` from login / refresh). */
@@ -181,13 +185,17 @@ export class EpicStaffClient {
     const headers = new Headers();
     if (options.bearerToken) {
       headers.set('Authorization', `Bearer ${options.bearerToken}`);
+    } else if (options.apiKey) {
+      headers.set('X-Api-Key', options.apiKey);
     } else if (!options.skipAuth) {
-      const { apiKey, bearerAccessToken } = this.store.get();
-      if (apiKey) {
-        headers.set('X-Api-Key', apiKey);
-      } else if (bearerAccessToken && this.store.get().jwtOnly) {
-        // Legacy backend with no API-key system (see auth.ts) — same JWT the frontend uses.
-        headers.set('Authorization', `Bearer ${bearerAccessToken}`);
+      const state = this.store.get();
+      const held = activeApiKey(state);
+      if (held) {
+        headers.set('X-Api-Key', held.key);
+      } else if (state.bearerAccessToken) {
+        // No key for the active organization (none chosen yet, or a legacy backend without an
+        // API-key system — see auth.ts): the same JWT the frontend uses.
+        headers.set('Authorization', `Bearer ${state.bearerAccessToken}`);
       }
     }
     if (options.cookies) {
