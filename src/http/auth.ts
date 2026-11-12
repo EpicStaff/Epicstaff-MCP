@@ -145,7 +145,7 @@ export class AuthService implements UserSession {
     private readonly store: StateStore,
     private readonly client: EpicStaffClient,
   ) {
-    client.onUnauthorized(() => this.forceRemint());
+    client.onUnauthorized((sent) => this.forceRemint(sent));
   }
 
   onOrgContextNeeded(handler: () => Promise<void>): void {
@@ -209,17 +209,16 @@ export class AuthService implements UserSession {
     return session.access;
   }
 
-  private async forceRemint(): Promise<string> {
+  private async forceRemint(sent: string | null): Promise<string> {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
     }
-    // Drop only the rejected credential — the one the client sent. An API key is replaced through
-    // the JWT session without a login; without a key for the active organization (JWT-only mode,
-    // no organization chosen yet) the access token IS the rejected credential.
-    const { activeOrgId } = this.store.get();
-    if (activeOrgId !== null && activeApiKey(this.store.get())) {
-      this.setOrgKey(activeOrgId, null);
-    } else {
+    // Drop only the rejected credential — the one the client sent. If the credential changed while
+    // the request was in flight (org switch, parallel re-mint), the current one is not at fault.
+    const state = this.store.get();
+    if (state.activeOrgId !== null && activeApiKey(state)?.key === sent) {
+      this.setOrgKey(state.activeOrgId, null);
+    } else if (state.bearerAccessToken === sent) {
       this.store.update({ bearerAccessToken: null });
     }
     return this.ensureAuthenticated();
@@ -230,7 +229,7 @@ export class AuthService implements UserSession {
       const token = await this.useProvidedToken(this.config.apiToken);
       if (token !== null) return token;
     }
-    let state = this.store.get();
+    let state = this.store.reloadApiKeys();
     if (state.jwtOnly && state.bearerRefreshToken) {
       const refreshed = await this.refreshSession(state.bearerRefreshToken);
       if (refreshed !== null) return refreshed;
@@ -388,20 +387,30 @@ export class AuthService implements UserSession {
    * neither works, because LoginThrottle allows just a handful per minute.
    */
   private async establishCredential(orgId: number): Promise<string> {
-    this.assertNotRemintLoop(orgId);
     const storedAccess = this.store.get().bearerAccessToken;
     const access = await this.accessToken();
     try {
-      return await this.mintWith(access, orgId);
-    } catch (error) {
-      // A stored access token can be revoked server-side before its `exp` (logout elsewhere).
-      // Drop it and renew once — refresh cookie, else login — then retry the mint.
-      if (error instanceof ApiError && error.status === 401 && access === storedAccess) {
-        logger.info('Stored access token was rejected while minting — renewing the session');
-        this.store.update({ bearerAccessToken: null });
-        return this.mintWith(await this.renewAccessToken(), orgId);
+      this.assertNotRemintLoop(orgId);
+      try {
+        return await this.mintWith(access, orgId);
+      } catch (error) {
+        // A stored access token can be revoked server-side before its `exp` (logout elsewhere).
+        // Drop it and renew once — refresh cookie, else login — then retry the mint.
+        if (error instanceof ApiError && error.status === 401 && access === storedAccess) {
+          logger.info('Stored access token was rejected while minting — renewing the session');
+          this.store.update({ bearerAccessToken: null });
+          return await this.mintWith(await this.renewAccessToken(), orgId);
+        }
+        throw error;
       }
-      throw error;
+    } catch (error) {
+      // No key for this org (e.g. its 5-active-key limit is reached). The JWT with X-Organization-Id
+      // acts in the same org, so keep working instead of locking every tool — set_active_organization
+      // and revoke_my_api_key included.
+      logger.warn(
+        `Could not get an API key for organization ${orgId} (${error instanceof Error ? error.message : String(error)}) — using the signed-in session instead`,
+      );
+      return this.accessToken();
     }
   }
 
@@ -419,7 +428,6 @@ export class AuthService implements UserSession {
   }
 
   private async mintWith(access: string, orgId: number): Promise<string> {
-    const { bearerRefreshToken } = this.store.get();
     try {
       // Raw key is returned exactly once (server stores only hash + prefix) — persist immediately.
       // The route is JWT-only (DenyApiKeyAuth) — hence the bearer token.
@@ -431,13 +439,13 @@ export class AuthService implements UserSession {
       this.store.update({
         apiKeys: { ...this.store.get().apiKeys, [orgId]: { key: minted.api_key, prefix: minted.prefix } },
         bearerAccessToken: access,
-        bearerRefreshToken,
         jwtOnly: false,
       });
       logger.info(`Minted API key ${minted.prefix}… for organization ${orgId} and persisted it`);
       return minted.api_key;
     } catch (error) {
-      if (!(error instanceof ApiError && error.status === 404)) {
+      // A 1.5 backend also answers 404 for a deleted organization — that is not a legacy backend.
+      if (!(error instanceof ApiError && error.status === 404) || error.bodyExcerpt?.includes('organization_not_found')) {
         throw error;
       }
       // Legacy backend: no API-key system at all. Authenticate with Authorization: Bearer
@@ -446,7 +454,6 @@ export class AuthService implements UserSession {
       this.store.update({
         apiKeys: {},
         bearerAccessToken: access,
-        bearerRefreshToken,
         jwtOnly: true,
       });
       return access;

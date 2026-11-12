@@ -63,9 +63,32 @@ export class StateStore {
   }
 
   update(patch: Partial<Omit<PersistedState, 'baseUrl' | 'email'>>): PersistedState {
-    this.state = { ...this.state, ...patch };
+    // Several MCP processes share this file: keep keys another one minted since we loaded, unless
+    // this patch dropped them — a lost key stays active server-side and eats the per-org key limit.
+    const dropped = patch.apiKeys ? Object.keys(this.state.apiKeys).filter((org) => !(org in patch.apiKeys!)) : [];
+    const apiKeys = { ...this.readDiskApiKeys(), ...this.state.apiKeys, ...patch.apiKeys };
+    for (const org of dropped) delete apiKeys[org];
+    this.state = { ...this.state, ...patch, apiKeys };
     this.persist();
     return this.state;
+  }
+
+  /** Pick up keys other MCP processes persisted since this one loaded (theirs win: newer). */
+  reloadApiKeys(): PersistedState {
+    this.state = { ...this.state, apiKeys: { ...this.state.apiKeys, ...this.readDiskApiKeys() } };
+    return this.state;
+  }
+
+  private readDiskApiKeys(): PersistedState['apiKeys'] {
+    if (!existsSync(this.filePath)) return {};
+    try {
+      const parsed = stateSchema.safeParse(JSON.parse(readFileSync(this.filePath, 'utf8')));
+      return parsed.success && parsed.data.baseUrl === this.state.baseUrl && parsed.data.email === this.state.email
+        ? parsed.data.apiKeys
+        : {};
+    } catch {
+      return {};
+    }
   }
 
   private loadOrInit(baseUrl: string, email: string): PersistedState {

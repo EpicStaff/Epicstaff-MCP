@@ -316,24 +316,82 @@ describe('auth bootstrap + org resolution', () => {
     expect(calls.filter((call) => call.url.includes('auth/login/'))).toHaveLength(0);
   });
 
-  it('a freshly minted key that the server rejects is not re-minted in a loop', async () => {
+  it('a freshly minted key that the server rejects is not re-minted in a loop — the JWT takes over', async () => {
     let mints = 0;
     routes.set('POST /api/auth/login/', () => loginResponse(jwt('user'), 'r-loop'));
     routes.set('POST /api/profile/api-keys/', () => {
       mints += 1;
       return jsonResponse(201, { id: 10 + mints, api_key: `key-${mints}`, prefix: 'key', name: 'es-mcp', expires_at: null });
     });
-    // The server rejects every key (e.g. a proxy strips X-Api-Key).
-    routes.set('GET /api/graphs/', () => jsonResponse(401, { detail: 'bad key' }));
+    // The server rejects every key (e.g. a proxy strips X-Api-Key); the JWT still works.
+    routes.set('GET /api/graphs/', (call) =>
+      call.headers.get('Authorization') ? jsonResponse(200, { results: [] }) : jsonResponse(401, { detail: 'bad key' }),
+    );
 
     const { client, store, auth } = makeServices();
     store.update({ activeOrgId: 1 });
     await auth.ensureAuthenticated(); // key-1
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      await expect(client.get('graphs/')).rejects.toThrow();
+      await expect(client.get('graphs/')).resolves.toEqual({ results: [] });
     }
     expect(mints).toBe(1);
-    await expect(client.get('graphs/')).rejects.toThrow(/not minting another one/);
+  });
+
+  it('when minting fails (key limit reached) tools keep working with the JWT in that org', async () => {
+    routes.set('POST /api/auth/login/', () => loginResponse(jwt('user'), 'r-limit'));
+    routes.set('POST /api/profile/api-keys/', () =>
+      jsonResponse(400, { errors: [{ field: 'org_id', value: 2, reason: 'Active API key limit reached.' }] }),
+    );
+    routes.set('GET /api/graphs/', (call) => {
+      expect(call.headers.get('Authorization')).toMatch(/^Bearer /);
+      expect(call.headers.get('X-Organization-Id')).toBe('2');
+      return jsonResponse(200, { results: [] });
+    });
+
+    const { client, store, auth } = makeServices();
+    store.update({ activeOrgId: 2 });
+    await expect(auth.ensureAuthenticated()).resolves.toMatch(/\./); // a JWT, not a throw
+    await expect(client.get('graphs/')).resolves.toEqual({ results: [] });
+    expect(store.get().jwtOnly).toBe(false);
+  });
+
+  it('a 404 for a deleted organization is not mistaken for a legacy backend', async () => {
+    routes.set('POST /api/auth/login/', () => loginResponse(jwt('user'), 'r-404'));
+    routes.set('POST /api/profile/api-keys/', () =>
+      jsonResponse(404, { type: 'client_error', errors: [{ code: 'organization_not_found', detail: 'Organization not found.' }] }),
+    );
+
+    const { store, auth } = makeServices();
+    store.update({ activeOrgId: 9, apiKeys: { 1: { key: 'org1-key', prefix: 'org1-key' } } });
+    await auth.ensureAuthenticated();
+    expect(store.get().jwtOnly).toBe(false);
+    expect(store.get().apiKeys).toHaveProperty('1');
+  });
+
+  it('a 401 for a credential that was replaced meanwhile does not drop the current key', async () => {
+    routes.set('GET /api/auth/api-key/validate/', () => jsonResponse(200, { org_id: 2 }));
+    routes.set('GET /api/graphs/', (call) =>
+      call.headers.get('X-Api-Key') === 'key-b' ? jsonResponse(200, { results: [] }) : jsonResponse(401, {}),
+    );
+    const { client, store } = makeServices();
+    store.update({ activeOrgId: 2, apiKeys: { 2: { key: 'key-b', prefix: 'key-b' } } });
+    // Simulate the race: the request went out with an older key, the active key is key-b by now.
+    const reauth = (client as unknown as { reauthenticate: (sent: string | null) => Promise<string> }).reauthenticate;
+    await reauth('stale-key');
+    expect(store.get().apiKeys[2]?.key).toBe('key-b');
+  });
+
+  it('keeps API keys another MCP process persisted meanwhile', async () => {
+    const { store } = makeServices();
+    store.update({ apiKeys: { 1: { key: 'k1', prefix: 'k1' } } });
+    // A second process (its own StateStore on the same file) mints org 2's key.
+    const { store: other } = makeServices();
+    other.update({ apiKeys: { ...other.get().apiKeys, 2: { key: 'k2', prefix: 'k2' } } });
+    // This process writes something unrelated — org 2's key must survive on disk and be reusable.
+    store.update({ activeOrgId: 1 });
+    expect(Object.keys(store.get().apiKeys).sort()).toEqual(['1', '2']);
+    store.update({ apiKeys: { 2: { key: 'k2', prefix: 'k2' } } }); // this process drops org 1's key
+    expect(Object.keys(store.get().apiKeys)).toEqual(['2']);
   });
 
   it('re-mints normally when the previous mint is older than the loop window', async () => {

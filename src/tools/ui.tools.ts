@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { GraphsApi } from '../api/graphs.js';
+import { activeApiKey } from '../state/store.js';
 import { renderChatUi } from '../ui/chat-ui.js';
 import { runTool } from './auth-org.tools.js';
 
@@ -62,9 +63,20 @@ export function registerUiTools(server: McpServer, context: AppContext): void {
         }
         await context.auth.ensureAuthenticated();
         const embedKey = embed_api_key === true;
-        const orgId = await context.org.requireActiveOrg();
+        await context.org.requireActiveOrg();
         // Re-run once the org is settled: the page needs that org's key (EpicStaff acts in a key's own org).
-        const apiKey = embedKey ? await context.auth.ensureAuthenticated() : '';
+        if (embedKey) await context.auth.ensureAuthenticated();
+        // One snapshot, so a concurrent org switch cannot pair one org's id with another org's key.
+        const snapshot = context.store.get();
+        const orgId = snapshot.activeOrgId!;
+        const heldKey = activeApiKey(snapshot)?.key;
+        if (embedKey && !heldKey) {
+          throw new Error(
+            `No API key is held for organization ${orgId} (it may be at its active-key limit) — revoke an unused key ` +
+              'with revoke_my_api_key, or generate the page without embed_api_key.',
+          );
+        }
+        const apiKey = embedKey ? heldKey! : '';
 
         const light = await graphs.listLight();
         const graph = light.find((candidate) => candidate.id === graph_id);

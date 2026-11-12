@@ -66,7 +66,7 @@ const ORG_RESOLUTION_SKIP = /\/api\/profile\//;
 
 export class EpicStaffClient {
   /** Installed by auth.ts — runs the single-flight re-mint. Returns the fresh API key. */
-  private reauthenticate: (() => Promise<string>) | null = null;
+  private reauthenticate: ((sent: string | null) => Promise<string>) | null = null;
   /** Installed by org.ts — makes sure the active org is resolved before org-scoped calls. */
   private ensureOrgContext: (() => Promise<void>) | null = null;
 
@@ -75,7 +75,7 @@ export class EpicStaffClient {
     private readonly store: StateStore,
   ) {}
 
-  onUnauthorized(handler: () => Promise<string>): void {
+  onUnauthorized(handler: (sent: string | null) => Promise<string>): void {
     this.reauthenticate = handler;
   }
 
@@ -139,7 +139,8 @@ export class EpicStaffClient {
       this.reauthenticate
     ) {
       logger.info('Got 401 — re-authenticating and retrying once');
-      await this.reauthenticate();
+      const sent = headers.get('X-Api-Key') ?? headers.get('Authorization')?.replace(/^Bearer /, '') ?? null;
+      await this.reauthenticate(sent);
       return this.request<T>(method, path, options, true);
     }
 
