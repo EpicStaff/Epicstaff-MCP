@@ -110,6 +110,10 @@ class MockBackend {
       return { status: 200, body: { id, ...(body as Record<string, unknown>) } };
     }
     if (/^DELETE \/api\/agent-definitions\/\d+\/$/.test(key)) return { status: 204, body: undefined };
+    if (/^POST \/api\/agent-definitions\/\d+\/copy\/$/.test(key)) {
+      const name = (body as { name?: string }).name ?? 'Writer #2';
+      return { status: 201, body: { id: this.id(), name } };
+    }
 
     // collection CRUD + RAG pipeline
     if (key === 'POST /api/source-collections/') {
@@ -203,6 +207,7 @@ describe('catalog tools (mock backend)', () => {
     expect([...handlers.keys()].sort()).toEqual(
       [
         'attach_rag',
+        'copy_agent',
         'create_agent',
         'create_collection',
         'create_surface',
@@ -316,6 +321,17 @@ describe('catalog tools (mock backend)', () => {
     // An omitted group stays as stored server-side (and an owner change ungroups there), so it is not re-sent.
     expect(surfacePatches[1]?.body).not.toHaveProperty('group');
     expect(unknown.error).toContain('Agent group "Nope" not found');
+  });
+
+  it('copy_agent posts to the copy action; an omitted name leaves the naming to the backend', async () => {
+    const named = parse(await handlers.get('copy_agent')!({ agent: 'Writer', name: 'Editor' }));
+    const unnamed = parse(await handlers.get('copy_agent')!({ agent: 5 }));
+
+    expect(named.ok && unnamed.ok).toBe(true);
+    const posts = backend.received.filter((r) => r.method === 'POST' && r.path === '/api/agent-definitions/5/copy/');
+    expect(posts.map((r) => r.body)).toEqual([{ name: 'Editor' }, {}]);
+    expect(unnamed.data.agent.name).toBe('Writer #2');
+    expect(unnamed.data.next).toContain('existing: "Writer #2"');
   });
 
   it('update_surface PATCHes the merged surface (the backend has no PUT)', async () => {

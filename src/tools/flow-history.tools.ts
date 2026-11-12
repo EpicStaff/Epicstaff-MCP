@@ -12,14 +12,14 @@ import { idOrName, recycleBinHint, resolveNamedRef } from './catalog-helpers.js'
 
 /**
  * Flow lifecycle beyond push: versions (named snapshots + restore), copy, delete, labels on a flow,
- * export / import of flows and tools as EpicStaff export documents, and the persistent variables a
+ * export / import of flows, tools and agents as EpicStaff export documents, and the persistent variables a
  * flow carries across sessions.
  */
 
 const transferKindSchema = z
-  .enum(['flow', 'python_tool', 'mcp_tool'])
+  .enum(['flow', 'python_tool', 'mcp_tool', 'agent_definition'])
   .default('flow')
-  .describe('What the export document holds: flows (default), python tools or MCP tools.');
+  .describe('What the export document holds: flows (default), python tools, MCP tools or agent definitions.');
 
 export function registerFlowHistoryTools(server: McpServer, context: AppContext): void {
   const graphs = new GraphsApi(context.client);
@@ -204,9 +204,10 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
   server.registerTool(
     'export_entities',
     {
-      title: 'Export flows or tools to a file',
+      title: 'Export flows, tools or agents to a file',
       description:
-        'Write an EpicStaff export document (the editor\'s Export) for one or more flows, python tools or MCP tools ' +
+        'Write an EpicStaff export document (the editor\'s Export) for one or more flows, python tools, MCP tools or ' +
+        'agent definitions ' +
         'to a local .json file. It carries everything they depend on (agents, LLM configs, tools …) so import_entities ' +
         'can recreate them in another organization or instance. Secret values are never exported; entities you may ' +
         'not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. ' +
@@ -248,7 +249,7 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
   server.registerTool(
     'import_entities',
     {
-      title: 'Import flows or tools from a file',
+      title: 'Import flows, tools or agents from a file',
       description:
         'Import an EpicStaff export document (from export_entities or the editor\'s Export) into the active ' +
         'organization. inspect_only: true first reports what the import would ask about, creating nothing. Flows: ' +
@@ -287,7 +288,10 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
           replaceExisting: replace_existing,
           importLabels: import_labels,
         });
-        return { imported: result, next: 'Check the created entities (list_graphs / list_tools) and re-attach secrets.' };
+        return {
+          imported: result,
+          next: 'Check the created entities (list_graphs / list_tools / list_agents) and re-attach secrets.',
+        };
       }),
   );
 

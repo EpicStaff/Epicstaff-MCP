@@ -113,6 +113,14 @@ export class AgentDefinitionsApi {
     return this.client.patch(`agent-definitions/${id}/`, { body: request });
   }
 
+  /**
+   * Clone an agent together with the surfaces it owns. `name` omitted: the source's name; a taken name gets
+   * the next free " #N" suffix (AgentDefinitionCopyService).
+   */
+  async copy(id: number, name?: string): Promise<AgentDefinition> {
+    return this.client.post(`agent-definitions/${id}/copy/`, { body: name !== undefined ? { name } : {} });
+  }
+
   /** Delete an agent definition. Backend responds 204 (AgentDefinitionViewSet ModelViewSet). */
   async delete(id: number): Promise<void> {
     await this.client.delete<void>(`agent-definitions/${id}/`);

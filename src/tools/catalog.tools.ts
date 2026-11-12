@@ -492,6 +492,30 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
   );
 
   server.registerTool(
+    'copy_agent',
+    {
+      title: 'Copy an agent definition',
+      description:
+        'Duplicate an agent definition together with the surfaces it owns (tools, storage and knowledge are linked, ' +
+        'not cloned). The copy is independent of the source. A taken name gets the next free " #N" suffix.',
+      inputSchema: {
+        agent: idOrName.describe('The agent to copy: backend id or exact name.'),
+        name: z.string().min(1).optional().describe('Name of the copy. Omit to reuse the source name (suffixed " #N").'),
+      },
+    },
+    async ({ agent, name }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        await context.org.requireActiveOrg();
+        const copy = await agents.copy(await resolveAgent(agent), name);
+        return {
+          agent: copy,
+          next: `Reference the copy from a flow agent node with existing: "${copy.name}".`,
+        };
+      }),
+  );
+
+  server.registerTool(
     'get_agent',
     {
       title: 'Get an agent definition',

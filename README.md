@@ -212,9 +212,9 @@ the fields selected on the node, which flow source cannot express — select the
 | Flow source | `init_flow`, `validate_flow`, `build_flow`, `diff_flow`, `push_flow`, `pull_flow`, `provision_knowledge`, `describe_node_types` |
 | Flows | `list_graphs`, `describe_graph` (with node numbers and who created / last edited the flow and each node), `copy_flow`, `delete_flow`, `set_flow_labels`, `get_flow_persistent_state`, `dump_graph`, `restore_graph` |
 | Versions | `list_graph_versions`, `create_graph_version`, `restore_graph_version` (in place with a backup version, or as a new flow) |
-| Import / export | `export_entities`, `import_entities` — EpicStaff export documents of flows, python tools or MCP tools (export writes a new `.json` file; it replaces an existing one only with `overwrite: true`, never through a symbolic link) |
+| Import / export | `export_entities`, `import_entities` — EpicStaff export documents of flows, python tools, MCP tools or agent definitions (export writes a new `.json` file; it replaces an existing one only with `overwrite: true`, never through a symbolic link) |
 | Recycle bin | `list_recycle_bin`, `restore_from_recycle_bin` (by ids, or a whole bin of one kind with `all: true`), `purge_from_recycle_bin` (by ids only; superadmin, `confirm: true`), `empty_recycle_bin` (every bin of the active organization; superadmin, `confirm: true` + `organization_id`) |
-| Catalog | `create_agent`, `update_agent`, `get_agent`, `delete_agent`, `create_surface`, `update_surface`, `get_surface`, `delete_surface`, `list_agents`, `list_surfaces` |
+| Catalog | `create_agent`, `update_agent`, `copy_agent`, `get_agent`, `delete_agent`, `create_surface`, `update_surface`, `get_surface`, `delete_surface`, `list_agents`, `list_surfaces` |
 | Tools | `list_tools`, `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`, `update_mcp_tool`, `delete_mcp_tool` |
 | Labels | `list_labels`, `create_label`, `update_label`, `delete_label` (flow and tool label trees, and the agent groups that `create/update_agent` and `create/update_surface` set with `group`) |
 | Saved list filters | `list_filter_presets`, `create_filter_preset`, `update_filter_preset`, `delete_filter_preset` (your own filters of the flows / tools pages) |

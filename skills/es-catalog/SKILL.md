@@ -110,7 +110,9 @@ the chunks indexing actually stored for a document (empty or garbled text, chunk
 ## Tools
 
 - **Surfaces:** `create_surface`, `update_surface`, `get_surface`, `delete_surface`
-- **Agents:** `create_agent`, `update_agent`, `get_agent`, `delete_agent`
+- **Agents:** `create_agent`, `update_agent`, `copy_agent` (with the surfaces it owns), `get_agent`,
+  `delete_agent`; move agents between organizations with `export_entities` / `import_entities`
+  kind `agent_definition`
 - **Knowledge:** `create_collection`, `attach_rag`, `delete_collection`
   (plus `list_source_collections`, `upload_documents`, `import_documents_from_storage`,
   `estimate_rag_indexing`, `list_indexed_chunks`, `wait_for_collections` from the knowledge/run tools)
@@ -144,8 +146,8 @@ the chunks indexing actually stored for a document (empty or garbled text, chunk
   group ungroups its members.
 - **Flows:** `copy_flow`, `delete_flow`, `list_graph_versions`, `create_graph_version`,
   `restore_graph_version` (overwrite in place with a backup version, or `mode: new_flow`),
-  `export_entities` / `import_entities` (EpicStaff export documents of flows, python tools or MCP
-  tools — `inspect_only` first; export writes a new `.json` file and replaces an existing one only
+  `export_entities` / `import_entities` (EpicStaff export documents of flows, python tools, MCP
+  tools or agent definitions — `inspect_only` first; export writes a new `.json` file and replaces an existing one only
   with `overwrite: true`), `get_flow_persistent_state` (read-only persistent variables).
 - **Recycle bin:** `list_recycle_bin`, `restore_from_recycle_bin`, `purge_from_recycle_bin`,
   `empty_recycle_bin` (every bin of the organization at once — see below).

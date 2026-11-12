@@ -640,6 +640,21 @@ describe('coverage tools (mock backend)', () => {
     expect(form.get('file')).toBeInstanceOf(Blob);
   });
 
+  it('export_entities and import_entities reach the agent-definitions transfer actions', async () => {
+    const outputPath = join(stateDir, 'agent.json');
+    route('GET /api/agent-definitions/5/export/', { status: 200, body: { main_entity: 'AgentDefinition' } });
+    route('POST /api/agent-definitions/import/', { status: 200, body: { AgentDefinition: { created: 1 } } });
+
+    const exported = await call('export_entities', { kind: 'agent_definition', ids: [5], output_path: outputPath });
+    const imported = await call('import_entities', { kind: 'agent_definition', file_path: outputPath, import_labels: false });
+
+    expect(exported.isError, JSON.stringify(exported.body)).toBe(false);
+    expect(imported.isError, JSON.stringify(imported.body)).toBe(false);
+    const form = requests('POST', '/api/agent-definitions/import/')[0]!.body as FormData;
+    expect(form.get('import_labels')).toBe('false');
+    expect(form.has('preserve_uuids')).toBe(false);
+  });
+
   it('get_flow_persistent_state returns only the asked flow\'s org and member state', async () => {
     route('GET /api/graph-organizations/', { status: 200, body: { count: 2, results: [
       { id: 1, graph: 77, persistent_variables: { counter: 3 }, user_variables: {} },
