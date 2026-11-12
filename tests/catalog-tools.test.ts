@@ -334,6 +334,29 @@ describe('catalog tools (mock backend)', () => {
     expect(unnamed.data.next).toContain('existing: "Writer #2"');
   });
 
+  it('create_agent / update_agent resolve fallback_llm_config like llm_config; null clears it', async () => {
+    backend.llmConfigs.push({ id: 56, custom_name: 'claude-backup', model: 11 });
+    expect(
+      parse(
+        await handlers.get('create_agent')!({
+          name: 'Resilient',
+          instructions: 'x',
+          llm_config: 'gpt-4o-default',
+          fallback_llm_config: 'claude-backup',
+        }),
+      ).ok,
+    ).toBe(true);
+    expect(parse(await handlers.get('update_agent')!({ agent: 'Writer', fallback_llm_config: null })).ok).toBe(true);
+
+    expect(backend.received.find((r) => r.method === 'POST' && r.path === '/api/agent-definitions/')?.body).toMatchObject({
+      llm_config: 55,
+      fallback_llm_config: 56,
+    });
+    expect(backend.received.find((r) => r.method === 'PATCH' && r.path === '/api/agent-definitions/5/')?.body).toEqual({
+      fallback_llm_config: null,
+    });
+  });
+
   it('update_surface PATCHes the merged surface (the backend has no PUT)', async () => {
     const result = parse(await handlers.get('update_surface')!({ surface: 7, instructions: 'Cite sources.' }));
     expect(result.ok).toBe(true);

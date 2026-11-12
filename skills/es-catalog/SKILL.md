@@ -53,7 +53,8 @@ the next push of those flows fails because the name no longer resolves.
 Every reference input accepts **either a backend id (number) or the exact existing name
 (string)**, resolved case-insensitively:
 
-- `create_agent` / `update_agent`: `llm_config`, `fcm_llm_config`, `default_surfaces[].surface`,
+- `create_agent` / `update_agent`: `llm_config`, `fallback_llm_config` (used when the primary fails
+  with a transient error; must differ from `llm_config`), `fcm_llm_config`, `default_surfaces[].surface`,
   `group`
 - `create_surface` / `update_surface`: `owner_agent`, `group`, `python_tools[].tool`, `mcp_tools[].tool`,
   `knowledge[].collection`

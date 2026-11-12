@@ -29,6 +29,8 @@ export interface AgentDefinition extends AuthorshipFields {
   /** Read-only: every `instruction_list` content joined by a blank line, compiled by the backend. */
   instructions: string;
   llm_config: number | null;
+  /** Used instead of llm_config when the primary fails with a transient error; must differ from it. */
+  fallback_llm_config: number | null;
   fcm_llm_config: number | null;
   default_surfaces: AgentDefaultSurface[];
   metadata: Record<string, unknown>;
@@ -53,6 +55,7 @@ export interface CreateAgentDefinitionRequest {
   instruction_list?: AgentInstruction[];
   description?: string;
   llm_config?: number | null;
+  fallback_llm_config?: number | null;
   fcm_llm_config?: number | null;
   default_surfaces?: AgentDefaultSurface[];
   metadata?: Record<string, unknown>;

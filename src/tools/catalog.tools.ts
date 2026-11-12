@@ -112,6 +112,14 @@ type SurfaceBodyInput = {
   }>;
 };
 
+const fallbackLlmConfigSchema = idOrName
+  .nullable()
+  .optional()
+  .describe(
+    'LLM config used instead of llm_config when it fails with a transient error: id or name; null = none. ' +
+      'Must differ from llm_config (the backend refuses the same config with 400).',
+  );
+
 const agentGroupSchema = idOrName
   .nullable()
   .optional()
@@ -400,6 +408,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
           .describe('Boot instructions — the agent system prompt. Stored as the agent\'s single instruction document.'),
         description: z.string().optional().describe('One-line summary of what this agent is for.'),
         llm_config: idOrName.describe('LLM config the agent thinks with: backend id or exact name (list_llm_configs).'),
+        fallback_llm_config: fallbackLlmConfigSchema,
         fcm_llm_config: idOrName.optional().describe('Separate LLM config for function calling: id or name.'),
         default_surfaces: z
           .array(
@@ -461,6 +470,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
           ),
         description: z.string().optional(),
         llm_config: idOrName.optional(),
+        fallback_llm_config: fallbackLlmConfigSchema,
         fcm_llm_config: idOrName.optional(),
         default_surfaces: z
           .array(
@@ -708,6 +718,7 @@ interface AgentBodyInput {
   instructions?: string;
   description?: string;
   llm_config?: number | string;
+  fallback_llm_config?: number | string | null;
   fcm_llm_config?: number | string;
   default_surfaces?: Array<{ surface: number | string; place: 'all' | 'flow' | 'chat' }>;
   max_iter?: number;
@@ -740,6 +751,10 @@ async function buildAgentRequest(
     llm_config: await resolvers.resolveLlmConfig(body.llm_config),
   };
   if (body.description !== undefined) request.description = body.description;
+  if (body.fallback_llm_config !== undefined) {
+    request.fallback_llm_config =
+      body.fallback_llm_config === null ? null : await resolvers.resolveLlmConfig(body.fallback_llm_config);
+  }
   if (body.fcm_llm_config !== undefined) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
   if (body.default_surfaces !== undefined) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
@@ -758,6 +773,10 @@ async function buildAgentPatch(
   if (body.instructions !== undefined) request.instruction_list = toInstructionList(body.instructions);
   if (body.description !== undefined) request.description = body.description;
   if (body.llm_config !== undefined) request.llm_config = await resolvers.resolveLlmConfig(body.llm_config);
+  if (body.fallback_llm_config !== undefined) {
+    request.fallback_llm_config =
+      body.fallback_llm_config === null ? null : await resolvers.resolveLlmConfig(body.fallback_llm_config);
+  }
   if (body.fcm_llm_config !== undefined) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
   if (body.default_surfaces !== undefined) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
