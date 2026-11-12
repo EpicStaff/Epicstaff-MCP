@@ -43,6 +43,7 @@ class MockBackend {
   mcpTools = [{ id: 12, name: 'fetch', tool_name: 'fetch', transport: 'sse' }];
   collections: Array<Record<string, unknown>> = [];
   embeddingConfigs = [{ id: 71, custom_name: 'default-embedder', model: 20 }];
+  agentGroups = [{ id: 31, name: 'Sales', parent: null, full_path: 'Sales', metadata: {} }];
 
   private id(): number {
     this.nextId += 1;
@@ -76,6 +77,7 @@ class MockBackend {
     if (key === 'GET /api/mcp-tools/') return { status: 200, body: this.mcpTools };
     if (key === 'GET /api/source-collections/') return { status: 200, body: this.collections };
     if (key === 'GET /api/embedding-configs/') return { status: 200, body: this.embeddingConfigs };
+    if (key === 'GET /api/agent-labels/') return { status: 200, body: this.agentGroups };
     if (key === 'GET /api/default-models/') return { status: 200, body: { memory_embedding_config: 71 } };
 
     // surface CRUD
@@ -296,6 +298,24 @@ describe('catalog tools (mock backend)', () => {
     expect(patches).toHaveLength(2);
     expect(patches[0]!.body).toEqual({ name: 'Writer 2' });
     expect(patches[1]!.body).toEqual({ instruction_list: [{ name: 'Instruction_1.md', content: 'be brief' }] });
+  });
+
+  it('agent and surface tools resolve group names against agent-labels/ and send null to ungroup', async () => {
+    expect(
+      parse(await handlers.get('create_agent')!({ name: 'Closer', instructions: 'x', llm_config: 55, group: 'sales' })).ok,
+    ).toBe(true);
+    expect(parse(await handlers.get('update_agent')!({ agent: 'Writer', group: null })).ok).toBe(true);
+    expect(parse(await handlers.get('update_surface')!({ surface: 7, group: 'Sales' })).ok).toBe(true);
+    expect(parse(await handlers.get('update_surface')!({ surface: 7, instructions: 'x' })).ok).toBe(true);
+    const unknown = parse(await handlers.get('create_surface')!({ name: 'X', group: 'Nope' }));
+
+    expect(backend.received.find((r) => r.method === 'POST' && r.path === '/api/agent-definitions/')?.body).toMatchObject({ group: 31 });
+    expect(backend.received.find((r) => r.method === 'PATCH' && r.path === '/api/agent-definitions/5/')?.body).toEqual({ group: null });
+    const surfacePatches = backend.received.filter((r) => r.method === 'PATCH' && r.path === '/api/surfaces/7/');
+    expect(surfacePatches[0]?.body).toMatchObject({ group: 31 });
+    // An omitted group stays as stored server-side (and an owner change ungroups there), so it is not re-sent.
+    expect(surfacePatches[1]?.body).not.toHaveProperty('group');
+    expect(unknown.error).toContain('Agent group "Nope" not found');
   });
 
   it('update_surface PATCHes the merged surface (the backend has no PUT)', async () => {

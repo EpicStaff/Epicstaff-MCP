@@ -53,8 +53,9 @@ the next push of those flows fails because the name no longer resolves.
 Every reference input accepts **either a backend id (number) or the exact existing name
 (string)**, resolved case-insensitively:
 
-- `create_agent` / `update_agent`: `llm_config`, `fcm_llm_config`, `default_surfaces[].surface`
-- `create_surface` / `update_surface`: `owner_agent`, `python_tools[].tool`, `mcp_tools[].tool`,
+- `create_agent` / `update_agent`: `llm_config`, `fcm_llm_config`, `default_surfaces[].surface`,
+  `group`
+- `create_surface` / `update_surface`: `owner_agent`, `group`, `python_tools[].tool`, `mcp_tools[].tool`,
   `knowledge[].collection`
 - `create_collection` / `attach_rag`: `embedder`, `llm_config`
 
@@ -136,8 +137,11 @@ the chunks indexing actually stored for a document (empty or garbled text, chunk
 - **Key-value tables:** `list_key_value_tables`, `create_key_value_table`, `update_key_value_table`,
   `delete_key_value_table`, `list_key_value_entries`, `write_key_value_entries` (hand-edit entries
   that key-value nodes read).
-- **Labels:** `list_labels`, `create_label`, `update_label`, `delete_label` (scope `flow` or `tool`);
-  tag a flow with `set_flow_labels`, a tool with the `labels` field of its create/update tool.
+- **Labels:** `list_labels`, `create_label`, `update_label`, `delete_label` (scope `flow`, `tool` or
+  `agent`); tag a flow with `set_flow_labels`, a tool with the `labels` field of its create/update tool.
+  Scope `agent` holds the flat agent groups: put an agent or a shared surface in one with the `group`
+  field of its create/update tool (`null` ungroups; an owned surface cannot be grouped). Deleting a
+  group ungroups its members.
 - **Flows:** `copy_flow`, `delete_flow`, `list_graph_versions`, `create_graph_version`,
   `restore_graph_version` (overwrite in place with a backup version, or `mode: new_flow`),
   `export_entities` / `import_entities` (EpicStaff export documents of flows, python tools or MCP

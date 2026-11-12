@@ -3,12 +3,14 @@ import { type Paginated, unwrap } from './paging.js';
 
 /**
  * Labels API — ported from features/flows/services/labels-api.service.ts (`labels/`, flow labels)
- * and features/tools/services/tools-labels.service.ts (`tool-labels/`, tool labels), with the DTOs
- * of shared/models/label.model.ts. Backend: LabelViewSet / ToolLabelViewSet (BaseLabelViewSet) —
- * org-scoped, two independent label trees that never share rows. A label nests under a `parent`;
- * names are unique per parent. Flows carry labels as `label_ids` (graph PATCH), tools as `labels`.
+ * features/tools/services/tools-labels.service.ts (`tool-labels/`, tool labels) and
+ * features/agent-definitions/services/agent-groups-api.service.ts (`agent-labels/`, agent groups), with
+ * the DTOs of shared/models/label.model.ts. Backend: LabelViewSet / ToolLabelViewSet / AgentLabelViewSet
+ * (BaseLabelViewSet) — org-scoped, independent label trees that never share rows. A label nests under a
+ * `parent`; names are unique per parent. Agent groups are flat (a parent is refused with 400). Flows carry
+ * labels as `label_ids` (graph PATCH), tools as `labels`, agents and shared surfaces as `group`.
  */
-export type LabelScope = 'flow' | 'tool';
+export type LabelScope = 'flow' | 'tool' | 'agent';
 
 export const LABEL_COLORS = ['default', 'purple', 'blue', 'green', 'orange', 'red'] as const;
 export type LabelColor = (typeof LABEL_COLORS)[number];
@@ -32,7 +34,7 @@ export interface CreateLabelRequest {
 /** `PatchLabelRequest` widened with `parent`, which the backend's PATCH also accepts. */
 export type PatchLabelRequest = Partial<CreateLabelRequest>;
 
-const LABEL_PATHS: Record<LabelScope, string> = { flow: 'labels/', tool: 'tool-labels/' };
+const LABEL_PATHS: Record<LabelScope, string> = { flow: 'labels/', tool: 'tool-labels/', agent: 'agent-labels/' };
 
 export class LabelsApi {
   constructor(private readonly client: ApiClient) {}
@@ -51,7 +53,10 @@ export class LabelsApi {
     return this.client.patch<LabelDto>(`${LABEL_PATHS[scope]}${id}/`, { body: request });
   }
 
-  /** Deletes the label and its child labels (CASCADE); flows/tools only lose the tag. */
+  /**
+   * Deletes the label and its child labels (CASCADE); flows/tools only lose the tag. An agent group has no
+   * children: its agents and surfaces are un-grouped (SET_NULL).
+   */
   async delete(scope: LabelScope, id: number): Promise<void> {
     await this.client.delete<void>(`${LABEL_PATHS[scope]}${id}/`);
   }

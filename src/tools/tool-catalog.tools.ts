@@ -17,13 +17,16 @@ import { runTool } from './auth-org.tools.js';
 import { createOrExplainConflict, idOrName, recycleBinHint, resolveNamedRef } from './catalog-helpers.js';
 
 /**
- * Standalone tool catalog: custom python tools, MCP tools and the label trees (flow labels and tool
- * labels). Surfaces grant tools to agents; flows reference tools via existing: "<name>".
+ * Standalone tool catalog: custom python tools, MCP tools and the label trees (flow labels, tool
+ * labels and agent groups). Surfaces grant tools to agents; flows reference tools via existing: "<name>".
  */
 
 const labelScopeSchema = z
-  .enum(['flow', 'tool'])
-  .describe('Which label tree: "flow" labels tag flows, "tool" labels tag python and MCP tools.');
+  .enum(['flow', 'tool', 'agent'])
+  .describe(
+    'Which label tree: "flow" labels tag flows, "tool" labels tag python and MCP tools, "agent" labels are the ' +
+      'groups of agents and shared surfaces (flat — no parent).',
+  );
 
 const pythonCodeShape = {
   code: z.string().optional().describe('Inline Python source defining the entrypoint. Exactly one of code / code_file.'),
@@ -335,8 +338,9 @@ export function registerToolCatalogTools(server: McpServer, context: AppContext)
     {
       title: 'List labels',
       description:
-        'List the flow labels or tool labels of the active organization (a tree: full_path is "parent/child"). ' +
-        'Tag flows with set_flow_labels, tools with the labels field of create/update_python_tool / _mcp_tool.',
+        'List the flow labels, tool labels or agent groups of the active organization (a tree: full_path is ' +
+        '"parent/child"). Tag flows with set_flow_labels, tools with the labels field of create/update_python_tool / ' +
+        '_mcp_tool, agents and shared surfaces with the group field of create/update_agent / _surface.',
       inputSchema: { scope: labelScopeSchema },
     },
     async ({ scope }) =>
@@ -357,7 +361,9 @@ export function registerToolCatalogTools(server: McpServer, context: AppContext)
     'create_label',
     {
       title: 'Create a label',
-      description: 'Create a flow or tool label, optionally nested under a parent label. Names are unique per parent.',
+      description:
+        'Create a flow or tool label, optionally nested under a parent label, or an agent group (scope "agent", ' +
+        'never nested). Names are unique per parent.',
       inputSchema: {
         scope: labelScopeSchema,
         name: z.string().min(1).max(100),
@@ -417,7 +423,8 @@ export function registerToolCatalogTools(server: McpServer, context: AppContext)
     {
       title: 'Delete a label',
       description:
-        'Delete a label for good together with its child labels. Flows/tools keep existing — they only lose the tag.',
+        'Delete a label for good together with its child labels. Flows/tools keep existing — they only lose the tag; ' +
+        'the agents and surfaces of a deleted agent group become ungrouped.',
       inputSchema: {
         scope: labelScopeSchema,
         label: idOrName.describe('The label: id or full path.'),

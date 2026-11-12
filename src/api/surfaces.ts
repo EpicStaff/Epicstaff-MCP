@@ -62,6 +62,8 @@ export interface Surface extends AuthorshipFields {
   description: string;
   instructions: string;
   owner_agent: number | null;
+  /** Agent group (an `agent-labels/` id). Always null on an owned surface — only shared surfaces are grouped. */
+  group: number | null;
   allow_creation: boolean;
   python_tools: SurfacePythonTool[];
   mcp_tools: SurfaceMcpTool[];
@@ -74,6 +76,7 @@ export interface CreateSurfaceRequest {
   description?: string;
   instructions?: string;
   owner_agent?: number | null;
+  group?: number | null;
   allow_creation?: boolean;
   python_tools?: SurfacePythonTool[];
   mcp_tools?: SurfaceMcpTool[];

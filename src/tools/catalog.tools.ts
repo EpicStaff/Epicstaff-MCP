@@ -9,6 +9,7 @@ import {
   type CreateAgentDefinitionRequest,
 } from '../api/agent-definitions.js';
 import { KnowledgeApi } from '../api/knowledge.js';
+import { LabelsApi } from '../api/labels.js';
 import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SurfacesApi, type CreateSurfaceRequest, type Surface } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
@@ -74,6 +75,13 @@ const surfaceBodyShape = {
     .describe(
       'Owning agent (id or name). Set ⇒ agent-specific (only that agent may attach it). null/omitted ⇒ shared.',
     ),
+  group: idOrName
+    .nullable()
+    .optional()
+    .describe(
+      'Agent group (list_labels scope "agent"): id or name; null = ungrouped. Shared surfaces only — setting ' +
+        'owner_agent ungroups the surface.',
+    ),
   allow_creation: z.boolean().optional().describe('Whether the agent may create new files in this surface.'),
   python_tools: z.array(surfaceToolEntrySchema).optional().describe('Python tool grants.'),
   mcp_tools: z.array(surfaceToolEntrySchema).optional().describe('MCP tool grants.'),
@@ -85,6 +93,7 @@ type SurfaceBodyInput = {
   description?: string;
   instructions?: string;
   owner_agent?: number | string | null;
+  group?: number | string | null;
   allow_creation?: boolean;
   python_tools?: Array<{ tool: number | string; mode: 'allow' | 'deny' }>;
   mcp_tools?: Array<{ tool: number | string; mode: 'allow' | 'deny' }>;
@@ -102,6 +111,11 @@ type SurfaceBodyInput = {
     graph_local_search_config?: Record<string, unknown>;
   }>;
 };
+
+const agentGroupSchema = idOrName
+  .nullable()
+  .optional()
+  .describe('Agent group (list_labels scope "agent"): id or name; null = ungrouped.');
 
 const ragInputSchema = z.strictObject({
   strategy: z.enum(['naive', 'graph']).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
@@ -181,6 +195,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
   const knowledge = new KnowledgeApi(context.client);
   const llm = new LlmApi(context.client);
   const tools = new ToolsApi(context.client);
+  const labels = new LabelsApi(context.client);
 
   const resolveAgent = (ref: number | string): Promise<number> =>
     resolveNamedRef(ref, 'Agent', () => agents.list(), (agent) => agent.id, (agent) => agent.name);
@@ -200,6 +215,10 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     resolveNamedRef(ref, 'Python tool', () => tools.listPythonCodeTools(), (tool) => tool.id, (tool) => tool.name);
   const resolveMcpTool = (ref: number | string): Promise<number> =>
     resolveNamedRef(ref, 'MCP tool', () => tools.listMcpTools(), (tool) => tool.id, (tool) => tool.name);
+  const resolveGroup = async (ref: number | string | null): Promise<number | null> =>
+    ref === null
+      ? null
+      : resolveNamedRef(ref, 'Agent group', () => labels.list('agent'), (label) => label.id, (label) => label.full_path);
 
   /** Resolve a friendly surface body into the backend `CreateSurfaceRequest` wire shape. */
   async function buildSurfaceRequest(name: string, body: SurfaceBodyInput): Promise<CreateSurfaceRequest> {
@@ -210,6 +229,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     if (body.owner_agent !== undefined) {
       request.owner_agent = body.owner_agent === null ? null : await resolveAgent(body.owner_agent);
     }
+    if (body.group !== undefined) request.group = await resolveGroup(body.group);
     if (body.python_tools !== undefined) {
       request.python_tools = await Promise.all(
         body.python_tools.map(async (entry) => ({
@@ -397,6 +417,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         max_retry_limit: z.number().int().nonnegative().optional().describe('Max retries when an LLM call fails.'),
         default_temperature: z.number().optional().describe('Default sampling temperature.'),
         metadata: z.record(z.string(), z.unknown()).optional().describe('Free-form metadata stored with the agent.'),
+        group: agentGroupSchema,
       },
     },
     async ({ name, ...body }) =>
@@ -406,6 +427,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         const request = await buildAgentRequest(name, body, {
           resolveLlmConfig,
           resolveSurface,
+          resolveGroup,
         });
         const created = await createOrExplainConflict(() => agents.create(request), name, 'update_agent');
         return {
@@ -455,6 +477,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         max_retry_limit: z.number().int().nonnegative().optional(),
         default_temperature: z.number().optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
+        group: agentGroupSchema,
       },
     },
     async ({ agent, ...body }) =>
@@ -462,7 +485,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
-        const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
+        const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface, resolveGroup });
         const updated = await agents.update(agentId, request);
         return { agent: updated };
       }),
@@ -654,6 +677,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
 interface AgentResolvers {
   resolveLlmConfig: (ref: number | string) => Promise<number>;
   resolveSurface: (ref: number | string) => Promise<number>;
+  resolveGroup: (ref: number | string | null) => Promise<number | null>;
 }
 
 interface AgentBodyInput {
@@ -669,6 +693,7 @@ interface AgentBodyInput {
   max_retry_limit?: number;
   default_temperature?: number;
   metadata?: Record<string, unknown>;
+  group?: number | string | null;
 }
 
 async function resolveDefaultSurfaces(
@@ -695,6 +720,7 @@ async function buildAgentRequest(
   if (body.default_surfaces !== undefined) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
   }
+  if (body.group !== undefined) request.group = await resolvers.resolveGroup(body.group);
   assignAgentKnobs(request, body);
   return request;
 }
@@ -712,6 +738,7 @@ async function buildAgentPatch(
   if (body.default_surfaces !== undefined) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
   }
+  if (body.group !== undefined) request.group = await resolvers.resolveGroup(body.group);
   assignAgentKnobs(request, body);
   return request;
 }
@@ -741,6 +768,8 @@ function mergeSurfaceBody(
     instructions: body.instructions ?? current.instructions,
     allow_creation: body.allow_creation ?? current.allow_creation,
     owner_agent: body.owner_agent !== undefined ? body.owner_agent : current.owner_agent,
+    // Not carried over: an omitted group stays as stored, and the backend ungroups a surface that gains an owner.
+    group: body.group,
     python_tools:
       body.python_tools ?? current.python_tools.map((entry) => ({ tool: entry.python_tool, mode: entry.mode })),
     mcp_tools: body.mcp_tools ?? current.mcp_tools.map((entry) => ({ tool: entry.mcp_tool, mode: entry.mode })),

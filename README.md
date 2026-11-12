@@ -216,7 +216,7 @@ the fields selected on the node, which flow source cannot express — select the
 | Recycle bin | `list_recycle_bin`, `restore_from_recycle_bin` (by ids, or a whole bin of one kind with `all: true`), `purge_from_recycle_bin` (by ids only; superadmin, `confirm: true`), `empty_recycle_bin` (every bin of the active organization; superadmin, `confirm: true` + `organization_id`) |
 | Catalog | `create_agent`, `update_agent`, `get_agent`, `delete_agent`, `create_surface`, `update_surface`, `get_surface`, `delete_surface`, `list_agents`, `list_surfaces` |
 | Tools | `list_tools`, `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`, `update_mcp_tool`, `delete_mcp_tool` |
-| Labels | `list_labels`, `create_label`, `update_label`, `delete_label` (flow and tool label trees) |
+| Labels | `list_labels`, `create_label`, `update_label`, `delete_label` (flow and tool label trees, and the agent groups that `create/update_agent` and `create/update_surface` set with `group`) |
 | Saved list filters | `list_filter_presets`, `create_filter_preset`, `update_filter_preset`, `delete_filter_preset` (your own filters of the flows / tools pages) |
 | Venvs | `list_venvs`, `create_venv`, `update_venv`, `delete_venv` |
 | Models | `list_llm_configs`, `list_llm_models`, `create_llm_config`, `update_llm_config`, `delete_llm_config`, `list_embedding_configs`, `create_embedding_config`, `update_embedding_config`, `delete_embedding_config`, `get_settings`, `update_default_models` (incl. the legacy voice / transcription slots), `run_quickstart` |

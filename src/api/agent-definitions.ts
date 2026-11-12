@@ -32,6 +32,8 @@ export interface AgentDefinition extends AuthorshipFields {
   fcm_llm_config: number | null;
   default_surfaces: AgentDefaultSurface[];
   metadata: Record<string, unknown>;
+  /** Agent group (an `agent-labels/` id); null = ungrouped. */
+  group: number | null;
   max_iter: number;
   max_rpm: number;
   max_execution_time: number;
@@ -54,6 +56,7 @@ export interface CreateAgentDefinitionRequest {
   fcm_llm_config?: number | null;
   default_surfaces?: AgentDefaultSurface[];
   metadata?: Record<string, unknown>;
+  group?: number | null;
   max_iter?: number;
   max_rpm?: number;
   max_execution_time?: number;
