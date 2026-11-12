@@ -155,8 +155,10 @@ export function registerCodeRunTools(server: McpServer, context: AppContext): vo
         if (!wait) {
           return { ...ran, execution_id: executionId, next: 'Read the result with get_code_run_result(execution_id).' };
         }
-        const timeoutSeconds =
-          match.node.python_code?.execution_timeout ?? (await timeoutLimits.get()).default_seconds;
+        // effectiveExecutionTimeoutSeconds: the backend runs a stored timeout above the maximum as the maximum.
+        const limits = await timeoutLimits.get();
+        const storedSeconds = match.node.python_code?.execution_timeout ?? limits.default_seconds;
+        const timeoutSeconds = limits.max_seconds === null ? storedSeconds : Math.min(storedSeconds, limits.max_seconds);
         const outcome = await pollPythonCodeResult(codeRuns, executionId, timeoutSeconds);
         if (!outcome.finished) {
           return {
