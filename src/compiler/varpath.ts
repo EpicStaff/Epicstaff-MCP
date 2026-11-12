@@ -46,6 +46,12 @@ export function parseVarPath(rawValue: string): ParsedVarPath | VarPathError {
     return { error: 'empty variable path' };
   }
 
+  // EpicStaff 1.5 refuses these on save and crew at run time (shared/state_path.py): a segment
+  // like `__class__` would reach DotDict internals.
+  if ((path.match(TOKEN) ?? []).some((token) => token.startsWith('_'))) {
+    return { error: `Variable path '${path}' is not allowed: path segments cannot start with '_'.` };
+  }
+
   if (SHARED.test(path)) {
     return { raw: rawValue, root: 'variables', segments: [], hasDefault, isShared: true };
   }
