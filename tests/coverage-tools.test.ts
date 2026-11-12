@@ -116,6 +116,35 @@ describe('coverage tools (mock backend)', () => {
     expect(body.data.next).toMatch(/building/);
   });
 
+  it('update_venv keeps the stored is_custom of a library the caller does not restate', async () => {
+    const stored = {
+      ...venv(3, 'ds'),
+      libs: [
+        { name: 'acme-utils', specification: '', version: '1.0', description: null, is_custom: true },
+        { name: 'pandas', specification: '', version: null, description: null, is_custom: false },
+      ],
+    };
+    route('GET /api/venvs/', { status: 200, body: { count: 1, limit: 1000, offset: 0, next: null, previous: null, result: [stored] } });
+    route('GET /api/venvs/3/', { status: 200, body: stored });
+    route('PATCH /api/venvs/3/', (request) => ({ status: 200, body: { ...stored, ...(request.body as object) } }));
+
+    const { isError, body } = await call('update_venv', {
+      venv: 'ds',
+      libraries: ['acme-utils', { name: 'pandas', is_custom: true }, 'requests', { name: 'internal', is_custom: true }],
+    });
+
+    expect(isError, JSON.stringify(body)).toBe(false);
+    expect(requests('PATCH', '/api/venvs/3/')[0]?.body).toEqual({
+      libs: [
+        { name: 'acme-utils', specification: '', version: null, description: null, is_custom: true },
+        { name: 'pandas', specification: '', version: null, description: null, is_custom: true },
+        { name: 'requests', specification: '', version: null, description: null },
+        { name: 'internal', specification: '', version: null, description: null, is_custom: true },
+      ],
+    });
+    expect(body.data.venv.libraries).toEqual(['acme-utils (custom)', 'pandas (custom)', 'requests', 'internal (custom)']);
+  });
+
   it('delete_venv explains a venv that is still in use (409)', async () => {
     route('GET /api/venvs/', { status: 200, body: { count: 1, limit: 1000, offset: 0, next: null, previous: null, result: [venv(3, 'ds')] } });
     route('GET /api/venvs/3/', { status: 200, body: venv(3, 'ds') });

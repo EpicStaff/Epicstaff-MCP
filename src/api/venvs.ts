@@ -39,6 +39,8 @@ export interface VenvLib {
   specification: string;
   version: string | null;
   description: string | null;
+  /** The build resolves the name against an uploaded custom library instead of PyPI (server default false). */
+  is_custom?: boolean;
 }
 
 /** Creator of the binding row; null when unknown. */
