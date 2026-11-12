@@ -227,6 +227,9 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
     next_error_node: uuidOf(dto.next_error_node_id),
     pre_computation: {
       code: dto.pre_python_code?.code ?? '',
+      ...(dto.pre_python_code
+        ? { entrypoint: dto.pre_python_code.entrypoint, global_kwargs: dto.pre_python_code.global_kwargs }
+        : {}),
       input_map: dto.pre_input_map ?? {},
       output_variable_path: dto.pre_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.pre_python_code?.secrets),
@@ -236,6 +239,9 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
     },
     post_computation: {
       code: dto.post_python_code?.code ?? '',
+      ...(dto.post_python_code
+        ? { entrypoint: dto.post_python_code.entrypoint, global_kwargs: dto.post_python_code.global_kwargs }
+        : {}),
       input_map: dto.post_input_map ?? {},
       output_variable_path: dto.post_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.post_python_code?.secrets),

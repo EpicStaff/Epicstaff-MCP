@@ -319,6 +319,9 @@ describe('buildBulkSavePayload', () => {
           default_llm_config: 11,
           pre_computation: {
             code: 'def main():\n    return 1',
+            // Stored values round-trip; the post block below falls back to 'main' / {}.
+            entrypoint: 'run',
+            global_kwargs: { retries: 2 },
             input_map: { a: 'variables.a' },
             output_variable_path: 'variables.pre',
             execution_timeout: 45,
@@ -356,8 +359,8 @@ describe('buildBulkSavePayload', () => {
         node_name: 'Classifier',
         pre_python_code: {
           code: 'def main():\n    return 1',
-          entrypoint: 'main',
-          global_kwargs: {},
+          entrypoint: 'run',
+          global_kwargs: { retries: 2 },
           secret_ids: [],
           execution_timeout: 45,
         },

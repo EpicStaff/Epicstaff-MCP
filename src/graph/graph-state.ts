@@ -198,6 +198,9 @@ export interface DecisionTableGraphNode extends GraphNodeBase {
 
 export interface CdtComputationState {
   code?: string;
+  /** Stored entrypoint / global kwargs, round-tripped; the save falls back to 'main' / {}. */
+  entrypoint?: string;
+  global_kwargs?: Record<string, unknown>;
   input_map?: Record<string, string>;
   output_variable_path?: string | null;
   /** Secrets the computation may read. */
