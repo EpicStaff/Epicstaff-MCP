@@ -254,6 +254,18 @@ const trackGraph = (response: ToolResponse): void => {
 const initialKeys = restContext().store.get().apiKeys;
 const initialPrefixes = Object.values(initialKeys).map((held) => held.prefix);
 
+/** A user in several organizations with none chosen yet: the server waits on the JWT, no key minted (EpicStaff 1.5 keys are per org). */
+const awaitingOrgChoice = (response: ToolResponse): boolean =>
+  response.data?.authMode === 'jwt-bearer' && response.data?.activeOrgId == null && typeof response.data?.actionRequired === 'string';
+
+/** Every tool the configured server registers — the reference for the tool-count and coverage checks. */
+const allTools = await (async () => {
+  const listing = await Server.start(process.env);
+  const { tools } = await listing.client.listTools();
+  await listing.close();
+  return tools.map((tool) => tool.name);
+})();
+
 // ---------------------------------------------------------------------------------------------
 // A. Startup without configuration (issues 6, 7)
 // ---------------------------------------------------------------------------------------------
@@ -262,7 +274,7 @@ const initialPrefixes = Object.values(initialKeys).map((held) => held.prefix);
   const { EPICSTAFF_BASE_URL: _url, ...withoutUrl } = process.env;
   const server = await Server.start({ ...withoutUrl, EPICSTAFF_BASE_URL: '${EPICSTAFF_BASE_URL}' });
   const { tools } = await server.client.listTools();
-  assertion('unconfigured server starts and lists every tool', 'check_connection', tools.length === 89, `tools=${tools.length}`);
+  assertion('unconfigured server starts and lists every tool', 'check_connection', tools.length === allTools.length, `tools=${tools.length} of ${allTools.length}`);
   await step(server, 'unconfigured: check_connection explains the config problem', 'check_connection', {}, (response) =>
     (!response.ok && /EPICSTAFF_BASE_URL/.test(response.error ?? '') && /EPICSTAFF_BASE_URL/.test(response.hint ?? '')) || response.text.slice(0, 300),
   );
@@ -272,7 +284,8 @@ const initialPrefixes = Object.values(initialKeys).map((held) => held.prefix);
 {
   const server = await Server.start({ ...process.env, EPICSTAFF_API_TOKEN: '${EPICSTAFF_API_TOKEN}' });
   await step(server, 'unexpanded ${EPICSTAFF_API_TOKEN} is treated as unset', 'check_connection', {}, (response) =>
-    (response.ok && response.data.authMode === 'api-key') || `authMode=${response.data?.authMode} ${failure(response)}`,
+    (response.ok && (response.data.authMode === 'api-key' || awaitingOrgChoice(response))) ||
+    `authMode=${response.data?.authMode} ${failure(response)}`,
   );
   await server.close();
 }
@@ -285,13 +298,19 @@ const server = await Server.start({ ...process.env, [TELEGRAM_TOKEN_ENV]: FAKE_T
 
 // Auth / org
 const connection = await step(server, 'connect', 'check_connection', {}, (response) =>
-  (response.ok && response.data.authMode === 'api-key' && response.data.activeOrgId != null) || failure(response),
+  (response.ok && ((response.data.authMode === 'api-key' && response.data.activeOrgId != null) || awaitingOrgChoice(response))) ||
+  failure(response),
 );
 const orgId: number | undefined = connection.data?.activeOrgId ?? connection.data?.organizations?.[0]?.id;
+const multiOrg = (connection.data?.organizations?.length ?? 0) > 1;
 await step(server, 'list organizations', 'list_organizations', {}, (response) =>
   (response.ok && response.data.organizations.some((org: { id: number }) => org.id === orgId)) || failure(response),
 );
 await step(server, 'set active organization', 'set_active_organization', { organization_id: orgId ?? -1 });
+// EpicStaff 1.5 binds every API key to one organization: choosing one must leave the server on that org's key.
+await step(server, 'chosen organization works through its own API key', 'check_connection', {}, (response) =>
+  (response.ok && response.data.authMode === 'api-key' && response.data.activeOrgId === orgId) || failure(response),
+);
 
 // Reference
 const nodeTypes = await step(server, 'all node types', 'describe_node_types', {}, (response) =>
@@ -940,15 +959,17 @@ await server.close();
 // C. Process-level auth / org behaviour (issues 5, 10, 13) — fresh server processes
 // ---------------------------------------------------------------------------------------------
 
-// #10: a fresh process resolves the org itself before org-scoped calls (no check_connection).
+// #10: a fresh process resolves the org itself before org-scoped calls (no check_connection) — by
+// auto-selecting a single membership, or (a user in several orgs) from the persisted selection.
 {
-  restContext().store.update({ activeOrgId: null });
+  const startOrg = multiOrg ? (orgId ?? null) : null;
+  restContext().store.update({ activeOrgId: startOrg });
   const fresh = await Server.start(process.env);
   await step(fresh, '#10 fresh process: org-scoped get_session works without check_connection', 'get_session', { session_id: goldSession }, (response) =>
     (response.ok && response.data.id === goldSession) || failure(response),
   );
   await fresh.close();
-  restContext().store.update({ activeOrgId: null });
+  restContext().store.update({ activeOrgId: startOrg });
   const freshAgain = await Server.start(process.env);
   await step(freshAgain, '#10 fresh process: entity tool (diff_flow) resolves the org itself', 'diff_flow', { flow_dir: flow('reg-core') }, (response) =>
     (response.ok && response.data.graph.graphId === coreId) || failure(response),
@@ -1013,6 +1034,8 @@ if (process.env.REG_KEEP !== '1') {
   if (activeApiKey(restContext().store.get())?.key === 'es-regression-invalid-key') {
     restContext().store.update({ apiKeys: initialKeys });
   }
+  // Delete in the org the run created everything in, whatever selection the steps above left behind.
+  if (orgId !== undefined) restContext().store.update({ activeOrgId: orgId });
   const context = restContext();
   const failures: string[] = [];
   const remove = async (path: string): Promise<void> => {
@@ -1047,12 +1070,6 @@ if (process.env.REG_KEEP !== '1') {
 // Report
 // ---------------------------------------------------------------------------------------------
 
-const allTools = (await (async () => {
-  const listing = await Server.start(process.env);
-  const { tools } = await listing.client.listTools();
-  await listing.close();
-  return tools.map((tool) => tool.name);
-})());
 const unexercised = allTools.filter((name) => !exercised.has(name));
 if (unexercised.length > 0) record('every tool exercised', 'listTools', 'FAIL', 0, `never called: ${unexercised.join(', ')}`);
 
