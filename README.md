@@ -55,8 +55,9 @@ latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tra
 
 | EpicStaff | Plugin |
 |---|---|
-| 1.5 (`developer`, unreleased) | `1.5.0-dev.N` (`main`) |
-| 1.4.x | `1.4.y` (`release/v1.4.x`) |
+| 1.6 (`developer`, unreleased) | `1.6.0-dev.N` (`main`) |
+| 1.5.x | `1.5.y` (`release/v1.5.x`) |
+| 1.4.x | `1.4.y` (`release/v1.4.x`) — does not work with EpicStaff 1.5 (API keys are bound to one organization there) |
 | 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
 
 **How to pick:** check your EpicStaff version (release tag, or `developer`) and install the newest
