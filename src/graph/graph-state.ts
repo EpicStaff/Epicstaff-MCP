@@ -221,6 +221,11 @@ export interface CdtPromptConfigState {
   output_schema?: Record<string, unknown> | string | null;
   result_variable?: string;
   variable_mappings?: Record<string, string>;
+  /** System One fields (EpicStaff 1.5+), kept exactly as read; absent when the backend sent none. */
+  kind?: string;
+  system_one_config?: number | null;
+  questions?: Record<string, unknown>;
+  input_map?: Record<string, string>;
 }
 
 export interface CdtConditionGroupState {

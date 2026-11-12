@@ -14,6 +14,7 @@ import type {
 import type { AgentNodeTaskUi, AgentNodeTaskWrite } from '../models/nodes/agent-node.js';
 import {
   normalizeCdtSectionColor,
+  systemOnePromptFields,
   type CdtConditionGroupWrite,
   type ClassificationDecisionTableNodeWrite,
   type PromptConfigWrite,
@@ -228,6 +229,8 @@ function buildCdtNodePayload(
     output_schema: config.output_schema ?? {},
     result_variable: config.result_variable ?? '',
     variable_mappings: config.variable_mappings ?? {},
+    // Divergence: the frontend defaults kind to 'llm'; sent only as read, since a wrong kind is a 400.
+    ...systemOnePromptFields(config),
   }));
 
   return {

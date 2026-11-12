@@ -29,6 +29,7 @@ import type { GraphDto } from '../models/graph.js';
 import type { AgentNodeDto, AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import {
   normalizeCdtSectionColor,
+  systemOnePromptFields,
   type ClassificationDecisionTableNodeDto,
 } from '../models/nodes/classification-decision-table-node.js';
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
@@ -200,6 +201,7 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
       output_schema: config.output_schema,
       result_variable: config.result_variable,
       variable_mappings: config.variable_mappings,
+      ...systemOnePromptFields(config),
     };
   }
 

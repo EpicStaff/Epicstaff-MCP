@@ -50,6 +50,18 @@ export function normalizeCdtSectionColor(color?: string | null): string {
   return match ?? trimmed.toUpperCase();
 }
 
+type SystemOnePromptFields = Pick<PromptConfigDto, 'kind' | 'system_one_config' | 'questions' | 'input_map'>;
+
+/** The System One fields a prompt config carries, only those present (none invented). */
+export function systemOnePromptFields(config: SystemOnePromptFields): SystemOnePromptFields {
+  return {
+    ...(config.kind !== undefined ? { kind: config.kind } : {}),
+    ...(config.system_one_config !== undefined ? { system_one_config: config.system_one_config } : {}),
+    ...(config.questions !== undefined ? { questions: config.questions } : {}),
+    ...(config.input_map !== undefined ? { input_map: config.input_map } : {}),
+  };
+}
+
 export interface PromptConfigDto {
   id: number;
   prompt_key: string;
@@ -58,6 +70,11 @@ export interface PromptConfigDto {
   output_schema: Record<string, unknown> | string | null;
   result_variable: string;
   variable_mappings: Record<string, string>;
+  /** `llm` or `system_one` (EpicStaff 1.5+); absent on older backends. */
+  kind?: string;
+  system_one_config?: number | null;
+  questions?: Record<string, unknown>;
+  input_map?: Record<string, string>;
 }
 
 export interface PromptConfigWrite {
@@ -67,6 +84,14 @@ export interface PromptConfigWrite {
   output_schema: Record<string, unknown> | string | null;
   result_variable: string;
   variable_mappings: Record<string, string>;
+  /**
+   * Sent only when known: the backend creates a prompt without `kind` as `llm` and refuses
+   * a changed kind on an existing one, so a default is never invented.
+   */
+  kind?: string;
+  system_one_config?: number | null;
+  questions?: Record<string, unknown>;
+  input_map?: Record<string, string>;
 }
 
 export interface CdtConditionGroupDto {

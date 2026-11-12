@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { GraphDto } from '../models/graph.js';
 import { buildUuidToBackendIdMap, getConnectionDiff, getNodeDiff, type NodeDiffByType } from './diff.js';
 import type { GraphNodeBase, GraphNodeType, GraphState, TaskGraphNode } from './graph-state.js';
+import { buildBulkSavePayload } from './bulk-save.js';
 import { buildRemoteState, collectOrphanEdgeIds, remoteNodeUuid } from './remote-state.js';
 
 interface FixtureMeta {
@@ -720,6 +721,38 @@ describe('buildRemoteState', () => {
     const nodeDiff = getNodeDiff(remote, desired);
     expectEmptyNodeDiff(nodeDiff, 'classificationDecisionTableNodes');
     expect(nodeDiff.classificationDecisionTableNodes.toUpdate).toHaveLength(1);
+  });
+
+  it('carries System One prompt fields from the read to the restore payload, inventing no kind', () => {
+    const dto = makeDto();
+    const cdtDto = dto.classification_decision_table_node_list![0]!;
+    const systemOne = {
+      id: 401,
+      prompt_key: 's1',
+      kind: 'system_one',
+      prompt_text: '',
+      llm_config: null,
+      system_one_config: 7,
+      questions: { q1: { text: 'Is it urgent?' } },
+      input_map: { ticket: 'variables.ticket' },
+      output_schema: {},
+      result_variable: 'urgent',
+      variable_mappings: {},
+    };
+    cdtDto.prompt_configs = [...cdtDto.prompt_configs, systemOne];
+
+    const remote = buildRemoteState(dto);
+    // The unchanged graph still diffs clean with the new fields in place.
+    expectEmptyNodeDiff(getNodeDiff(remote, buildRemoteState(dto)));
+
+    const restored = buildRemoteState(dto);
+    for (const node of restored.nodes) node.backendId = null;
+    const payload = buildBulkSavePayload({ graphId: 1, desired: restored, remote: { nodes: [], edges: [] }, saveVersion: 1 });
+    const prompts = payload.classification_decision_table_node_list[0]!.prompt_configs;
+    const { id: _id, ...systemOneWrite } = systemOne;
+    expect(prompts.find((p) => p.prompt_key === 's1')).toStrictEqual(systemOneWrite);
+    // The llm prompt was read without System One fields (an older backend): none are sent.
+    expect(prompts.find((p) => p.prompt_key === 'p1')).not.toHaveProperty('kind');
   });
 
   it('detects exactly one update when a single field changes', () => {

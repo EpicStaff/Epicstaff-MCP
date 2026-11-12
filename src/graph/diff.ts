@@ -3,7 +3,7 @@
  * desired local state. Faithful port of frontend `visual-programming/utils/save/diff.ts`.
  */
 
-import { normalizeCdtSectionColor } from '../models/nodes/classification-decision-table-node.js';
+import { normalizeCdtSectionColor, systemOnePromptFields } from '../models/nodes/classification-decision-table-node.js';
 import { hasPersistedWaypoints, waypointsChanged } from './edge-waypoints.js';
 import type {
   AgentGraphNode,
@@ -409,6 +409,7 @@ function toCdtComparable(node: ClassificationDecisionTableGraphNode, allNodes: G
         output_schema: config.output_schema ?? null,
         result_variable: config.result_variable ?? '',
         variable_mappings: config.variable_mappings ?? {},
+        ...systemOnePromptFields(config),
       })),
     default_llm_config: tableData?.default_llm_config ?? null,
     // Divergence: the frontend compares these uuids raw (its two states share uuids). A pushed
