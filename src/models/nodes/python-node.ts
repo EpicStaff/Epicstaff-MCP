@@ -51,6 +51,8 @@ export type PythonNodeCodeWrite = Omit<CustomPythonCode, 'use_storage'>;
 
 export interface PythonNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   created_at: string;
   node_name: string;
   graph: number;

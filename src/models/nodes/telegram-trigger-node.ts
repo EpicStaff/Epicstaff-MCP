@@ -26,6 +26,8 @@ export interface TelegramTriggerFieldWrite {
 
 export interface TelegramTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   created_at: string;
   node_name: string;
   graph: number;
