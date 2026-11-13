@@ -29,9 +29,13 @@ export interface AgentDefinition extends AuthorshipFields {
   /** Read-only: every `instruction_list` content joined by a blank line, compiled by the backend. */
   instructions: string;
   llm_config: number | null;
+  /** Used instead of llm_config when the primary fails with a transient error; must differ from it. */
+  fallback_llm_config: number | null;
   fcm_llm_config: number | null;
   default_surfaces: AgentDefaultSurface[];
   metadata: Record<string, unknown>;
+  /** Agent group (an `agent-labels/` id); null = ungrouped. */
+  group: number | null;
   max_iter: number;
   max_rpm: number;
   max_execution_time: number;
@@ -51,9 +55,11 @@ export interface CreateAgentDefinitionRequest {
   instruction_list?: AgentInstruction[];
   description?: string;
   llm_config?: number | null;
+  fallback_llm_config?: number | null;
   fcm_llm_config?: number | null;
   default_surfaces?: AgentDefaultSurface[];
   metadata?: Record<string, unknown>;
+  group?: number | null;
   max_iter?: number;
   max_rpm?: number;
   max_execution_time?: number;
@@ -108,6 +114,14 @@ export class AgentDefinitionsApi {
 
   async update(id: number, request: Partial<CreateAgentDefinitionRequest>): Promise<AgentDefinition> {
     return this.client.patch(`agent-definitions/${id}/`, { body: request });
+  }
+
+  /**
+   * Clone an agent together with the surfaces it owns. `name` omitted: the source's name; a taken name gets
+   * the next free " #N" suffix (AgentDefinitionCopyService).
+   */
+  async copy(id: number, name?: string): Promise<AgentDefinition> {
+    return this.client.post(`agent-definitions/${id}/copy/`, { body: name !== undefined ? { name } : {} });
   }
 
   /** Delete an agent definition. Backend responds 204 (AgentDefinitionViewSet ModelViewSet). */

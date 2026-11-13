@@ -14,6 +14,7 @@ import type {
 import type { AgentNodeTaskUi, AgentNodeTaskWrite } from '../models/nodes/agent-node.js';
 import {
   normalizeCdtSectionColor,
+  systemOnePromptFields,
   type CdtConditionGroupWrite,
   type ClassificationDecisionTableNodeWrite,
   type PromptConfigWrite,
@@ -32,7 +33,7 @@ import type {
   GraphState,
   ScheduleTriggerGraphNode,
 } from './graph-state.js';
-import { toNodeMetadata } from './metadata.js';
+import { toNodeMetadata, toNoteMetadata } from './metadata.js';
 import { isNumberedNodeType } from './node-number.js';
 
 /**
@@ -228,6 +229,8 @@ function buildCdtNodePayload(
     output_schema: config.output_schema ?? {},
     result_variable: config.result_variable ?? '',
     variable_mappings: config.variable_mappings ?? {},
+    // Divergence: the frontend defaults kind to 'llm'; sent only as read, since a wrong kind is a 400.
+    ...systemOnePromptFields(config),
   }));
 
   return {
@@ -236,8 +239,8 @@ function buildCdtNodePayload(
     pre_python_code: isPythonCodeBlockSaved(preCodeValue, preSecretIds)
       ? {
           code: preCodeValue,
-          entrypoint: 'main',
-          global_kwargs: {},
+          entrypoint: preComputation.entrypoint ?? 'main',
+          global_kwargs: preComputation.global_kwargs ?? {},
           secret_ids: preSecretIds,
           execution_timeout: preComputation.execution_timeout,
         }
@@ -248,8 +251,8 @@ function buildCdtNodePayload(
     post_python_code: isPythonCodeBlockSaved(postCodeValue, postSecretIds)
       ? {
           code: postCodeValue,
-          entrypoint: 'main',
-          global_kwargs: {},
+          entrypoint: postComputation.entrypoint ?? 'main',
+          global_kwargs: postComputation.global_kwargs ?? {},
           secret_ids: postSecretIds,
           execution_timeout: postComputation.execution_timeout,
         }
@@ -512,7 +515,7 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       node_name: node.node_name,
       graph: graphId,
       content: node.data.content,
-      metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null },
+      metadata: toNoteMetadata(node),
     })),
     classification_decision_table_node_list: nodeItems(nodeDiff.classificationDecisionTableNodes, (node) =>
       buildCdtNodePayload(node, graphId, desired.nodes, idMap, desired.edges)

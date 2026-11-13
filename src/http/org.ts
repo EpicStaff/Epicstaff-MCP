@@ -1,5 +1,7 @@
+import { withUserSessionIfAvailable } from '../api/user-session.js';
 import type { StateStore } from '../state/store.js';
 import { logger } from '../util/logger.js';
+import type { AuthService } from './auth.js';
 import type { EpicStaffClient } from './client.js';
 import { ApiError } from './errors.js';
 
@@ -7,7 +9,8 @@ import { ApiError } from './errors.js';
  * Organization resolution — headless port of the frontend's
  * ProfileService.bootstrapUser() + ActiveOrgService:
  * orgs come from GET /api/profile/ memberships[]; the chosen org id is persisted
- * and attached to every request as X-Organization-Id by the client.
+ * and attached to every request as X-Organization-Id by the client, which also sends that
+ * org's API key (EpicStaff binds a user API key to one org and acts in it, see auth.ts).
  *
  * Multi-org policy (confirmed): auto-select when exactly one active org;
  * with several, require an explicit set_active_organization — no silent default.
@@ -40,8 +43,10 @@ export class OrgService {
   constructor(
     private readonly store: StateStore,
     private readonly client: EpicStaffClient,
+    private readonly auth: AuthService,
   ) {
     client.onOrgContextNeeded(() => this.ensureResolved());
+    auth.onOrgContextNeeded(() => this.ensureResolved());
   }
 
   /**
@@ -70,7 +75,10 @@ export class OrgService {
   }
 
   async resolve(): Promise<OrgStatus> {
-    const profile = await this.client.get<ProfileResponse>('profile/');
+    // Read with the user session when there is one: a user API key sees only its own org's membership.
+    const profile = await withUserSessionIfAvailable(this.auth, (bearerToken) =>
+      this.client.get<ProfileResponse>('profile/', { bearerToken }),
+    );
     const organizations: Organization[] = (profile.memberships ?? [])
       .map((membership) => membership.organization)
       .filter((org): org is NonNullable<typeof org> => org?.id !== undefined)
@@ -106,6 +114,14 @@ export class OrgService {
   }
 
   async setActive(orgId: number): Promise<OrgStatus> {
+    const pinned = this.auth.pinnedOrgId;
+    if (pinned !== null && orgId !== pinned) {
+      throw new Error(
+        `EPICSTAFF_API_TOKEN belongs to organization ${pinned} and works only there — EpicStaff binds every API key ` +
+          `to one organization. To work in organization ${orgId}, configure an API key created in it, or set ` +
+          'EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so the server mints a key per organization.',
+      );
+    }
     const status = await this.resolve();
     const match = status.organizations.find((org) => org.id === orgId);
     if (!match) {

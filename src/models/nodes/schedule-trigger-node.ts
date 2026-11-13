@@ -62,6 +62,8 @@ export interface GetScheduleBlock {
 
 export interface ScheduleTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   node_name: string;
   graph: number;
   is_active: boolean;

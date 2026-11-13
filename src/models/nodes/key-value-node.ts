@@ -34,6 +34,8 @@ export interface KeyValueNodeData {
 
 export interface KeyValueNodeDto extends KeyValueNodeData, AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   created_at: string;
   graph: number;
   node_name: string;

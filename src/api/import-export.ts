@@ -4,7 +4,8 @@ import type { ApiClient } from '../http/client.js';
 
 /**
  * Import / export API — ported from core/services/import-export.service.ts (flows) and the
- * export/import methods of features/tools/services/{custom-tools/custom-tools,mcp-tools/mcp-tools}.service.ts,
+ * export/import methods of features/tools/services/{custom-tools/custom-tools,mcp-tools/mcp-tools}.service.ts
+ * and features/agent-definitions/services/agent-definitions-api.service.ts,
  * with shared/models/export-result.model.ts and core/models/{import-result,review-item}.model.ts.
  *
  * Backend: ViewSetImportExportService (tables/services/import_export_service.py). An export is a
@@ -12,12 +13,13 @@ import type { ApiClient } from '../http/client.js';
  * entities the caller may not export are left out and named in the `X-Export-Excluded` header.
  * Secret values are never exported.
  */
-export type TransferKind = 'flow' | 'python_tool' | 'mcp_tool';
+export type TransferKind = 'flow' | 'python_tool' | 'mcp_tool' | 'agent_definition';
 
 const TRANSFER_PATHS: Record<TransferKind, string> = {
   flow: 'graphs/',
   python_tool: 'python-code-tool/',
   mcp_tool: 'mcp-tools/',
+  agent_definition: 'agent-definitions/',
 };
 
 export interface ExcludedExportEntity {
@@ -32,7 +34,7 @@ export interface ExportResult {
   excluded: ExcludedExportEntity[];
 }
 
-/** Flow imports only (`ImportFlowRequestOptions`); tool imports take `importLabels` alone. */
+/** Flow imports only (`ImportFlowRequestOptions`); tool and agent imports take `importLabels` alone. */
 export interface ImportOptions {
   /** Keep the file's uuids (required by `replaceExisting`). Flows only. */
   preserveUuids?: boolean;

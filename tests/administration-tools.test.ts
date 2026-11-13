@@ -11,7 +11,8 @@ import { connectTools, type ToolCallResult } from './helpers/mcp-harness.js';
  * The administration tools (account, first setup, users / memberships / roles / API keys /
  * organizations, plugins, audit) over the real MCP path — Zod parsing included — against an
  * in-process mock backend that records every request. The focus: which credential each call carries
- * (API key for admin reads, the user session for every change), confirm guards, org-scoping errors,
+ * (the user session for admin reads — a user API key sees only its own organization — and for every
+ * change; the API key for reads of an API-token-only server), confirm guards, org-scoping errors,
  * and that no credential (password, API key, audit token) ever reaches a tool result or the log.
  */
 const ENV = { EPICSTAFF_BASE_URL: 'http://es.mock', EPICSTAFF_USERNAME: 'dev@example.com', EPICSTAFF_PASSWORD: 'pw-of-the-mcp' };
@@ -66,6 +67,8 @@ const adminUser = (id: number, email: string) => ({
 const apiKey = (id: number, prefix: string, extra: Record<string, unknown> = {}) => ({
   id,
   name: `key ${id}`,
+  org_id: 1,
+  org_name: 'Org',
   prefix,
   created_at: '2026-10-01T00:00:00Z',
   expires_at: null,
@@ -150,7 +153,7 @@ describe('administration tools (mock backend)', () => {
       });
     });
 
-    await connect(ENV, { apiKey: STORED_KEY, keyPrefix: STORED_KEY.slice(0, 12), activeOrgId: 1 });
+    await connect(ENV, { apiKeys: { 1: { key: STORED_KEY, prefix: STORED_KEY.slice(0, 12) } }, activeOrgId: 1 });
   });
 
   afterEach(async () => {
@@ -186,7 +189,8 @@ describe('administration tools (mock backend)', () => {
 
     expect(result.isError, result.text).toBe(false);
     const mint = requests('POST', '/api/profile/api-keys/')[0]!;
-    expect(mint.body).toEqual({ name: 'app', expires_in_days: 30 });
+    // Bound to the active organization unless org_id names another.
+    expect(mint.body).toEqual({ name: 'app', org_id: 1, expires_in_days: 30 });
     // JWT-only route: the session bearer, never the API key.
     expect(mint.headers.get('Authorization')).toBe(`Bearer ${MOCK_JWT}`);
     expect(mint.headers.get('X-Api-Key')).toBeNull();
@@ -194,7 +198,10 @@ describe('administration tools (mock backend)', () => {
     expect(statSync(output).mode & 0o777).toBe(0o600);
     expect(result.text).not.toContain(MINTED_KEY);
     expect(logged.join('')).not.toContain(MINTED_KEY);
-    expect(result.body.data.api_key).toMatchObject({ id: 31, prefix: MINTED_KEY.slice(0, 12) });
+    expect(result.body.data.api_key).toMatchObject({ id: 31, prefix: MINTED_KEY.slice(0, 12), organization: { id: 1, name: 'Org' } });
+
+    await call('create_my_api_key', { name: 'other', org_id: 2, output_file: join(scratchDir, 'other.key'), confirm: true });
+    expect(requests('POST', '/api/profile/api-keys/')[1]!.body).toEqual({ name: 'other', org_id: 2 });
   });
 
   it('create_my_api_key refuses an existing file or a symbolic link before minting anything', async () => {
@@ -246,7 +253,7 @@ describe('administration tools (mock backend)', () => {
 
   // ----- RBAC admin ---------------------------------------------------------------
 
-  it('admin reads use the API key; admin writes use the signed-in session', async () => {
+  it('admin reads and writes use the signed-in session (a user API key sees only its own organization)', async () => {
     route('GET /api/admin/roles/', { status: 200, body: { ...page([role(9, 'Reviewer')]), built_in_roles: [builtIn(3, 'Member')] } });
     route('POST /api/admin/roles/', (request) => ({ status: 201, body: role(10, (request.body as { name: string }).name, { permissions: (request.body as { permissions: unknown }).permissions }) }));
 
@@ -260,8 +267,8 @@ describe('administration tools (mock backend)', () => {
 
     expect(list.isError, list.text).toBe(false);
     const read = requests('GET', '/api/admin/roles/')[0]!;
-    expect(read.headers.get('X-Api-Key')).toBe(STORED_KEY);
-    expect(read.headers.get('Authorization')).toBeNull();
+    expect(read.headers.get('Authorization')).toBe(`Bearer ${MOCK_JWT}`);
+    expect(read.headers.get('X-Api-Key')).toBeNull();
     expect(read.query.get('org_ids')).toBe('1');
     expect(list.body.data.built_in_roles[0]).toMatchObject({ id: 3, name: 'Member', built_in: true });
 
@@ -280,12 +287,17 @@ describe('administration tools (mock backend)', () => {
     expect(create.body.data.role.permissions).toEqual({ audit: ['read', 'export'], flows: ['read'] });
   });
 
-  it('admin writes refuse an API-token-only server before sending anything', async () => {
+  it('an API-token-only server reads the admin surface with its key and refuses admin writes before sending anything', async () => {
+    route('GET /api/auth/api-key/validate/', { status: 200, body: { active: true, org_id: 1 } });
+    route('GET /api/admin/roles/', { status: 200, body: { ...page([role(9, 'Reviewer')]), built_in_roles: [] } });
     await client.close();
     await connect({ EPICSTAFF_BASE_URL: 'http://es.mock', EPICSTAFF_API_TOKEN: STORED_KEY }, { activeOrgId: 1 });
 
+    const list = await call('admin_list_roles', { organization: 1 });
     const result = await call('admin_create_role', { organization: 1, name: 'X', permissions: {}, confirm: true });
 
+    expect(list.isError, list.text).toBe(false);
+    expect(requests('GET', '/api/admin/roles/')[0]!.headers.get('X-Api-Key')).toBe(STORED_KEY);
     expect(result.body.error).toMatch(/needs a signed-in EpicStaff session/);
     expect(writes()).toHaveLength(0);
   });
@@ -565,7 +577,7 @@ describe('administration tools (mock backend)', () => {
     // A fresh server process (the first one holds a cached token) whose user lacks AUDIT permission.
     route('POST /api/audit/token/', { status: 403, body: { status_code: 403, code: 'permission_denied', message: 'You do not have permission to perform this action.' } });
     await client.close();
-    await connect(ENV, { apiKey: STORED_KEY, activeOrgId: 1 });
+    await connect(ENV, { apiKeys: { 1: { key: STORED_KEY, prefix: STORED_KEY.slice(0, 12) } }, activeOrgId: 1 });
     const denied = await call('search_audit_log', { query: 'kind = "session"' });
     expect(denied.body.error).toMatch(/audit: read/);
   });

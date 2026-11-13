@@ -8,18 +8,26 @@ import { logger } from '../util/logger.js';
 /**
  * Persistent per-(host,email) state. Lives in ~/.es_mcp/, NOT inside the plugin
  * directory — plugin updates replace the plugin directory and would wipe it.
- * Holds the minted API key, so the file is written with mode 0600.
+ * Holds the minted API keys, so the file is written with mode 0600.
  */
+const heldApiKeySchema = z.object({ key: z.string(), prefix: z.string() });
+
 const stateSchema = z.object({
   baseUrl: z.string(),
   email: z.string(),
-  apiKey: z.string().nullable(),
-  keyPrefix: z.string().nullable(),
+  /**
+   * The API key this server holds per organization id. EpicStaff binds a user API key to one
+   * organization and acts in it whatever X-Organization-Id says, so the client sends the key of the
+   * active organization. A state file of an older version holds a single `apiKey` instead; it is
+   * dropped on load (EpicStaff deleted those unbound keys when it introduced the binding).
+   */
+  apiKeys: z.record(z.string(), heldApiKeySchema).default({}),
   /**
    * The user's JWT session (login access token + refresh token). Used as the request
    * scheme only when `jwtOnly` is set (a legacy backend without API-key minting); on
-   * current backends it is kept next to the API key solely for the JWT-only routes an
-   * API key may not call (`secrets/`). The client always prefers `apiKey`.
+   * current backends it is kept next to the API keys for the JWT-only routes an API key may
+   * not call (`secrets/`), and authenticates requests while no organization is chosen (no key
+   * can be minted yet). The client always prefers the active organization's API key.
    */
   bearerAccessToken: z.string().nullable(),
   bearerRefreshToken: z.string().nullable(),
@@ -29,6 +37,12 @@ const stateSchema = z.object({
 });
 
 export type PersistedState = z.infer<typeof stateSchema>;
+export type HeldApiKey = z.infer<typeof heldApiKeySchema>;
+
+/** The API key of the active organization, when this server holds one. */
+export function activeApiKey(state: PersistedState): HeldApiKey | undefined {
+  return state.activeOrgId === null ? undefined : state.apiKeys[state.activeOrgId];
+}
 
 /** Overridable for tests (ES_MCP_STATE_DIR); defaults to ~/.es_mcp. */
 function stateDir(): string {
@@ -49,17 +63,47 @@ export class StateStore {
   }
 
   update(patch: Partial<Omit<PersistedState, 'baseUrl' | 'email'>>): PersistedState {
-    this.state = { ...this.state, ...patch };
+    // Several MCP processes share this file: a key another one stored meanwhile wins over our stale
+    // copy and survives our drop of the old key — a lost key stays active server-side and eats the
+    // per-org key limit. Only the entries this patch actually changes overwrite the file.
+    const disk = this.readDiskApiKeys();
+    const apiKeys = { ...this.state.apiKeys, ...disk };
+    if (patch.apiKeys) {
+      for (const [org, held] of Object.entries(this.state.apiKeys)) {
+        if (!(org in patch.apiKeys) && (!(org in disk) || disk[org]!.key === held.key)) delete apiKeys[org];
+      }
+      for (const [org, held] of Object.entries(patch.apiKeys)) {
+        if (held.key !== this.state.apiKeys[org]?.key) apiKeys[org] = held;
+      }
+    }
+    this.state = { ...this.state, ...patch, apiKeys };
     this.persist();
     return this.state;
+  }
+
+  /** Pick up keys other MCP processes persisted since this one loaded (theirs win: newer). */
+  reloadApiKeys(): PersistedState {
+    this.state = { ...this.state, apiKeys: { ...this.state.apiKeys, ...this.readDiskApiKeys() } };
+    return this.state;
+  }
+
+  private readDiskApiKeys(): PersistedState['apiKeys'] {
+    if (!existsSync(this.filePath)) return {};
+    try {
+      const parsed = stateSchema.safeParse(JSON.parse(readFileSync(this.filePath, 'utf8')));
+      return parsed.success && parsed.data.baseUrl === this.state.baseUrl && parsed.data.email === this.state.email
+        ? parsed.data.apiKeys
+        : {};
+    } catch {
+      return {};
+    }
   }
 
   private loadOrInit(baseUrl: string, email: string): PersistedState {
     const empty: PersistedState = {
       baseUrl,
       email,
-      apiKey: null,
-      keyPrefix: null,
+      apiKeys: {},
       bearerAccessToken: null,
       bearerRefreshToken: null,
       jwtOnly: false,

@@ -237,7 +237,7 @@ describe('applySaveResponse', () => {
         output_variable_path: null,
         use_storage: false,
         test_input: {},
-        metadata: { position: { x: 0, y: 0 }, color: '#123456', icon: 'ti-node', size: { width: 200, height: 100 } },
+        metadata: { position: { x: 0, y: 0 } },
       },
     ]);
 

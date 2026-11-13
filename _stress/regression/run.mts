@@ -25,6 +25,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { loadConfig } from '../../src/config.js';
 import { createContext } from '../../src/context.js';
 import { readLock } from '../../src/flow-source/lockfile.js';
+import { activeApiKey } from '../../src/state/store.js';
 
 // ---------------------------------------------------------------------------------------------
 // Setup
@@ -150,8 +151,7 @@ class Server {
     await this.client.close();
     await this.transport.close().catch(() => undefined);
     // Remember every API key prefix the plugin stored during this run (to revoke our own mints).
-    const { keyPrefix } = restContext().store.get();
-    if (keyPrefix) seenKeyPrefixes.add(keyPrefix);
+    for (const held of Object.values(restContext().store.get().apiKeys)) seenKeyPrefixes.add(held.prefix);
   }
 }
 
@@ -248,11 +248,22 @@ const trackGraph = (response: ToolResponse): void => {
   if (typeof id === 'number') created.graphs.add(id);
 };
 
-// The key the state dir held BEFORE any server of this run started (reused, never revoked). Every
-// key stored after this point — phase A included — was minted by this run and is revoked on cleanup.
-const initialKey = (() => {
-  const { apiKey, keyPrefix } = restContext().store.get();
-  return apiKey && keyPrefix ? { apiKey, keyPrefix } : null;
+// The keys (one per organization) the state dir held BEFORE any server of this run started (reused,
+// never revoked). Every key stored after this point — phase A included — was minted by this run and
+// is revoked on cleanup.
+const initialKeys = restContext().store.get().apiKeys;
+const initialPrefixes = Object.values(initialKeys).map((held) => held.prefix);
+
+/** A user in several organizations with none chosen yet: the server waits on the JWT, no key minted (EpicStaff 1.5 keys are per org). */
+const awaitingOrgChoice = (response: ToolResponse): boolean =>
+  response.data?.authMode === 'jwt-bearer' && response.data?.activeOrgId == null && typeof response.data?.actionRequired === 'string';
+
+/** Every tool the configured server registers — the reference for the tool-count and coverage checks. */
+const allTools = await (async () => {
+  const listing = await Server.start(process.env);
+  const { tools } = await listing.client.listTools();
+  await listing.close();
+  return tools.map((tool) => tool.name);
 })();
 
 // ---------------------------------------------------------------------------------------------
@@ -263,7 +274,7 @@ const initialKey = (() => {
   const { EPICSTAFF_BASE_URL: _url, ...withoutUrl } = process.env;
   const server = await Server.start({ ...withoutUrl, EPICSTAFF_BASE_URL: '${EPICSTAFF_BASE_URL}' });
   const { tools } = await server.client.listTools();
-  assertion('unconfigured server starts and lists every tool', 'check_connection', tools.length === 89, `tools=${tools.length}`);
+  assertion('unconfigured server starts and lists every tool', 'check_connection', tools.length === allTools.length, `tools=${tools.length} of ${allTools.length}`);
   await step(server, 'unconfigured: check_connection explains the config problem', 'check_connection', {}, (response) =>
     (!response.ok && /EPICSTAFF_BASE_URL/.test(response.error ?? '') && /EPICSTAFF_BASE_URL/.test(response.hint ?? '')) || response.text.slice(0, 300),
   );
@@ -273,7 +284,8 @@ const initialKey = (() => {
 {
   const server = await Server.start({ ...process.env, EPICSTAFF_API_TOKEN: '${EPICSTAFF_API_TOKEN}' });
   await step(server, 'unexpanded ${EPICSTAFF_API_TOKEN} is treated as unset', 'check_connection', {}, (response) =>
-    (response.ok && response.data.authMode === 'api-key') || `authMode=${response.data?.authMode} ${failure(response)}`,
+    (response.ok && (response.data.authMode === 'api-key' || awaitingOrgChoice(response))) ||
+    `authMode=${response.data?.authMode} ${failure(response)}`,
   );
   await server.close();
 }
@@ -286,13 +298,19 @@ const server = await Server.start({ ...process.env, [TELEGRAM_TOKEN_ENV]: FAKE_T
 
 // Auth / org
 const connection = await step(server, 'connect', 'check_connection', {}, (response) =>
-  (response.ok && response.data.authMode === 'api-key' && response.data.activeOrgId != null) || failure(response),
+  (response.ok && ((response.data.authMode === 'api-key' && response.data.activeOrgId != null) || awaitingOrgChoice(response))) ||
+  failure(response),
 );
 const orgId: number | undefined = connection.data?.activeOrgId ?? connection.data?.organizations?.[0]?.id;
+const multiOrg = (connection.data?.organizations?.length ?? 0) > 1;
 await step(server, 'list organizations', 'list_organizations', {}, (response) =>
   (response.ok && response.data.organizations.some((org: { id: number }) => org.id === orgId)) || failure(response),
 );
 await step(server, 'set active organization', 'set_active_organization', { organization_id: orgId ?? -1 });
+// EpicStaff 1.5 binds every API key to one organization: choosing one must leave the server on that org's key.
+await step(server, 'chosen organization works through its own API key', 'check_connection', {}, (response) =>
+  (response.ok && response.data.authMode === 'api-key' && response.data.activeOrgId === orgId) || failure(response),
+);
 
 // Reference
 const nodeTypes = await step(server, 'all node types', 'describe_node_types', {}, (response) =>
@@ -941,15 +959,17 @@ await server.close();
 // C. Process-level auth / org behaviour (issues 5, 10, 13) — fresh server processes
 // ---------------------------------------------------------------------------------------------
 
-// #10: a fresh process resolves the org itself before org-scoped calls (no check_connection).
+// #10: a fresh process resolves the org itself before org-scoped calls (no check_connection) — by
+// auto-selecting a single membership, or (a user in several orgs) from the persisted selection.
 {
-  restContext().store.update({ activeOrgId: null });
+  const startOrg = multiOrg ? (orgId ?? null) : null;
+  restContext().store.update({ activeOrgId: startOrg });
   const fresh = await Server.start(process.env);
   await step(fresh, '#10 fresh process: org-scoped get_session works without check_connection', 'get_session', { session_id: goldSession }, (response) =>
     (response.ok && response.data.id === goldSession) || failure(response),
   );
   await fresh.close();
-  restContext().store.update({ activeOrgId: null });
+  restContext().store.update({ activeOrgId: startOrg });
   const freshAgain = await Server.start(process.env);
   await step(freshAgain, '#10 fresh process: entity tool (diff_flow) resolves the org itself', 'diff_flow', { flow_dir: flow('reg-core') }, (response) =>
     (response.ok && response.data.graph.graphId === coreId) || failure(response),
@@ -980,22 +1000,23 @@ await server.close();
 {
   const context = restContext();
   const state = context.store.get();
+  const storedPrefix = activeApiKey(state)?.prefix;
   const keysBefore = await listApiKeys();
   const ownStoredKey =
-    state.keyPrefix && state.keyPrefix !== initialKey?.keyPrefix
-      ? keysBefore.find((key) => !key.revoked && key.prefix === state.keyPrefix)
+    storedPrefix && !initialPrefixes.includes(storedPrefix)
+      ? keysBefore.find((key) => !key.revoked && key.prefix === storedPrefix)
       : undefined;
   if (ownStoredKey) {
     await withUserSession((session, bearerToken) =>
       session.client.post(`profile/api-keys/${ownStoredKey.id}/revoke/`, { bearerToken }),
     );
   } else {
-    context.store.update({ apiKey: 'es-regression-invalid-key', keyPrefix: 'es-regre' });
+    context.store.update({ apiKeys: { ...state.apiKeys, [state.activeOrgId ?? 0]: { key: 'es-regression-invalid-key', prefix: 'es-regre' } } });
   }
   const activeBefore = (await listApiKeys()).filter((key) => !key.revoked).length;
   const fresh = await Server.start(process.env);
   await step(fresh, '#5 invalid stored key: reconnects with a new key', 'check_connection', {}, (result) =>
-    (result.ok && result.data.authMode === 'api-key' && result.data.apiKeyPrefix !== state.keyPrefix) || failure(result),
+    (result.ok && result.data.authMode === 'api-key' && result.data.apiKeyPrefix !== storedPrefix) || failure(result),
   );
   assertion('#5 ...minted through the stored session, without a login', 'check_connection',
     /Minted API key/.test(fresh.log) && !/Logging in/.test(fresh.log), 'expected a mint and no login in the server log');
@@ -1010,9 +1031,11 @@ await server.close();
 
 if (process.env.REG_KEEP !== '1') {
   // A stored key known to be dead (e.g. a failed #5) would make every cleanup call try to mint.
-  if (restContext().store.get().apiKey === 'es-regression-invalid-key' && initialKey) {
-    restContext().store.update({ apiKey: initialKey.apiKey, keyPrefix: initialKey.keyPrefix });
+  if (activeApiKey(restContext().store.get())?.key === 'es-regression-invalid-key') {
+    restContext().store.update({ apiKeys: initialKeys });
   }
+  // Delete in the org the run created everything in, whatever selection the steps above left behind.
+  if (orgId !== undefined) restContext().store.update({ activeOrgId: orgId });
   const context = restContext();
   const failures: string[] = [];
   const remove = async (path: string): Promise<void> => {
@@ -1030,16 +1053,15 @@ if (process.env.REG_KEEP !== '1') {
   console.log(`cleanup: ${created.graphs.size} graph(s) + core entities removed${failures.length ? `; ${failures.length} failed: ${failures.join('; ')}` : ''}`);
 
   // API keys this run minted (every stored prefix except the one the state dir started with).
-  const minted = [...seenKeyPrefixes].filter((prefix) => prefix !== initialKey?.keyPrefix);
+  const minted = [...seenKeyPrefixes].filter((prefix) => !initialPrefixes.includes(prefix));
   const ours = (await listApiKeys()).filter((key) => !key.revoked && minted.includes(key.prefix));
   for (const key of ours) {
     await withUserSession((session, bearerToken) =>
       session.client.post(`profile/api-keys/${key.id}/revoke/`, { bearerToken }),
     ).catch((error: Error) => failures.push(`revoke key #${key.id}: ${error.message}`));
   }
-  // Put the pre-existing key back so the next run reuses it instead of minting.
-  if (initialKey) restContext().store.update({ apiKey: initialKey.apiKey, keyPrefix: initialKey.keyPrefix });
-  else restContext().store.update({ apiKey: null, keyPrefix: null });
+  // Put the pre-existing keys back so the next run reuses them instead of minting.
+  restContext().store.update({ apiKeys: initialKeys });
   const activeAtEnd = (await listApiKeys()).filter((key) => !key.revoked).length;
   console.log(`cleanup: revoked ${ours.length} API key(s) minted by this run; ${activeAtEnd} active key(s) remain for this user`);
 }
@@ -1048,12 +1070,6 @@ if (process.env.REG_KEEP !== '1') {
 // Report
 // ---------------------------------------------------------------------------------------------
 
-const allTools = (await (async () => {
-  const listing = await Server.start(process.env);
-  const { tools } = await listing.client.listTools();
-  await listing.close();
-  return tools.map((tool) => tool.name);
-})());
 const unexercised = allTools.filter((name) => !exercised.has(name));
 if (unexercised.length > 0) record('every tool exercised', 'listTools', 'FAIL', 0, `never called: ${unexercised.join(', ')}`);
 

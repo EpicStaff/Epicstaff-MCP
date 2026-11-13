@@ -71,7 +71,7 @@ describe('coverage tools (mock backend)', () => {
     });
 
     const context = createContext(loadConfig(ENV));
-    context.store.update({ apiKey: 'stored-key', keyPrefix: 'stored-k', activeOrgId: 1 });
+    context.store.update({ apiKeys: { 1: { key: 'stored-key', prefix: 'stored-k' } }, activeOrgId: 1 });
     ({ client, call } = await connectTools(context));
   });
 
@@ -114,6 +114,35 @@ describe('coverage tools (mock backend)', () => {
     expect(body.data.venv).toMatchObject({ id: 9, status: 'declared', libraries: ['pandas', 'requests>=2.31'] });
     expect(body.data.warning).toMatch(/ambiguous/);
     expect(body.data.next).toMatch(/building/);
+  });
+
+  it('update_venv keeps the stored is_custom of a library the caller does not restate', async () => {
+    const stored = {
+      ...venv(3, 'ds'),
+      libs: [
+        { name: 'acme-utils', specification: '', version: '1.0', description: null, is_custom: true },
+        { name: 'pandas', specification: '', version: null, description: null, is_custom: false },
+      ],
+    };
+    route('GET /api/venvs/', { status: 200, body: { count: 1, limit: 1000, offset: 0, next: null, previous: null, result: [stored] } });
+    route('GET /api/venvs/3/', { status: 200, body: stored });
+    route('PATCH /api/venvs/3/', (request) => ({ status: 200, body: { ...stored, ...(request.body as object) } }));
+
+    const { isError, body } = await call('update_venv', {
+      venv: 'ds',
+      libraries: ['acme-utils', { name: 'pandas', is_custom: true }, 'requests', { name: 'internal', is_custom: true }],
+    });
+
+    expect(isError, JSON.stringify(body)).toBe(false);
+    expect(requests('PATCH', '/api/venvs/3/')[0]?.body).toEqual({
+      libs: [
+        { name: 'acme-utils', specification: '', version: null, description: null, is_custom: true },
+        { name: 'pandas', specification: '', version: null, description: null, is_custom: true },
+        { name: 'requests', specification: '', version: null, description: null },
+        { name: 'internal', specification: '', version: null, description: null, is_custom: true },
+      ],
+    });
+    expect(body.data.venv.libraries).toEqual(['acme-utils (custom)', 'pandas (custom)', 'requests', 'internal (custom)']);
   });
 
   it('delete_venv explains a venv that is still in use (409)', async () => {
@@ -609,6 +638,21 @@ describe('coverage tools (mock backend)', () => {
     expect(form.get('replace_existing')).toBe('true');
     expect(form.get('import_labels')).toBe('true');
     expect(form.get('file')).toBeInstanceOf(Blob);
+  });
+
+  it('export_entities and import_entities reach the agent-definitions transfer actions', async () => {
+    const outputPath = join(stateDir, 'agent.json');
+    route('GET /api/agent-definitions/5/export/', { status: 200, body: { main_entity: 'AgentDefinition' } });
+    route('POST /api/agent-definitions/import/', { status: 200, body: { AgentDefinition: { created: 1 } } });
+
+    const exported = await call('export_entities', { kind: 'agent_definition', ids: [5], output_path: outputPath });
+    const imported = await call('import_entities', { kind: 'agent_definition', file_path: outputPath, import_labels: false });
+
+    expect(exported.isError, JSON.stringify(exported.body)).toBe(false);
+    expect(imported.isError, JSON.stringify(imported.body)).toBe(false);
+    const form = requests('POST', '/api/agent-definitions/import/')[0]!.body as FormData;
+    expect(form.get('import_labels')).toBe('false');
+    expect(form.has('preserve_uuids')).toBe(false);
   });
 
   it('get_flow_persistent_state returns only the asked flow\'s org and member state', async () => {

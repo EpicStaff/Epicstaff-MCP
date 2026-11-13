@@ -180,7 +180,7 @@ flow:
     expect(malformed.errors.some((e) => /malformed variable path/.test(e.message))).toBe(true);
   });
 
-  it('variables.shared[...] and __all__ are allowed', async () => {
+  it('variables.shared[...] is allowed; an "__all__" input_map value is refused like EpicStaff 1.5 does', async () => {
     const { errors, warnings } = await compile(`
 meta: { name: shared-all }${AGENTS}
 flow:
@@ -190,8 +190,9 @@ flow:
     finish: { type: end }
   edges: [{ from: start, to: use }, { from: use, to: finish }]
 `);
-    expect(errors.filter((e) => e.path.includes('input_map'))).toEqual([]);
+    expect(errors.filter((e) => e.path.includes('input_map.s'))).toEqual([]);
     expect(warnings.filter((w) => w.path.includes('input_map'))).toEqual([]);
+    expect(errors.some((e) => e.path.endsWith('input_map.a') && /cannot start with '_'/.test(e.message))).toBe(true);
   });
 
   it('nested prefix matching works both directions', async () => {

@@ -43,6 +43,7 @@ class MockBackend {
   mcpTools = [{ id: 12, name: 'fetch', tool_name: 'fetch', transport: 'sse' }];
   collections: Array<Record<string, unknown>> = [];
   embeddingConfigs = [{ id: 71, custom_name: 'default-embedder', model: 20 }];
+  agentGroups = [{ id: 31, name: 'Sales', parent: null, full_path: 'Sales', metadata: {} }];
 
   private id(): number {
     this.nextId += 1;
@@ -76,6 +77,7 @@ class MockBackend {
     if (key === 'GET /api/mcp-tools/') return { status: 200, body: this.mcpTools };
     if (key === 'GET /api/source-collections/') return { status: 200, body: this.collections };
     if (key === 'GET /api/embedding-configs/') return { status: 200, body: this.embeddingConfigs };
+    if (key === 'GET /api/agent-labels/') return { status: 200, body: this.agentGroups };
     if (key === 'GET /api/default-models/') return { status: 200, body: { memory_embedding_config: 71 } };
 
     // surface CRUD
@@ -108,6 +110,10 @@ class MockBackend {
       return { status: 200, body: { id, ...(body as Record<string, unknown>) } };
     }
     if (/^DELETE \/api\/agent-definitions\/\d+\/$/.test(key)) return { status: 204, body: undefined };
+    if (/^POST \/api\/agent-definitions\/\d+\/copy\/$/.test(key)) {
+      const name = (body as { name?: string }).name ?? 'Writer #2';
+      return { status: 201, body: { id: this.id(), name } };
+    }
 
     // collection CRUD + RAG pipeline
     if (key === 'POST /api/source-collections/') {
@@ -201,6 +207,7 @@ describe('catalog tools (mock backend)', () => {
     expect([...handlers.keys()].sort()).toEqual(
       [
         'attach_rag',
+        'copy_agent',
         'create_agent',
         'create_collection',
         'create_surface',
@@ -296,6 +303,58 @@ describe('catalog tools (mock backend)', () => {
     expect(patches).toHaveLength(2);
     expect(patches[0]!.body).toEqual({ name: 'Writer 2' });
     expect(patches[1]!.body).toEqual({ instruction_list: [{ name: 'Instruction_1.md', content: 'be brief' }] });
+  });
+
+  it('agent and surface tools resolve group names against agent-labels/ and send null to ungroup', async () => {
+    expect(
+      parse(await handlers.get('create_agent')!({ name: 'Closer', instructions: 'x', llm_config: 55, group: 'sales' })).ok,
+    ).toBe(true);
+    expect(parse(await handlers.get('update_agent')!({ agent: 'Writer', group: null })).ok).toBe(true);
+    expect(parse(await handlers.get('update_surface')!({ surface: 7, group: 'Sales' })).ok).toBe(true);
+    expect(parse(await handlers.get('update_surface')!({ surface: 7, instructions: 'x' })).ok).toBe(true);
+    const unknown = parse(await handlers.get('create_surface')!({ name: 'X', group: 'Nope' }));
+
+    expect(backend.received.find((r) => r.method === 'POST' && r.path === '/api/agent-definitions/')?.body).toMatchObject({ group: 31 });
+    expect(backend.received.find((r) => r.method === 'PATCH' && r.path === '/api/agent-definitions/5/')?.body).toEqual({ group: null });
+    const surfacePatches = backend.received.filter((r) => r.method === 'PATCH' && r.path === '/api/surfaces/7/');
+    expect(surfacePatches[0]?.body).toMatchObject({ group: 31 });
+    // An omitted group stays as stored server-side (and an owner change ungroups there), so it is not re-sent.
+    expect(surfacePatches[1]?.body).not.toHaveProperty('group');
+    expect(unknown.error).toContain('Agent group "Nope" not found');
+  });
+
+  it('copy_agent posts to the copy action; an omitted name leaves the naming to the backend', async () => {
+    const named = parse(await handlers.get('copy_agent')!({ agent: 'Writer', name: 'Editor' }));
+    const unnamed = parse(await handlers.get('copy_agent')!({ agent: 5 }));
+
+    expect(named.ok && unnamed.ok).toBe(true);
+    const posts = backend.received.filter((r) => r.method === 'POST' && r.path === '/api/agent-definitions/5/copy/');
+    expect(posts.map((r) => r.body)).toEqual([{ name: 'Editor' }, {}]);
+    expect(unnamed.data.agent.name).toBe('Writer #2');
+    expect(unnamed.data.next).toContain('existing: "Writer #2"');
+  });
+
+  it('create_agent / update_agent resolve fallback_llm_config like llm_config; null clears it', async () => {
+    backend.llmConfigs.push({ id: 56, custom_name: 'claude-backup', model: 11 });
+    expect(
+      parse(
+        await handlers.get('create_agent')!({
+          name: 'Resilient',
+          instructions: 'x',
+          llm_config: 'gpt-4o-default',
+          fallback_llm_config: 'claude-backup',
+        }),
+      ).ok,
+    ).toBe(true);
+    expect(parse(await handlers.get('update_agent')!({ agent: 'Writer', fallback_llm_config: null })).ok).toBe(true);
+
+    expect(backend.received.find((r) => r.method === 'POST' && r.path === '/api/agent-definitions/')?.body).toMatchObject({
+      llm_config: 55,
+      fallback_llm_config: 56,
+    });
+    expect(backend.received.find((r) => r.method === 'PATCH' && r.path === '/api/agent-definitions/5/')?.body).toEqual({
+      fallback_llm_config: null,
+    });
   });
 
   it('update_surface PATCHes the merged surface (the backend has no PUT)', async () => {

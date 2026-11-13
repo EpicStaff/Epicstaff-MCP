@@ -17,6 +17,7 @@ function summarizeKey(key: ApiKeyDto): Record<string, unknown> {
     id: key.id,
     name: key.name,
     prefix: key.prefix,
+    organization: { id: key.org_id, name: key.org_name },
     status: key.status,
     created_at: key.created_at,
     expires_at: key.expires_at,
@@ -29,11 +30,8 @@ export function registerAccountTools(server: McpServer, context: AppContext): vo
   // Built per call: registration must not touch context.auth (it throws when unconfigured).
   const profile = (): ProfileApi => new ProfileApi(context.client, context.auth);
 
-  /** The prefix of the key this server authenticates with — the backend lists keys by it. */
-  const ownKeyPrefix = (): string | null => {
-    const { apiKey } = context.store.get();
-    return apiKey ? apiKeyPrefix(apiKey) : null;
-  };
+  /** The prefixes of the keys this server authenticates with (one per organization) — the backend lists keys by them. */
+  const ownKeyPrefixes = (): string[] => Object.values(context.store.get().apiKeys).map((held) => apiKeyPrefix(held.key));
 
   server.registerTool(
     'get_my_account',
@@ -64,7 +62,8 @@ export function registerAccountTools(server: McpServer, context: AppContext): vo
             role: membership.role.name,
             joined_at: membership.joined_at,
           })),
-          permissions: capabilities.is_superadmin
+          // `permissions: '*'` only for a superadmin's session; a superadmin's API key gets its one org's `orgs`.
+          permissions: capabilities.permissions === '*'
             ? 'superadmin: every action in every organization'
             : (capabilities.orgs ?? []).map((scope) => ({
                 organization: scope.org,
@@ -110,10 +109,10 @@ export function registerAccountTools(server: McpServer, context: AppContext): vo
       runTool(async () => {
         requireSignedInSession(context, 'Listing API keys');
         await context.auth.ensureAuthenticated();
-        const inUse = ownKeyPrefix();
+        const inUse = ownKeyPrefixes();
         const keys = await profile().listApiKeys();
         return {
-          keys: keys.map((key) => ({ ...summarizeKey(key), ...(key.prefix === inUse ? { in_use_by_mcp: true } : {}) })),
+          keys: keys.map((key) => ({ ...summarizeKey(key), ...(inUse.includes(key.prefix) ? { in_use_by_mcp: true } : {}) })),
         };
       }),
   );
@@ -123,12 +122,19 @@ export function registerAccountTools(server: McpServer, context: AppContext): vo
     {
       title: 'Create a personal API key',
       description:
-        'Mint a personal API key for the configured user — it acts with all of that user\'s permissions. The raw ' +
+        'Mint a personal API key for the configured user, bound to one organization (EpicStaff lets it act only ' +
+        'there, with all of that user\'s permissions in it; at most 5 active keys per user and organization). The raw ' +
         'key is written to a NEW file at output_file (mode 0600; an existing path or symbolic link is refused) and ' +
         'is never shown in the conversation; the result names only its prefix. Use it to give an app or script its ' +
         'own EpicStaff credential (X-Api-Key header). Keep the file out of version control. Requires confirm: true.',
       inputSchema: {
         name: z.string().min(1).max(255).describe('What the key is for, e.g. "pallet-quote backend".'),
+        org_id: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Organization the key works in (list_organizations); defaults to the active organization.'),
         output_file: z.string().min(1).describe('Absolute path of the new file to write the key into.'),
         env_var_name: z
           .string()
@@ -146,14 +152,14 @@ export function registerAccountTools(server: McpServer, context: AppContext): vo
         confirm: confirmFlag('create this API key'),
       },
     },
-    async ({ name, output_file, env_var_name, expires_in_days }) =>
+    async ({ name, org_id, output_file, env_var_name, expires_in_days }) =>
       runTool(async () => {
         requireSignedInSession(context, 'Creating an API key');
         // Before minting: a bad destination must fail while no credential exists yet.
         assertNewSecretFilePath(output_file);
         await context.auth.ensureAuthenticated();
         const api = profile();
-        const created = await api.createApiKey(name, expires_in_days);
+        const created = await api.createApiKey(name, org_id ?? (await context.org.requireActiveOrg()), expires_in_days);
         try {
           writeNewSecretFile(output_file, env_var_name ? `${env_var_name}=${created.api_key}\n` : `${created.api_key}\n`);
         } catch (error) {
@@ -203,7 +209,7 @@ export function registerAccountTools(server: McpServer, context: AppContext): vo
         }
         const target = matches[0];
         if (!target) throw new Error(`No API key "${key}" among yours (list_my_api_keys).`);
-        if (target.prefix === ownKeyPrefix()) {
+        if (ownKeyPrefixes().includes(target.prefix)) {
           throw new Error(
             `Key ${target.prefix}… is the one this MCP server authenticates with — revoking it would cut the server off. ` +
               'Revoke it in the EpicStaff UI if you really mean to.',

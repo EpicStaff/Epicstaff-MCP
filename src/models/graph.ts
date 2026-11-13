@@ -37,14 +37,12 @@ import type { TelegramTriggerNodeDto, TelegramTriggerNodeWrite } from './nodes/t
 import type { WebhookTriggerNodeDto, WebhookTriggerNodeWrite } from './nodes/webhook-trigger-node.js';
 
 /**
- * The shape of the `metadata` JSON field stored on every backend node.
- * Written FE→BE at save time, read back BE→FE at load time.
+ * The shape of the `metadata` JSON field written on every backend node. Since EpicStaff 1.5.0 the
+ * frontend saves only the position (colour, icon and size come from its constants); older rows
+ * may still hold those keys, and nothing reads them.
  */
 export interface NodeDtoMetadata extends Record<string, unknown> {
   position: { x: number; y: number };
-  color: string;
-  icon: string;
-  size: { width: number; height: number };
 }
 
 export interface SubflowLightDto {

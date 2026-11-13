@@ -5,6 +5,8 @@ import type { NodeDtoMetadata } from '../graph.js';
 
 export interface EndNodeDto extends AuthorshipFields {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   created_at: string;
   graph: number;
   output_map: Record<string, unknown>;

@@ -237,6 +237,39 @@ flow:
     expect(errors.some((diagnostic) => /end/i.test(diagnostic.message))).toBe(true);
   });
 
+  it('rejects what EpicStaff 1.5 refuses on save: refused template placeholders and _-prefixed state paths', async () => {
+    writeFlow(`
+meta: { name: run-refusals }
+llm_configs:
+  default: { model: gpt-4o }
+agents:
+  a1: { instructions: hi, llm_config: default }
+flow:
+  nodes:
+    start: { type: start, initial_state: { topic: x } }
+    work:
+      type: agent
+      agent: a1
+      tasks: [{ instructions: "Write about {topic!r}" }]
+      input_map: { topic: variables.topic }
+      output_variable_path: variables._draft
+    review: { type: task, agent: a1, task: "Check {draft._meta}", input_map: { draft: variables._draft } }
+    finish: { type: end }
+  edges:
+    - { from: start, to: work }
+    - { from: work, to: review }
+    - { from: review, to: finish }
+`);
+    const artifact = await compileFlow(flowDir);
+    const errors = artifact.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    expect(errors.map((error) => error.path).sort()).toEqual([
+      'flow.nodes.review.input_map.draft',
+      'flow.nodes.review.task',
+      'flow.nodes.work.output_variable_path',
+      'flow.nodes.work.tasks[0].instructions',
+    ]);
+  });
+
   it('warns on a defined-but-unused entity', async () => {
     writeFlow(`
 meta: { name: unused-entity }

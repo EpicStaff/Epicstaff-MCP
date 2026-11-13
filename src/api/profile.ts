@@ -1,5 +1,5 @@
 import type { ApiClient } from '../http/client.js';
-import { type UserSession, withUserSession } from './user-session.js';
+import { type UserSession, withUserSession, withUserSessionIfAvailable } from './user-session.js';
 
 /**
  * The signed-in user's own account — ported from frontend `services/auth/profile.service.ts`
@@ -9,7 +9,9 @@ import { type UserSession, withUserSession } from './user-session.js';
  * Backend: rbac/views/{profile,api_keys,permissions}.py.
  *
  * `profile/api-keys/` is closed to API keys (DenyApiKeyAuth — a credential must not mint, list or
- * retire credentials), so those calls carry the user-session bearer from {@link UserSession}.
+ * retire credentials), so those calls carry the user-session bearer from {@link UserSession}. The
+ * profile and per-org permission reads use it too when there is a session: a user API key sees only
+ * its own organization there.
  */
 
 export interface NamedRef {
@@ -88,6 +90,9 @@ export type ApiKeyStatus = 'active' | 'expired' | 'revoked';
 export interface ApiKeyDto {
   id: number;
   name: string;
+  /** The organization the key is bound to — it works only there. */
+  org_id: number;
+  org_name: string;
   prefix: string;
   created_at: string;
   expires_at: string | null;
@@ -119,7 +124,7 @@ export class ProfileApi {
   ) {}
 
   async getProfile(): Promise<Profile> {
-    return this.client.get<Profile>('profile/');
+    return withUserSessionIfAvailable(this.session, (bearerToken) => this.client.get<Profile>('profile/', { bearerToken }));
   }
 
   async updateProfile(changes: UpdateProfileRequest): Promise<Profile> {
@@ -133,7 +138,9 @@ export class ProfileApi {
 
   /** Effective permissions in every organization the user belongs to. */
   async getOrgPermissions(): Promise<MyOrgPermissions> {
-    return this.client.get<MyOrgPermissions>('permissions/me/orgs/');
+    return withUserSessionIfAvailable(this.session, (bearerToken) =>
+      this.client.get<MyOrgPermissions>('permissions/me/orgs/', { bearerToken }),
+    );
   }
 
   async getPermissionCatalog(): Promise<PermissionCatalog> {
@@ -145,15 +152,16 @@ export class ProfileApi {
   }
 
   /**
-   * Mint a personal API key. The response holds the raw key exactly once — callers must hand it
-   * to its destination immediately and never log or return it.
+   * Mint a personal API key, bound to organization `orgId` (it works only there). The response
+   * holds the raw key exactly once — callers must hand it to its destination immediately and
+   * never log or return it.
    */
-  async createApiKey(name: string, expiresInDays: number | null | undefined): Promise<CreatedApiKey> {
+  async createApiKey(name: string, orgId: number, expiresInDays: number | null | undefined): Promise<CreatedApiKey> {
     return withUserSession(this.session, (bearerToken) =>
       this.client.post<CreatedApiKey>('profile/api-keys/', {
         bearerToken,
         // Omitting expires_in_days selects the backend's 90-day default; null means "never expires".
-        body: { name, ...(expiresInDays !== undefined ? { expires_in_days: expiresInDays } : {}) },
+        body: { name, org_id: orgId, ...(expiresInDays !== undefined ? { expires_in_days: expiresInDays } : {}) },
       }),
     );
   }

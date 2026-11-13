@@ -14,7 +14,7 @@ import { connectTools, type ToolCallResult } from './helpers/mcp-harness.js';
  * client-generated primary keys, so the copy gets fresh section ids (the original's would clash).
  */
 const ENV = { EPICSTAFF_BASE_URL: 'http://es.mock', EPICSTAFF_USERNAME: 'dev@example.com', EPICSTAFF_PASSWORD: 'pw' };
-const metadata = (x: number) => ({ position: { x, y: 0 }, color: '#fff', icon: 'ti', size: { width: 320, height: 80 } });
+const metadata = (x: number) => ({ position: { x, y: 0 } });
 const code = (id: number, body: string) => ({ id, code: body, entrypoint: 'main', secrets: [] });
 const SECTION_ID = '0b7a9c1e-4c55-4d0e-9a54-3f1b2c3d4e5f';
 
@@ -124,7 +124,7 @@ describe('restore_graph', () => {
     });
 
     const context = createContext(loadConfig(ENV));
-    context.store.update({ apiKey: 'stored-key', keyPrefix: 'stored-k', activeOrgId: 1 });
+    context.store.update({ apiKeys: { 1: { key: 'stored-key', prefix: 'stored-k' } }, activeOrgId: 1 });
     ({ client, call } = await connectTools(context));
   });
 

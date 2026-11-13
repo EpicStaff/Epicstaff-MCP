@@ -50,6 +50,8 @@ export type WebhookTriggerRef = number;
 
 export interface WebhookTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   created_at: string;
   node_name: string;
   graph: number;

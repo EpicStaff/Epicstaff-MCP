@@ -7,7 +7,8 @@
  * using a **may-reach** policy:
  *
  *  - root ≠ `variables` / malformed path  → ERROR (mirrors the runtime `ValueError`)
- *  - `variables.shared[...]`, `|default`, `"__all__"`  → allowed, unchecked
+ *  - `variables.shared[...]`, `|default`  → allowed, unchecked
+ *  - `"__all__"` as an input_map value → ERROR (EpicStaff 1.5 refuses the `_` segment on save)
  *  - produced on ≥1 path that reaches the reader, or declared  → silent
  *  - produced somewhere but not on a reaching path  → WARNING
  *  - produced nowhere and not declared  → ERROR (the pure typo)
@@ -63,7 +64,6 @@ export function validateDataflow(source: FlowSource): Diagnostic[] {
 
   function checkReads(reads: NodeReadPath[], readerNode: string): void {
     for (const { at: readPath, path: rawValue } of reads) {
-      if (rawValue === '__all__') continue; // whole-state read
       const parsed = parseVarPath(rawValue);
       if (isVarPathError(parsed)) {
         diagnostics.push(makeError(readPath, parsed.error));

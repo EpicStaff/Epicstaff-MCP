@@ -38,12 +38,16 @@ const libraryObjectSchema = z.strictObject({
     .optional()
     .describe('Exact version to pin. Omit to let the build pick the newest one the specification allows.'),
   description: z.string().optional().describe('Why the venv carries this package.'),
+  is_custom: z
+    .boolean()
+    .optional()
+    .describe("Install the org's uploaded custom library of this name instead of the PyPI package."),
 });
 
 const librarySchema = z
   .union([z.string().min(1), libraryObjectSchema])
   .describe(
-    'A requirement string ("pandas", "requests>=2.31", "numpy==1.26.4") or {name, specification?, version?, description?}.',
+    'A requirement string ("pandas", "requests>=2.31", "numpy==1.26.4") or {name, specification?, version?, description?, is_custom?}.',
   );
 
 type LibraryInput = z.infer<typeof librarySchema>;
@@ -62,6 +66,7 @@ export function toVenvLib(entry: LibraryInput): VenvLib {
       specification: (entry.specification ?? '').trim(),
       version: entry.version?.trim() || null,
       description: entry.description?.trim() || null,
+      ...(entry.is_custom !== undefined ? { is_custom: entry.is_custom } : {}),
     };
   }
   const requirement = entry.trim();
@@ -85,7 +90,8 @@ export function summarizeVenv(venv: Venv): Record<string, unknown> {
     status: venv.status,
     ...(venv.error ? { error: venv.error } : {}),
     libraries: venv.libs.map(
-      (lib) => `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ''}`,
+      (lib) =>
+        `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ''}${lib.is_custom ? ' (custom)' : ''}`,
     ),
     owner: venv.owner ? (venv.owner.display_name ?? venv.owner.email) : null,
     created_at: venv.created_at,
@@ -188,9 +194,19 @@ export function registerVenvTools(server: McpServer, context: AppContext): void 
           throw new Error('Nothing to change — pass name and/or libraries.');
         }
         const venvId = await resolveVenv(venv);
+        let libs: VenvLib[] | undefined;
+        if (libraries !== undefined) {
+          // The list replaces the stored one: a kept library that does not restate is_custom keeps its stored value
+          // instead of silently falling back to a PyPI lookup.
+          const stored = new Map((await venvs.get(venvId)).libs.map((lib) => [lib.name.toLowerCase(), lib.is_custom]));
+          libs = libraries.map(toVenvLib).map((lib) => {
+            const isCustom = stored.get(lib.name.toLowerCase());
+            return lib.is_custom === undefined && isCustom !== undefined ? { ...lib, is_custom: isCustom } : lib;
+          });
+        }
         const updated = await venvs.update(venvId, {
           ...(name !== undefined ? { name } : {}),
-          ...(libraries !== undefined ? { libs: libraries.map(toVenvLib) } : {}),
+          ...(libs !== undefined ? { libs } : {}),
         });
         return { venv: summarizeVenv(updated), next: buildStatusNext(updated) };
       }),

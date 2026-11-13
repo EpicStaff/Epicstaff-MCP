@@ -2,7 +2,7 @@ import type { ApiClient } from '../http/client.js';
 import type { Paginated } from './paging.js';
 import type { MembershipSummary } from './profile.js';
 import { withRedactedErrors } from './redaction.js';
-import { type UserSession, withUserSession } from './user-session.js';
+import { type UserSession, withUserSession, withUserSessionIfAvailable } from './user-session.js';
 
 /**
  * Workspace users — ported from frontend
@@ -11,8 +11,9 @@ import { type UserSession, withUserSession } from './user-session.js';
  * (UserAdminViewSet) — superadmin-only and cross-org: the organization is a filter, never the
  * X-Organization-Id header.
  *
- * Reads accept the personal API key (RestrictApiKeyToUserKeyReads lets a USER key read); every
- * write is JWT-only, so writes carry the user-session bearer from {@link UserSession}.
+ * Reads accept the personal API key (RestrictApiKeyToUserKeyReads lets a USER key read), but it
+ * sees only its own organization: reads use the user-session bearer from {@link UserSession} when
+ * there is a session. Every write is JWT-only, so writes always do.
  */
 
 /** `UserResponseSerializer`. */
@@ -63,17 +64,20 @@ export class AdminUsersApi {
    * account-state filter UserValidationService.validate_list_users_query reads is `status`.
    */
   async list(params: ListAdminUsersParams = {}): Promise<Paginated<AdminUser>> {
-    return this.client.get<Paginated<AdminUser>>('admin/users/', {
-      query: {
-        search: params.search,
-        status: params.status,
-        is_superadmin: params.is_superadmin,
-        role_id: params.role_id,
-        org_ids: params.org_ids?.length ? params.org_ids.join(',') : undefined,
-        page: params.page,
-        page_size: params.page_size,
-      },
-    });
+    return withUserSessionIfAvailable(this.session, (bearerToken) =>
+      this.client.get<Paginated<AdminUser>>('admin/users/', {
+        bearerToken,
+        query: {
+          search: params.search,
+          status: params.status,
+          is_superadmin: params.is_superadmin,
+          role_id: params.role_id,
+          org_ids: params.org_ids?.length ? params.org_ids.join(',') : undefined,
+          page: params.page,
+          page_size: params.page_size,
+        },
+      }),
+    );
   }
 
   /** Create an account. The password never reaches an error message (see withRedactedErrors). */

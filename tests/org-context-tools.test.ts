@@ -14,6 +14,8 @@ import { connectTools, type ToolCallResult } from './helpers/mcp-harness.js';
  */
 const ENV = { EPICSTAFF_BASE_URL: 'http://es.mock', EPICSTAFF_USERNAME: 'dev@example.com', EPICSTAFF_PASSWORD: 'pw' };
 const FIXTURE = join(import.meta.dirname, 'fixtures/flow-source/valid-basic');
+const encodeSegment = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+const MOCK_JWT = `${encodeSegment({ alg: 'HS256' })}.${encodeSegment({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
 
 describe('org context in a fresh server process', () => {
   let scratchDir: string;
@@ -23,7 +25,8 @@ describe('org context in a fresh server process', () => {
 
   async function start(activeOrgId: number | null) {
     const context = createContext(loadConfig(ENV));
-    context.store.update({ apiKey: 'stored-key', keyPrefix: 'stored-k', activeOrgId });
+    // The key of the only org (9) and the login session, as a previous process left them.
+    context.store.update({ apiKeys: { 9: { key: 'stored-key', prefix: 'stored-k' } }, bearerAccessToken: MOCK_JWT, activeOrgId });
     ({ client, call } = await connectTools(context));
   }
 

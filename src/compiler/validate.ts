@@ -23,6 +23,7 @@
  */
 import { makeError, makeWarning, type Diagnostic } from '../flow-source/diagnostics.js';
 import type { ResolvedFlow } from '../flow-source/resolver.js';
+import { templateRefusals } from './flow-template.js';
 import { validateKeyValueEntries } from './key-value-entries.js';
 import type {
   CatalogSurfaceSource,
@@ -46,8 +47,34 @@ export function validateFlow(source: FlowSource, resolved: ResolvedFlow): Diagno
   validateTopology(source, diagnostics);
   validateKnowledgeRetrieverNodes(source, diagnostics);
   validateKeyValueNodes(source, diagnostics);
+  validateTemplates(source, diagnostics);
   validateUnusedEntities(source, resolved, diagnostics);
   return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// templates: placeholders EpicStaff refuses on save (run_refusal_validator.py)
+// ---------------------------------------------------------------------------
+
+function validateTemplates(source: FlowSource, diagnostics: Diagnostic[]): void {
+  const check = (path: string, template: string | undefined): void => {
+    if (template === undefined) return;
+    for (const reason of templateRefusals(template)) diagnostics.push(makeError(path, reason));
+  };
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    const nodePath = `flow.nodes.${nodeName}`;
+    if (node.type === 'task') {
+      // Checked as the one instructions text emit.ts sends (task + expected output), as EpicStaff does.
+      check(
+        `${nodePath}.task`,
+        node.expected_output !== undefined ? `${node.task}\n\nExpected output: ${node.expected_output}` : node.task,
+      );
+    } else if (node.type === 'agent') {
+      node.tasks.forEach((task, index) => check(`${nodePath}.tasks[${index}].instructions`, task.instructions));
+    } else if (node.type === 'knowledge-retriever') {
+      check(`${nodePath}.query`, node.query);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

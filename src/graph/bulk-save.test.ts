@@ -28,13 +28,9 @@ function baseNode(id: string, backendId: number | null, nodeName: string, x: num
   };
 }
 
+/** Only the position is persisted for a non-note node (EpicStaff 1.5.0). */
 function metadataOf(node: GraphNodeBase): Record<string, unknown> {
-  return {
-    position: node.position,
-    color: node.color,
-    icon: node.icon,
-    size: node.size,
-  };
+  return { position: node.position };
 }
 
 const emptyDeleted = {
@@ -269,7 +265,13 @@ describe('buildBulkSavePayload', () => {
           node_name: 'Note',
           graph: 42,
           content: 'hello',
-          metadata: { ...metadataOf(desiredNote), backgroundColor: '#222222' },
+          metadata: {
+            ...metadataOf(desiredNote),
+            size: desiredNote.size,
+            backgroundColor: '#222222',
+            fontSize: null,
+            linkedRegion: null,
+          },
         },
       ],
       classification_decision_table_node_list: [],
@@ -319,6 +321,9 @@ describe('buildBulkSavePayload', () => {
           default_llm_config: 11,
           pre_computation: {
             code: 'def main():\n    return 1',
+            // Stored values round-trip; the post block below falls back to 'main' / {}.
+            entrypoint: 'run',
+            global_kwargs: { retries: 2 },
             input_map: { a: 'variables.a' },
             output_variable_path: 'variables.pre',
             execution_timeout: 45,
@@ -356,8 +361,8 @@ describe('buildBulkSavePayload', () => {
         node_name: 'Classifier',
         pre_python_code: {
           code: 'def main():\n    return 1',
-          entrypoint: 'main',
-          global_kwargs: {},
+          entrypoint: 'run',
+          global_kwargs: { retries: 2 },
           secret_ids: [],
           execution_timeout: 45,
         },

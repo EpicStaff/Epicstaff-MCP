@@ -96,7 +96,7 @@ describe('coverage-gap tools (mock backend)', () => {
     });
 
     const context = createContext(loadConfig(ENV));
-    context.store.update({ apiKey: 'stored-key', keyPrefix: 'stored-k', activeOrgId: 1 });
+    context.store.update({ apiKeys: { 1: { key: 'stored-key', prefix: 'stored-k' } }, activeOrgId: 1 });
     ({ client, call } = await connectTools(context));
   });
 
@@ -111,6 +111,7 @@ describe('coverage-gap tools (mock backend)', () => {
 
   it('run_node_code resolves a python node by name, posts the frontend target body and returns the result', async () => {
     route('POST /api/run-python-code/', { status: 200, body: { execution_id: 'exec-1' } });
+    route('GET /api/execution-timeout-limits/', { status: 200, body: { min_seconds: 1, default_seconds: 60, max_seconds: 20 } });
     route('GET /api/python-code-result/exec-1/', {
       status: 200,
       body: { execution_id: 'exec-1', status: 'completed', returncode: 0, result_data: '"HELLO"', stdout: 'ok\n', stderr: '' },

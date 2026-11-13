@@ -1,6 +1,6 @@
 import type { ApiClient } from '../http/client.js';
 import type { Paginated } from './paging.js';
-import { type UserSession, withUserSession } from './user-session.js';
+import { type UserSession, withUserSession, withUserSessionIfAvailable } from './user-session.js';
 
 /**
  * Organizations as an administrator manages them — ported from frontend
@@ -9,7 +9,8 @@ import { type UserSession, withUserSession } from './user-session.js';
  * (OrganizationAdminViewSet): list / rename follow the `organizations` permission; create,
  * deactivate and reactivate are superadmin-only. An organization the caller can't read answers 404.
  *
- * Reads accept the personal API key; writes carry the user-session bearer from {@link UserSession}.
+ * Reads accept the personal API key, but it sees only its own organization: reads use the
+ * user-session bearer from {@link UserSession} when there is a session; writes always do.
  */
 
 /** `OrganizationResponseSerializer` (+ `admins` on the list). */
@@ -18,7 +19,13 @@ export interface AdminOrganization {
   name: string;
   is_active: boolean;
   member_count: number;
-  config?: { audit_retention_days: number } | null;
+  config?: {
+    audit_retention_days: number;
+    /** Retention actually applied, in days (0 = unlimited). */
+    sessions_effective_days?: number;
+    conversations_effective_days?: number;
+    audit_effective_days?: number;
+  } | null;
   admins?: Array<{ id: number; email: string; display_name: string | null }>;
   created_at: string;
   updated_at: string;
@@ -38,9 +45,12 @@ export class AdminOrganizationsApi {
   ) {}
 
   async list(params: ListOrganizationsParams = {}): Promise<Paginated<AdminOrganization>> {
-    return this.client.get<Paginated<AdminOrganization>>('admin/organizations/', {
-      query: { is_active: params.is_active, search: params.search, page: params.page, page_size: params.page_size },
-    });
+    return withUserSessionIfAvailable(this.session, (bearerToken) =>
+      this.client.get<Paginated<AdminOrganization>>('admin/organizations/', {
+        bearerToken,
+        query: { is_active: params.is_active, search: params.search, page: params.page, page_size: params.page_size },
+      }),
+    );
   }
 
   async create(name: string): Promise<AdminOrganization> {

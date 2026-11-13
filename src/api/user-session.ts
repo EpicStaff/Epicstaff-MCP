@@ -11,6 +11,8 @@ export interface UserSession {
   accessToken(): Promise<string>;
   /** The token was rejected (401): drop it and return a fresh one. */
   renewAccessToken(): Promise<string>;
+  /** Whether a session can be opened at all (login credentials are configured). */
+  hasUserSession(): boolean;
 }
 
 /** Run `call` with the session's bearer token; on a 401 renew the token once and retry. */
@@ -23,4 +25,16 @@ export async function withUserSession<T>(session: UserSession, call: (bearerToke
     }
     throw error;
   }
+}
+
+/**
+ * Run a read with the session's bearer token when there is a session, else with the API key
+ * (`bearerToken` undefined). EpicStaff narrows what a user API key sees to the key's organization
+ * (profile memberships, cross-org admin lists); the session sees every organization of the user.
+ */
+export async function withUserSessionIfAvailable<T>(
+  session: UserSession,
+  call: (bearerToken: string | undefined) => Promise<T>,
+): Promise<T> {
+  return session.hasUserSession() ? withUserSession(session, call) : call(undefined);
 }

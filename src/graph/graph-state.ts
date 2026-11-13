@@ -13,6 +13,7 @@ import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import type { KeyValueNodeData } from '../models/nodes/key-value-node.js';
 import type { KnowledgeRetrieverNodeData } from '../models/nodes/knowledge-retriever-node.js';
 import type { CustomPythonCode } from '../models/nodes/python-node.js';
+import type { NoteLinkedRegion } from '../models/nodes/note-node.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
 import type { TelegramTriggerFieldWrite } from '../models/nodes/telegram-trigger-node.js';
 import type {
@@ -93,7 +94,7 @@ export interface EndGraphNode extends GraphNodeBase {
 
 export interface NoteGraphNode extends GraphNodeBase {
   type: 'note';
-  data: { content: string; backgroundColor?: string };
+  data: { content: string; backgroundColor?: string; fontSize?: number; linkedRegion?: NoteLinkedRegion };
 }
 
 export interface FileExtractorGraphNode extends GraphNodeBase {
@@ -198,6 +199,9 @@ export interface DecisionTableGraphNode extends GraphNodeBase {
 
 export interface CdtComputationState {
   code?: string;
+  /** Stored entrypoint / global kwargs, round-tripped; the save falls back to 'main' / {}. */
+  entrypoint?: string;
+  global_kwargs?: Record<string, unknown>;
   input_map?: Record<string, string>;
   output_variable_path?: string | null;
   /** Secrets the computation may read. */
@@ -221,6 +225,11 @@ export interface CdtPromptConfigState {
   output_schema?: Record<string, unknown> | string | null;
   result_variable?: string;
   variable_mappings?: Record<string, string>;
+  /** System One fields (EpicStaff 1.5+), kept exactly as read; absent when the backend sent none. */
+  kind?: string;
+  system_one_config?: number | null;
+  questions?: Record<string, unknown>;
+  input_map?: Record<string, string>;
 }
 
 export interface CdtConditionGroupState {

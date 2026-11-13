@@ -9,6 +9,7 @@ import {
   type CreateAgentDefinitionRequest,
 } from '../api/agent-definitions.js';
 import { KnowledgeApi } from '../api/knowledge.js';
+import { LabelsApi } from '../api/labels.js';
 import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SurfacesApi, type CreateSurfaceRequest, type Surface } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
@@ -74,6 +75,13 @@ const surfaceBodyShape = {
     .describe(
       'Owning agent (id or name). Set ⇒ agent-specific (only that agent may attach it). null/omitted ⇒ shared.',
     ),
+  group: idOrName
+    .nullable()
+    .optional()
+    .describe(
+      'Agent group (list_labels scope "agent"): id or name; null = ungrouped. Shared surfaces only — setting ' +
+        'owner_agent ungroups the surface.',
+    ),
   allow_creation: z.boolean().optional().describe('Whether the agent may create new files in this surface.'),
   python_tools: z.array(surfaceToolEntrySchema).optional().describe('Python tool grants.'),
   mcp_tools: z.array(surfaceToolEntrySchema).optional().describe('MCP tool grants.'),
@@ -85,6 +93,7 @@ type SurfaceBodyInput = {
   description?: string;
   instructions?: string;
   owner_agent?: number | string | null;
+  group?: number | string | null;
   allow_creation?: boolean;
   python_tools?: Array<{ tool: number | string; mode: 'allow' | 'deny' }>;
   mcp_tools?: Array<{ tool: number | string; mode: 'allow' | 'deny' }>;
@@ -102,6 +111,19 @@ type SurfaceBodyInput = {
     graph_local_search_config?: Record<string, unknown>;
   }>;
 };
+
+const fallbackLlmConfigSchema = idOrName
+  .nullable()
+  .optional()
+  .describe(
+    'LLM config used instead of llm_config when it fails with a transient error: id or name; null = none. ' +
+      'Must differ from llm_config (the backend refuses the same config with 400).',
+  );
+
+const agentGroupSchema = idOrName
+  .nullable()
+  .optional()
+  .describe('Agent group (list_labels scope "agent"): id or name; null = ungrouped.');
 
 const ragInputSchema = z.strictObject({
   strategy: z.enum(['naive', 'graph']).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
@@ -181,6 +203,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
   const knowledge = new KnowledgeApi(context.client);
   const llm = new LlmApi(context.client);
   const tools = new ToolsApi(context.client);
+  const labels = new LabelsApi(context.client);
 
   const resolveAgent = (ref: number | string): Promise<number> =>
     resolveNamedRef(ref, 'Agent', () => agents.list(), (agent) => agent.id, (agent) => agent.name);
@@ -200,6 +223,10 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     resolveNamedRef(ref, 'Python tool', () => tools.listPythonCodeTools(), (tool) => tool.id, (tool) => tool.name);
   const resolveMcpTool = (ref: number | string): Promise<number> =>
     resolveNamedRef(ref, 'MCP tool', () => tools.listMcpTools(), (tool) => tool.id, (tool) => tool.name);
+  const resolveGroup = async (ref: number | string | null): Promise<number | null> =>
+    ref === null
+      ? null
+      : resolveNamedRef(ref, 'Agent group', () => labels.list('agent'), (label) => label.id, (label) => label.full_path);
 
   /** Resolve a friendly surface body into the backend `CreateSurfaceRequest` wire shape. */
   async function buildSurfaceRequest(name: string, body: SurfaceBodyInput): Promise<CreateSurfaceRequest> {
@@ -210,6 +237,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
     if (body.owner_agent !== undefined) {
       request.owner_agent = body.owner_agent === null ? null : await resolveAgent(body.owner_agent);
     }
+    if (body.group !== undefined) request.group = await resolveGroup(body.group);
     if (body.python_tools !== undefined) {
       request.python_tools = await Promise.all(
         body.python_tools.map(async (entry) => ({
@@ -380,6 +408,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
           .describe('Boot instructions — the agent system prompt. Stored as the agent\'s single instruction document.'),
         description: z.string().optional().describe('One-line summary of what this agent is for.'),
         llm_config: idOrName.describe('LLM config the agent thinks with: backend id or exact name (list_llm_configs).'),
+        fallback_llm_config: fallbackLlmConfigSchema,
         fcm_llm_config: idOrName.optional().describe('Separate LLM config for function calling: id or name.'),
         default_surfaces: z
           .array(
@@ -397,6 +426,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         max_retry_limit: z.number().int().nonnegative().optional().describe('Max retries when an LLM call fails.'),
         default_temperature: z.number().optional().describe('Default sampling temperature.'),
         metadata: z.record(z.string(), z.unknown()).optional().describe('Free-form metadata stored with the agent.'),
+        group: agentGroupSchema,
       },
     },
     async ({ name, ...body }) =>
@@ -406,6 +436,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         const request = await buildAgentRequest(name, body, {
           resolveLlmConfig,
           resolveSurface,
+          resolveGroup,
         });
         const created = await createOrExplainConflict(() => agents.create(request), name, 'update_agent');
         return {
@@ -439,6 +470,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
           ),
         description: z.string().optional(),
         llm_config: idOrName.optional(),
+        fallback_llm_config: fallbackLlmConfigSchema,
         fcm_llm_config: idOrName.optional(),
         default_surfaces: z
           .array(
@@ -455,6 +487,7 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         max_retry_limit: z.number().int().nonnegative().optional(),
         default_temperature: z.number().optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
+        group: agentGroupSchema,
       },
     },
     async ({ agent, ...body }) =>
@@ -462,9 +495,33 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
         const agentId = await resolveAgent(agent);
-        const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
+        const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface, resolveGroup });
         const updated = await agents.update(agentId, request);
         return { agent: updated };
+      }),
+  );
+
+  server.registerTool(
+    'copy_agent',
+    {
+      title: 'Copy an agent definition',
+      description:
+        'Duplicate an agent definition together with the surfaces it owns (tools, storage and knowledge are linked, ' +
+        'not cloned). The copy is independent of the source. A taken name gets the next free " #N" suffix.',
+      inputSchema: {
+        agent: idOrName.describe('The agent to copy: backend id or exact name.'),
+        name: z.string().min(1).optional().describe('Name of the copy. Omit to reuse the source name (suffixed " #N").'),
+      },
+    },
+    async ({ agent, name }) =>
+      runTool(async () => {
+        await context.auth.ensureAuthenticated();
+        await context.org.requireActiveOrg();
+        const copy = await agents.copy(await resolveAgent(agent), name);
+        return {
+          agent: copy,
+          next: `Reference the copy from a flow agent node with existing: "${copy.name}".`,
+        };
       }),
   );
 
@@ -654,12 +711,14 @@ export function registerCatalogTools(server: McpServer, context: AppContext): vo
 interface AgentResolvers {
   resolveLlmConfig: (ref: number | string) => Promise<number>;
   resolveSurface: (ref: number | string) => Promise<number>;
+  resolveGroup: (ref: number | string | null) => Promise<number | null>;
 }
 
 interface AgentBodyInput {
   instructions?: string;
   description?: string;
   llm_config?: number | string;
+  fallback_llm_config?: number | string | null;
   fcm_llm_config?: number | string;
   default_surfaces?: Array<{ surface: number | string; place: 'all' | 'flow' | 'chat' }>;
   max_iter?: number;
@@ -669,6 +728,7 @@ interface AgentBodyInput {
   max_retry_limit?: number;
   default_temperature?: number;
   metadata?: Record<string, unknown>;
+  group?: number | string | null;
 }
 
 async function resolveDefaultSurfaces(
@@ -691,10 +751,15 @@ async function buildAgentRequest(
     llm_config: await resolvers.resolveLlmConfig(body.llm_config),
   };
   if (body.description !== undefined) request.description = body.description;
+  if (body.fallback_llm_config !== undefined) {
+    request.fallback_llm_config =
+      body.fallback_llm_config === null ? null : await resolvers.resolveLlmConfig(body.fallback_llm_config);
+  }
   if (body.fcm_llm_config !== undefined) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
   if (body.default_surfaces !== undefined) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
   }
+  if (body.group !== undefined) request.group = await resolvers.resolveGroup(body.group);
   assignAgentKnobs(request, body);
   return request;
 }
@@ -708,10 +773,15 @@ async function buildAgentPatch(
   if (body.instructions !== undefined) request.instruction_list = toInstructionList(body.instructions);
   if (body.description !== undefined) request.description = body.description;
   if (body.llm_config !== undefined) request.llm_config = await resolvers.resolveLlmConfig(body.llm_config);
+  if (body.fallback_llm_config !== undefined) {
+    request.fallback_llm_config =
+      body.fallback_llm_config === null ? null : await resolvers.resolveLlmConfig(body.fallback_llm_config);
+  }
   if (body.fcm_llm_config !== undefined) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
   if (body.default_surfaces !== undefined) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
   }
+  if (body.group !== undefined) request.group = await resolvers.resolveGroup(body.group);
   assignAgentKnobs(request, body);
   return request;
 }
@@ -741,6 +811,8 @@ function mergeSurfaceBody(
     instructions: body.instructions ?? current.instructions,
     allow_creation: body.allow_creation ?? current.allow_creation,
     owner_agent: body.owner_agent !== undefined ? body.owner_agent : current.owner_agent,
+    // Not carried over: an omitted group stays as stored, and the backend ungroups a surface that gains an owner.
+    group: body.group,
     python_tools:
       body.python_tools ?? current.python_tools.map((entry) => ({ tool: entry.python_tool, mode: entry.mode })),
     mcp_tools: body.mcp_tools ?? current.mcp_tools.map((entry) => ({ tool: entry.mcp_tool, mode: entry.mode })),

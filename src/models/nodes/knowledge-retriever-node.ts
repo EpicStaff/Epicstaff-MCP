@@ -35,6 +35,8 @@ export interface KnowledgeRetrieverNodeData {
 
 export interface KnowledgeRetrieverNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   graph: number | null;
   source_collection: number | null;
   search_configs: AgentSearchConfigs | null;

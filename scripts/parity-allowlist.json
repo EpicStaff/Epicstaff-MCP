@@ -162,11 +162,6 @@
       "reason": "Ends the browser's cookie session; MCP authenticates with an API key and keeps its refresh cookie private."
     },
     {
-      "pattern": "auth/swagger-token/",
-      "category": "browser-only",
-      "reason": "Token for the Swagger UI."
-    },
-    {
       "pattern": "auth/password-reset/*",
       "category": "browser-only",
       "reason": "Forgotten-password e-mail flow: the link in the mail is opened in a browser."
@@ -340,6 +335,21 @@
       "pattern": "admin/plugins/*/grants/*/",
       "category": "backlog",
       "reason": "Single grant detail and its delete; the list, create, suspend and resume calls are covered, and deleting a grant purges data, which stays in the UI."
+    },
+    {
+      "pattern": "system-one-configs/*",
+      "category": "backlog",
+      "reason": "System One classifier configs (new in 1.5.0) — not exposed yet."
+    },
+    {
+      "pattern": "custom-libraries/*",
+      "category": "backlog",
+      "reason": "The organization's private Python packages (custom libraries a venv installs with is_custom) — not exposed yet."
+    },
+    {
+      "pattern": "custom-libraries/{}/wheels/*",
+      "category": "backlog",
+      "reason": "Wheel uploads of a custom library — not exposed yet."
     }
   ],
   "nodeLists": []

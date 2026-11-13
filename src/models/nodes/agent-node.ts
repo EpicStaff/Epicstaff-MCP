@@ -49,6 +49,8 @@ export interface AgentNodeTaskUi {
 
 export interface AgentNodeDto extends AuthorshipFields, NumberedNodeDto {
   id: number;
+  /** Stable node identity (EpicStaff 1.5+), immutable once created. */
+  uuid?: string;
   created_at: string;
   updated_at?: string;
   metadata: Record<string, unknown>;

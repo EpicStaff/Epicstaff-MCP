@@ -1,7 +1,7 @@
 import type { ApiClient } from '../http/client.js';
 import type { Paginated } from './paging.js';
 import type { NamedRef } from './profile.js';
-import { type UserSession, withUserSession } from './user-session.js';
+import { type UserSession, withUserSession, withUserSessionIfAvailable } from './user-session.js';
 
 /**
  * Roles — ported from frontend `features/role-base-access/services/admin/roles.service.ts` with the
@@ -11,8 +11,9 @@ import { type UserSession, withUserSession } from './user-session.js';
  * role can't grant more than its author holds). A role of an organization the caller can't read
  * answers 404.
  *
- * Reads accept the personal API key; writes — the dry-run delete included, DELETE is not a safe
- * method — carry the user-session bearer from {@link UserSession}.
+ * Reads accept the personal API key, but it sees only its own organization: reads use the
+ * user-session bearer from {@link UserSession} when there is a session. Writes — the dry-run delete
+ * included, DELETE is not a safe method — always do.
  */
 
 export interface RolePermission {
@@ -79,19 +80,22 @@ export class AdminRolesApi {
   ) {}
 
   async list(params: ListRolesParams = {}): Promise<RolesListResponse> {
-    return this.client.get<RolesListResponse>('admin/roles/', {
-      query: {
-        org_ids: params.org_ids?.length ? params.org_ids.join(',') : undefined,
-        assignable_org_ids: params.assignable_org_ids?.length ? params.assignable_org_ids.join(',') : undefined,
-        search: params.search,
-        page: params.page,
-        page_size: params.page_size,
-      },
-    });
+    return withUserSessionIfAvailable(this.session, (bearerToken) =>
+      this.client.get<RolesListResponse>('admin/roles/', {
+        bearerToken,
+        query: {
+          org_ids: params.org_ids?.length ? params.org_ids.join(',') : undefined,
+          assignable_org_ids: params.assignable_org_ids?.length ? params.assignable_org_ids.join(',') : undefined,
+          search: params.search,
+          page: params.page,
+          page_size: params.page_size,
+        },
+      }),
+    );
   }
 
   async get(roleId: number): Promise<RoleDto> {
-    return this.client.get<RoleDto>(`admin/roles/${roleId}/`);
+    return withUserSessionIfAvailable(this.session, (bearerToken) => this.client.get<RoleDto>(`admin/roles/${roleId}/`, { bearerToken }));
   }
 
   async create(request: CreateRoleRequest): Promise<RoleDto> {

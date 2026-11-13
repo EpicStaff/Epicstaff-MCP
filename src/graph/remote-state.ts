@@ -29,9 +29,11 @@ import type { GraphDto } from '../models/graph.js';
 import type { AgentNodeDto, AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import {
   normalizeCdtSectionColor,
+  systemOnePromptFields,
   type ClassificationDecisionTableNodeDto,
 } from '../models/nodes/classification-decision-table-node.js';
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
+import type { NoteLinkedRegion } from '../models/nodes/note-node.js';
 import type { CustomPythonCode, DeclaredSecretRef, GetPythonCodeDto } from '../models/nodes/python-node.js';
 import type { ScheduleTriggerNodeDto } from '../models/nodes/schedule-trigger-node.js';
 import type {
@@ -200,6 +202,7 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
       output_schema: config.output_schema,
       result_variable: config.result_variable,
       variable_mappings: config.variable_mappings,
+      ...systemOnePromptFields(config),
     };
   }
 
@@ -225,6 +228,9 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
     next_error_node: uuidOf(dto.next_error_node_id),
     pre_computation: {
       code: dto.pre_python_code?.code ?? '',
+      ...(dto.pre_python_code
+        ? { entrypoint: dto.pre_python_code.entrypoint, global_kwargs: dto.pre_python_code.global_kwargs }
+        : {}),
       input_map: dto.pre_input_map ?? {},
       output_variable_path: dto.pre_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.pre_python_code?.secrets),
@@ -234,6 +240,9 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
     },
     post_computation: {
       code: dto.post_python_code?.code ?? '',
+      ...(dto.post_python_code
+        ? { entrypoint: dto.post_python_code.entrypoint, global_kwargs: dto.post_python_code.global_kwargs }
+        : {}),
       input_map: dto.post_input_map ?? {},
       output_variable_path: dto.post_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.post_python_code?.secrets),
@@ -423,12 +432,16 @@ export function buildRemoteState(dto: GraphDto): GraphState {
     ...(dto.graph_note_list ?? []).map((node): GraphNode => {
       const metadata = (node.metadata ?? {}) as Record<string, unknown>;
       const backgroundColor = typeof metadata['backgroundColor'] === 'string' ? metadata['backgroundColor'] : undefined;
+      const fontSize = typeof metadata['fontSize'] === 'number' ? metadata['fontSize'] : undefined;
+      const linkedRegion = (metadata['linkedRegion'] ?? undefined) as NoteLinkedRegion | undefined;
       return {
         ...baseNode('note', node),
         type: 'note',
         data: {
           content: node.content,
           ...(backgroundColor !== undefined ? { backgroundColor } : {}),
+          ...(fontSize !== undefined ? { fontSize } : {}),
+          ...(linkedRegion !== undefined ? { linkedRegion } : {}),
         },
       };
     }),
