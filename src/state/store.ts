@@ -63,11 +63,19 @@ export class StateStore {
   }
 
   update(patch: Partial<Omit<PersistedState, 'baseUrl' | 'email'>>): PersistedState {
-    // Several MCP processes share this file: keep keys another one minted since we loaded, unless
-    // this patch dropped them — a lost key stays active server-side and eats the per-org key limit.
-    const dropped = patch.apiKeys ? Object.keys(this.state.apiKeys).filter((org) => !(org in patch.apiKeys!)) : [];
-    const apiKeys = { ...this.readDiskApiKeys(), ...this.state.apiKeys, ...patch.apiKeys };
-    for (const org of dropped) delete apiKeys[org];
+    // Several MCP processes share this file: a key another one stored meanwhile wins over our stale
+    // copy and survives our drop of the old key — a lost key stays active server-side and eats the
+    // per-org key limit. Only the entries this patch actually changes overwrite the file.
+    const disk = this.readDiskApiKeys();
+    const apiKeys = { ...this.state.apiKeys, ...disk };
+    if (patch.apiKeys) {
+      for (const [org, held] of Object.entries(this.state.apiKeys)) {
+        if (!(org in patch.apiKeys) && (!(org in disk) || disk[org]!.key === held.key)) delete apiKeys[org];
+      }
+      for (const [org, held] of Object.entries(patch.apiKeys)) {
+        if (held.key !== this.state.apiKeys[org]?.key) apiKeys[org] = held;
+      }
+    }
     this.state = { ...this.state, ...patch, apiKeys };
     this.persist();
     return this.state;

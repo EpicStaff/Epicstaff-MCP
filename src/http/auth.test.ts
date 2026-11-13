@@ -366,6 +366,7 @@ describe('auth bootstrap + org resolution', () => {
     await auth.ensureAuthenticated();
     expect(store.get().jwtOnly).toBe(false);
     expect(store.get().apiKeys).toHaveProperty('1');
+    expect(store.get().activeOrgId).toBeNull(); // the deleted org is no longer selected
   });
 
   it('a 401 for a credential that was replaced meanwhile does not drop the current key', async () => {
@@ -392,6 +393,17 @@ describe('auth bootstrap + org resolution', () => {
     expect(Object.keys(store.get().apiKeys).sort()).toEqual(['1', '2']);
     store.update({ apiKeys: { 2: { key: 'k2', prefix: 'k2' } } }); // this process drops org 1's key
     expect(Object.keys(store.get().apiKeys)).toEqual(['2']);
+  });
+
+  it('dropping a stale key never erases the replacement another MCP process stored', async () => {
+    const { store: a } = makeServices();
+    a.update({ apiKeys: { 1: { key: 'kA', prefix: 'kA' } } });
+    const { store: b } = makeServices(); // loads kA too
+    b.update({ apiKeys: { 1: { key: 'kB', prefix: 'kB' } } }); // B re-minted after a 401
+    a.update({ apiKeys: {} }); // A, still holding kA, drops its rejected key
+    expect(makeServices().store.get().apiKeys[1]?.key).toBe('kB');
+    a.update({ activeOrgId: 1 }); // an unrelated write from A must not put kA back either
+    expect(makeServices().store.get().apiKeys[1]?.key).toBe('kB');
   });
 
   it('re-mints normally when the previous mint is older than the loop window', async () => {

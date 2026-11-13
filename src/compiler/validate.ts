@@ -64,9 +64,11 @@ function validateTemplates(source: FlowSource, diagnostics: Diagnostic[]): void 
   for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
     const nodePath = `flow.nodes.${nodeName}`;
     if (node.type === 'task') {
-      // Both are sent as the task node's instructions.
-      check(`${nodePath}.task`, node.task);
-      check(`${nodePath}.expected_output`, node.expected_output);
+      // Checked as the one instructions text emit.ts sends (task + expected output), as EpicStaff does.
+      check(
+        `${nodePath}.task`,
+        node.expected_output !== undefined ? `${node.task}\n\nExpected output: ${node.expected_output}` : node.task,
+      );
     } else if (node.type === 'agent') {
       node.tasks.forEach((task, index) => check(`${nodePath}.tasks[${index}].instructions`, task.instructions));
     } else if (node.type === 'knowledge-retriever') {

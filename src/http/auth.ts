@@ -214,8 +214,9 @@ export class AuthService implements UserSession {
       return this.bootstrapPromise;
     }
     // Drop only the rejected credential — the one the client sent. If the credential changed while
-    // the request was in flight (org switch, parallel re-mint), the current one is not at fault.
-    const state = this.store.get();
+    // the request was in flight (org switch, a re-mint here or in another MCP process), the current
+    // one is not at fault.
+    const state = this.store.reloadApiKeys();
     if (state.activeOrgId !== null && activeApiKey(state)?.key === sent) {
       this.setOrgKey(state.activeOrgId, null);
     } else if (state.bearerAccessToken === sent) {
@@ -388,30 +389,38 @@ export class AuthService implements UserSession {
    */
   private async establishCredential(orgId: number): Promise<string> {
     const storedAccess = this.store.get().bearerAccessToken;
-    const access = await this.accessToken();
+    const access = await this.accessToken(); // login / refresh errors propagate: they are not mint failures
     try {
       this.assertNotRemintLoop(orgId);
-      try {
-        return await this.mintWith(access, orgId);
-      } catch (error) {
-        // A stored access token can be revoked server-side before its `exp` (logout elsewhere).
-        // Drop it and renew once — refresh cookie, else login — then retry the mint.
-        if (error instanceof ApiError && error.status === 401 && access === storedAccess) {
-          logger.info('Stored access token was rejected while minting — renewing the session');
-          this.store.update({ bearerAccessToken: null });
-          return await this.mintWith(await this.renewAccessToken(), orgId);
-        }
-        throw error;
-      }
+      return await this.mintWith(access, orgId);
     } catch (error) {
-      // No key for this org (e.g. its 5-active-key limit is reached). The JWT with X-Organization-Id
-      // acts in the same org, so keep working instead of locking every tool — set_active_organization
-      // and revoke_my_api_key included.
-      logger.warn(
-        `Could not get an API key for organization ${orgId} (${error instanceof Error ? error.message : String(error)}) — using the signed-in session instead`,
-      );
-      return this.accessToken();
+      // A stored access token can be revoked server-side before its `exp` (logout elsewhere).
+      // Drop it and renew once — refresh cookie, else login — then retry the mint.
+      if (error instanceof ApiError && error.status === 401 && access === storedAccess) {
+        logger.info('Stored access token was rejected while minting — renewing the session');
+        this.store.update({ bearerAccessToken: null });
+        const renewed = await this.renewAccessToken();
+        return this.mintWith(renewed, orgId).catch((retryError: unknown) => this.useSessionInstead(orgId, retryError));
+      }
+      return this.useSessionInstead(orgId, error);
     }
+  }
+
+  /**
+   * No key for this org (e.g. its 5-active-key limit is reached, or the loop guard). The JWT with
+   * X-Organization-Id acts in the same org, so keep working instead of locking every tool —
+   * set_active_organization and revoke_my_api_key included.
+   */
+  private async useSessionInstead(orgId: number, error: unknown): Promise<string> {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (error instanceof ApiError && error.bodyExcerpt?.includes('organization_not_found')) {
+      // The selected organization was deleted: drop the selection so tools ask for a new one.
+      logger.warn(`Organization ${orgId} no longer exists — clearing the active organization`);
+      this.store.update({ activeOrgId: null });
+    } else {
+      logger.warn(`Could not get an API key for organization ${orgId} (${reason}) — using the signed-in session instead`);
+    }
+    return this.accessToken();
   }
 
   private assertNotRemintLoop(orgId: number): void {

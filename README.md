@@ -288,7 +288,8 @@ placeholder are reads).
 | read produced by no node anywhere and not declared (a typo) | **error** |
 | read produced somewhere, but not on a path that reaches the reader | **warning** |
 | read produced on ≥1 reaching path, or declared in `variables:` | ok |
-| `variables.shared[…]`, a `\|default` suffix, or `input_map: "__all__"` | ok, unchecked |
+| `variables.shared[…]` or a `\|default` suffix | ok, unchecked |
+| a path segment starting with `_` (incl. an `input_map` value `"__all__"`) | **error** (EpicStaff 1.5 refuses it on save) |
 
 To silence a read that's only set on *some* branches, declare it with a default
 (`variables: { escalation_id: { default: "" } }`) — it's then seeded everywhere.
