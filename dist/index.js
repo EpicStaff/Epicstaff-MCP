@@ -28509,6 +28509,12 @@ function loadConfig(env = process.env) {
   };
 }
 
+// src/state/store.ts
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 // src/util/logger.ts
 function write(level, message, detail) {
   const line = `[es-mcp] ${level.toUpperCase()} ${message}`;
@@ -28527,6 +28533,114 @@ var logger = {
   warn: (message, detail) => write("warn", message, detail),
   error: (message, detail) => write("error", message, detail)
 };
+
+// src/state/store.ts
+var heldApiKeySchema = external_exports.object({ key: external_exports.string(), prefix: external_exports.string() });
+var stateSchema = external_exports.object({
+  baseUrl: external_exports.string(),
+  email: external_exports.string(),
+  /**
+   * The API key this server holds per organization id. EpicStaff binds a user API key to one
+   * organization and acts in it whatever X-Organization-Id says, so the client sends the key of the
+   * active organization. A state file of an older version holds a single `apiKey` instead; it is
+   * dropped on load (EpicStaff deleted those unbound keys when it introduced the binding).
+   */
+  apiKeys: external_exports.record(external_exports.string(), heldApiKeySchema).default({}),
+  /**
+   * The user's JWT session (login access token + refresh token). Used as the request
+   * scheme only when `jwtOnly` is set (a legacy backend without API-key minting); on
+   * current backends it is kept next to the API keys for the JWT-only routes an API key may
+   * not call (`secrets/`), and authenticates requests while no organization is chosen (no key
+   * can be minted yet). The client always prefers the active organization's API key.
+   */
+  bearerAccessToken: external_exports.string().nullable(),
+  bearerRefreshToken: external_exports.string().nullable(),
+  /** The backend has no API-key minting route — authenticate every request with the JWT. */
+  jwtOnly: external_exports.boolean().default(false),
+  activeOrgId: external_exports.number().nullable()
+});
+function activeApiKey(state) {
+  return state.activeOrgId === null ? void 0 : state.apiKeys[state.activeOrgId];
+}
+function stateDir() {
+  return process.env.ES_MCP_STATE_DIR ?? join(homedir(), ".es_mcp");
+}
+var StateStore = class {
+  filePath;
+  state;
+  constructor(baseUrl, email2) {
+    this.filePath = join(stateDir(), stateFileName(baseUrl, email2));
+    this.state = this.loadOrInit(baseUrl, email2);
+  }
+  get() {
+    return this.state;
+  }
+  update(patch) {
+    const disk = this.readDiskApiKeys();
+    const apiKeys = { ...this.state.apiKeys, ...disk };
+    if (patch.apiKeys) {
+      for (const [org, held] of Object.entries(this.state.apiKeys)) {
+        if (!(org in patch.apiKeys) && (!(org in disk) || disk[org].key === held.key)) delete apiKeys[org];
+      }
+      for (const [org, held] of Object.entries(patch.apiKeys)) {
+        if (held.key !== this.state.apiKeys[org]?.key) apiKeys[org] = held;
+      }
+    }
+    this.state = { ...this.state, ...patch, apiKeys };
+    this.persist();
+    return this.state;
+  }
+  /** Pick up keys other MCP processes persisted since this one loaded (theirs win: newer). */
+  reloadApiKeys() {
+    this.state = { ...this.state, apiKeys: { ...this.state.apiKeys, ...this.readDiskApiKeys() } };
+    return this.state;
+  }
+  readDiskApiKeys() {
+    if (!existsSync(this.filePath)) return {};
+    try {
+      const parsed = stateSchema.safeParse(JSON.parse(readFileSync(this.filePath, "utf8")));
+      return parsed.success && parsed.data.baseUrl === this.state.baseUrl && parsed.data.email === this.state.email ? parsed.data.apiKeys : {};
+    } catch {
+      return {};
+    }
+  }
+  loadOrInit(baseUrl, email2) {
+    const empty = {
+      baseUrl,
+      email: email2,
+      apiKeys: {},
+      bearerAccessToken: null,
+      bearerRefreshToken: null,
+      jwtOnly: false,
+      activeOrgId: null
+    };
+    if (!existsSync(this.filePath)) {
+      return empty;
+    }
+    try {
+      const parsed = stateSchema.safeParse(JSON.parse(readFileSync(this.filePath, "utf8")));
+      if (parsed.success && parsed.data.baseUrl === baseUrl && parsed.data.email === email2) {
+        return parsed.data;
+      }
+      logger.warn("State file did not match current config; starting fresh", { file: this.filePath });
+      return empty;
+    } catch (error2) {
+      logger.warn("Failed to read state file; starting fresh", error2);
+      return empty;
+    }
+  }
+  persist() {
+    mkdirSync(stateDir(), { recursive: true, mode: 448 });
+    writeFileSync(this.filePath, `${JSON.stringify(this.state, null, 2)}
+`, { mode: 384 });
+    chmodSync(this.filePath, 384);
+  }
+};
+function stateFileName(baseUrl, email2) {
+  const host = new URL(baseUrl).host.replace(/[^a-zA-Z0-9.-]/g, "_");
+  const emailHash = createHash("sha256").update(email2).digest("hex").slice(0, 12);
+  return `${host}-${emailHash}.json`;
+}
 
 // src/http/errors.ts
 var ApiError = class extends Error {
@@ -28652,7 +28766,8 @@ var EpicStaffClient = class {
     const isAuthEndpoint = /\/api\/auth\//.test(url);
     if (response.status === 401 && !isAuthEndpoint && !options.skipAuth && !options.bearerToken && !isRetry && this.reauthenticate) {
       logger.info("Got 401 \u2014 re-authenticating and retrying once");
-      await this.reauthenticate();
+      const sent = headers.get("X-Api-Key") ?? headers.get("Authorization")?.replace(/^Bearer /, "") ?? null;
+      await this.reauthenticate(sent);
       return this.request(method, path6, options, true);
     }
     if (!response.ok) {
@@ -28687,12 +28802,15 @@ var EpicStaffClient = class {
     const headers = new Headers();
     if (options.bearerToken) {
       headers.set("Authorization", `Bearer ${options.bearerToken}`);
+    } else if (options.apiKey) {
+      headers.set("X-Api-Key", options.apiKey);
     } else if (!options.skipAuth) {
-      const { apiKey, bearerAccessToken } = this.store.get();
-      if (apiKey) {
-        headers.set("X-Api-Key", apiKey);
-      } else if (bearerAccessToken && this.store.get().jwtOnly) {
-        headers.set("Authorization", `Bearer ${bearerAccessToken}`);
+      const state = this.store.get();
+      const held = activeApiKey(state);
+      if (held) {
+        headers.set("X-Api-Key", held.key);
+      } else if (state.bearerAccessToken) {
+        headers.set("Authorization", `Bearer ${state.bearerAccessToken}`);
       }
     }
     if (options.cookies) {
@@ -28713,6 +28831,83 @@ var EpicStaffClient = class {
 
 // src/http/auth.ts
 import { hostname as hostname2 } from "node:os";
+
+// src/api/user-session.ts
+async function withUserSession(session, call) {
+  try {
+    return await call(await session.accessToken());
+  } catch (error2) {
+    if (error2 instanceof ApiError && error2.status === 401) {
+      return call(await session.renewAccessToken());
+    }
+    throw error2;
+  }
+}
+async function withUserSessionIfAvailable(session, call) {
+  return session.hasUserSession() ? withUserSession(session, call) : call(void 0);
+}
+
+// src/api/profile.ts
+var API_KEY_MAX_EXPIRES_IN_DAYS = 3650;
+var API_KEY_PREFIX_LENGTH = 12;
+function apiKeyPrefix(rawKey) {
+  return rawKey.slice(0, API_KEY_PREFIX_LENGTH);
+}
+var ProfileApi = class {
+  constructor(client, session) {
+    this.client = client;
+    this.session = session;
+  }
+  client;
+  session;
+  async getProfile() {
+    return withUserSessionIfAvailable(this.session, (bearerToken) => this.client.get("profile/", { bearerToken }));
+  }
+  async updateProfile(changes) {
+    return this.client.patch("profile/", { body: changes });
+  }
+  /** Effective permissions in the active organization (X-Organization-Id). */
+  async getActivePermissions() {
+    return this.client.get("permissions/me/");
+  }
+  /** Effective permissions in every organization the user belongs to. */
+  async getOrgPermissions() {
+    return withUserSessionIfAvailable(
+      this.session,
+      (bearerToken) => this.client.get("permissions/me/orgs/", { bearerToken })
+    );
+  }
+  async getPermissionCatalog() {
+    return this.client.get("permissions/catalog/");
+  }
+  async listApiKeys() {
+    return withUserSession(this.session, (bearerToken) => this.client.get("profile/api-keys/", { bearerToken }));
+  }
+  /**
+   * Mint a personal API key, bound to organization `orgId` (it works only there). The response
+   * holds the raw key exactly once — callers must hand it to its destination immediately and
+   * never log or return it.
+   */
+  async createApiKey(name, orgId, expiresInDays) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post("profile/api-keys/", {
+        bearerToken,
+        // Omitting expires_in_days selects the backend's 90-day default; null means "never expires".
+        body: { name, org_id: orgId, ...expiresInDays !== void 0 ? { expires_in_days: expiresInDays } : {} }
+      })
+    );
+  }
+  /** Retire a key: it stops authenticating at once and stays listed as `revoked`. */
+  async revokeApiKey(id) {
+    return withUserSession(
+      this.session,
+      (bearerToken) => this.client.post(`profile/api-keys/${id}/revoke/`, { bearerToken, body: {} })
+    );
+  }
+};
+
+// src/http/auth.ts
 var REFRESH_COOKIE_NAMES = ["__Host-auth.refresh", "auth.refresh"];
 var MIN_REMINT_INTERVAL_MS = 6e4;
 var ACCESS_TOKEN_EXPIRY_MARGIN_SECONDS = 30;
@@ -28749,15 +28944,29 @@ var AuthService = class {
     this.config = config2;
     this.store = store;
     this.client = client;
-    client.onUnauthorized(() => this.forceRemint());
+    client.onUnauthorized((sent) => this.forceRemint(sent));
   }
   config;
   store;
   client;
   bootstrapPromise = null;
   sessionPromise = null;
-  /** When this process last minted an API key (loop guard, see MIN_REMINT_INTERVAL_MS). */
-  lastMintAt = null;
+  /** When this process last minted an API key, per organization (loop guard, see MIN_REMINT_INTERVAL_MS). */
+  lastMintAt = /* @__PURE__ */ new Map();
+  /** Installed by org.ts — settles the active organization before a key is minted for it. */
+  resolveOrgContext = null;
+  /**
+   * The organization EPICSTAFF_API_TOKEN is bound to when it is the only credential: the server
+   * can act nowhere else (set_active_organization refuses other organizations).
+   */
+  pinnedOrgId = null;
+  onOrgContextNeeded(handler) {
+    this.resolveOrgContext = handler;
+  }
+  /** {@link UserSession}: login credentials are configured, so a JWT session can be opened. */
+  hasUserSession() {
+    return this.config.email !== void 0 && this.config.password !== void 0;
+  }
   /** Ensure a working credential exists; validate/refresh the stored one or establish fresh. */
   async ensureAuthenticated() {
     if (this.bootstrapPromise) {
@@ -28804,62 +29013,94 @@ var AuthService = class {
     this.store.update({ bearerAccessToken: session.access, bearerRefreshToken: session.refresh });
     return session.access;
   }
-  async forceRemint() {
+  async forceRemint(sent) {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
     }
-    if (this.store.get().jwtOnly) {
+    const state = this.store.reloadApiKeys();
+    if (state.activeOrgId !== null && activeApiKey(state)?.key === sent) {
+      this.setOrgKey(state.activeOrgId, null);
+    } else if (state.bearerAccessToken === sent) {
       this.store.update({ bearerAccessToken: null });
-    } else {
-      this.store.update({ apiKey: null, keyPrefix: null });
     }
     return this.ensureAuthenticated();
   }
   async bootstrap() {
     if (this.config.apiToken !== void 0) {
-      return this.useProvidedToken(this.config.apiToken);
+      const token = await this.useProvidedToken(this.config.apiToken);
+      if (token !== null) return token;
     }
-    const { apiKey, bearerRefreshToken, jwtOnly } = this.store.get();
-    if (apiKey && await this.isKeyValid()) {
-      return apiKey;
-    }
-    if (jwtOnly && !apiKey && bearerRefreshToken) {
-      const refreshed = await this.refreshSession(bearerRefreshToken);
+    let state = this.store.reloadApiKeys();
+    if (state.jwtOnly && state.bearerRefreshToken) {
+      const refreshed = await this.refreshSession(state.bearerRefreshToken);
       if (refreshed !== null) return refreshed;
     }
-    return this.establishCredential();
+    if (!activeApiKey(state)) {
+      await this.resolveOrgContext?.();
+      state = this.store.get();
+    }
+    const held = activeApiKey(state);
+    if (held && await this.validate(held.key) !== null) {
+      return held.key;
+    }
+    if (state.activeOrgId === null) {
+      return this.accessToken();
+    }
+    return this.establishCredential(state.activeOrgId);
   }
   /**
-   * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the
-   * pre-issued key directly. Seeded into the store so the client attaches it
-   * as X-Api-Key like any minted key. Falls back to credential login only
-   * when the token is rejected AND credentials are configured.
+   * EPICSTAFF_API_TOKEN path (the original plugin's contract): use the pre-issued key directly,
+   * held as the key of the organization auth/api-key/validate/ names. As the only credential it
+   * pins the server to that organization. Next to login credentials it serves its own organization
+   * and the credential flow takes over elsewhere — or everywhere, when the token is rejected.
+   * Returns null when the credential flow should continue.
    */
   async useProvidedToken(token) {
-    this.store.update({ apiKey: token, keyPrefix: token.slice(0, 8), jwtOnly: false });
-    if (await this.isKeyValid()) {
-      return token;
+    const validated = await this.validate(token);
+    if (this.hasUserSession()) {
+      if (validated === null) {
+        logger.info("EPICSTAFF_API_TOKEN was rejected \u2014 falling back to credential login");
+        return null;
+      }
+      if (typeof validated.org_id === "number") {
+        this.setOrgKey(validated.org_id, token);
+        if (this.store.get().activeOrgId === null) this.store.update({ activeOrgId: validated.org_id });
+      }
+      return activeApiKey(this.store.get())?.key === token ? token : null;
     }
-    this.store.update({ apiKey: null, keyPrefix: null });
-    if (this.config.email !== void 0 && this.config.password !== void 0) {
-      logger.info("EPICSTAFF_API_TOKEN was rejected \u2014 falling back to credential login");
-      return this.establishCredential();
+    if (validated === null) {
+      throw new Error(
+        "EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted."
+      );
     }
-    throw new Error(
-      "EPICSTAFF_API_TOKEN was rejected by the server. Provide a valid token, or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so a fresh key can be minted."
-    );
+    if (typeof validated.org_id !== "number") {
+      throw new Error(
+        "EPICSTAFF_API_TOKEN is not bound to an organization (the system key?). Use a personal API key (EpicStaff \u2192 Profile \u2192 API keys), or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD instead."
+      );
+    }
+    this.pinnedOrgId = validated.org_id;
+    this.setOrgKey(validated.org_id, token);
+    this.store.update({ activeOrgId: validated.org_id, jwtOnly: false });
+    return token;
   }
-  async isKeyValid() {
+  /** `key`'s details from auth/api-key/validate/, or null when the server rejects it. */
+  async validate(key) {
     try {
-      await this.client.get("auth/api-key/validate/");
-      return true;
+      return await this.client.get("auth/api-key/validate/", { apiKey: key });
     } catch (error2) {
       if (error2 instanceof ApiError && (error2.status === 401 || error2.status === 403)) {
-        logger.info("Stored API key is no longer valid \u2014 re-minting");
-        return false;
+        logger.info(`API key ${apiKeyPrefix(key)}\u2026 is no longer valid`);
+        return null;
       }
       throw error2;
     }
+  }
+  /** Hold `key` as `orgId`'s API key, or drop that organization's key (null). */
+  setOrgKey(orgId, key) {
+    const apiKeys = { ...this.store.get().apiKeys };
+    if (key === null) delete apiKeys[orgId];
+    else apiKeys[orgId] = { key, prefix: apiKeyPrefix(key) };
+    this.store.update({ apiKeys });
   }
   /**
    * Exchange the refresh token for a new access token (POST auth/refresh/). Current
@@ -28931,61 +29172,73 @@ var AuthService = class {
     return { access: tokens.access, refresh: refreshCookie ?? tokens.refresh ?? null };
   }
   /**
-   * Mint a dedicated API key with the user's JWT session. The session comes from the store
-   * when possible (unexpired access token, else a cookie refresh) — a login happens only when
+   * Mint a dedicated API key for `orgId` with the user's JWT session. The session comes from the
+   * store when possible (unexpired access token, else a cookie refresh) — a login happens only when
    * neither works, because LoginThrottle allows just a handful per minute.
    */
-  async establishCredential() {
-    this.assertNotRemintLoop();
+  async establishCredential(orgId) {
     const storedAccess = this.store.get().bearerAccessToken;
     const access = await this.accessToken();
     try {
-      return await this.mintWith(access);
+      this.assertNotRemintLoop(orgId);
+      return await this.mintWith(access, orgId);
     } catch (error2) {
       if (error2 instanceof ApiError && error2.status === 401 && access === storedAccess) {
         logger.info("Stored access token was rejected while minting \u2014 renewing the session");
         this.store.update({ bearerAccessToken: null });
-        return this.mintWith(await this.renewAccessToken());
+        const renewed = await this.renewAccessToken();
+        return this.mintWith(renewed, orgId).catch((retryError) => this.useSessionInstead(orgId, retryError));
       }
-      throw error2;
+      return this.useSessionInstead(orgId, error2);
     }
   }
-  assertNotRemintLoop() {
-    if (this.lastMintAt === null) return;
-    const ageMs = Date.now() - this.lastMintAt;
+  /**
+   * No key for this org (e.g. its 5-active-key limit is reached, or the loop guard). The JWT with
+   * X-Organization-Id acts in the same org, so keep working instead of locking every tool —
+   * set_active_organization and revoke_my_api_key included.
+   */
+  async useSessionInstead(orgId, error2) {
+    const reason = error2 instanceof Error ? error2.message : String(error2);
+    if (error2 instanceof ApiError && error2.bodyExcerpt?.includes("organization_not_found")) {
+      logger.warn(`Organization ${orgId} no longer exists \u2014 clearing the active organization`);
+      this.store.update({ activeOrgId: null });
+    } else {
+      logger.warn(`Could not get an API key for organization ${orgId} (${reason}) \u2014 using the signed-in session instead`);
+    }
+    return this.accessToken();
+  }
+  assertNotRemintLoop(orgId) {
+    const lastMintAt = this.lastMintAt.get(orgId);
+    if (lastMintAt === void 0) return;
+    const ageMs = Date.now() - lastMintAt;
     if (ageMs < MIN_REMINT_INTERVAL_MS) {
       throw new Error(
         `The API key this server minted ${Math.round(ageMs / 1e3)}s ago was rejected right away \u2014 not minting another one (that would loop and exhaust the active-key limit). Check the EpicStaff API-key settings, the server clock, and any proxy that might strip the X-Api-Key header, then call check_connection again.`
       );
     }
   }
-  async mintWith(access) {
-    const { bearerRefreshToken } = this.store.get();
+  async mintWith(access, orgId) {
     try {
       const minted = await this.client.post("profile/api-keys/", {
         bearerToken: access,
-        body: { name: `es-mcp (${hostname2()})` }
+        body: { name: `es-mcp (${hostname2()})`, org_id: orgId }
       });
-      this.lastMintAt = Date.now();
+      this.lastMintAt.set(orgId, Date.now());
       this.store.update({
-        apiKey: minted.api_key,
-        keyPrefix: minted.prefix,
+        apiKeys: { ...this.store.get().apiKeys, [orgId]: { key: minted.api_key, prefix: minted.prefix } },
         bearerAccessToken: access,
-        bearerRefreshToken,
         jwtOnly: false
       });
-      logger.info(`Minted API key ${minted.prefix}\u2026 and persisted it`);
+      logger.info(`Minted API key ${minted.prefix}\u2026 for organization ${orgId} and persisted it`);
       return minted.api_key;
     } catch (error2) {
-      if (!(error2 instanceof ApiError && error2.status === 404)) {
+      if (!(error2 instanceof ApiError && error2.status === 404) || error2.bodyExcerpt?.includes("organization_not_found")) {
         throw error2;
       }
       logger.info("profile/api-keys/ not found \u2014 this backend has no API-key system; using JWT bearer auth instead");
       this.store.update({
-        apiKey: null,
-        keyPrefix: null,
+        apiKeys: {},
         bearerAccessToken: access,
-        bearerRefreshToken,
         jwtOnly: true
       });
       return access;
@@ -28995,13 +29248,16 @@ var AuthService = class {
 
 // src/http/org.ts
 var OrgService = class {
-  constructor(store, client) {
+  constructor(store, client, auth) {
     this.store = store;
     this.client = client;
+    this.auth = auth;
     client.onOrgContextNeeded(() => this.ensureResolved());
+    auth.onOrgContextNeeded(() => this.ensureResolved());
   }
   store;
   client;
+  auth;
   /** Set once the persisted selection was validated against the profile in this process. */
   resolved = false;
   resolvePromise = null;
@@ -29026,7 +29282,10 @@ var OrgService = class {
     return this.resolvePromise;
   }
   async resolve() {
-    const profile = await this.client.get("profile/");
+    const profile = await withUserSessionIfAvailable(
+      this.auth,
+      (bearerToken) => this.client.get("profile/", { bearerToken })
+    );
     const organizations = (profile.memberships ?? []).map((membership) => membership.organization).filter((org) => org?.id !== void 0).map((org) => ({
       id: org.id,
       name: org.name ?? `organization ${org.id}`,
@@ -29051,6 +29310,12 @@ var OrgService = class {
     };
   }
   async setActive(orgId) {
+    const pinned = this.auth.pinnedOrgId;
+    if (pinned !== null && orgId !== pinned) {
+      throw new Error(
+        `EPICSTAFF_API_TOKEN belongs to organization ${pinned} and works only there \u2014 EpicStaff binds every API key to one organization. To work in organization ${orgId}, configure an API key created in it, or set EPICSTAFF_USERNAME + EPICSTAFF_PASSWORD so the server mints a key per organization.`
+      );
+    }
     const status = await this.resolve();
     const match = status.organizations.find((org) => org.id === orgId);
     if (!match) {
@@ -29076,91 +29341,12 @@ var OrgService = class {
   }
 };
 
-// src/state/store.ts
-import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-var stateSchema = external_exports.object({
-  baseUrl: external_exports.string(),
-  email: external_exports.string(),
-  apiKey: external_exports.string().nullable(),
-  keyPrefix: external_exports.string().nullable(),
-  /**
-   * The user's JWT session (login access token + refresh token). Used as the request
-   * scheme only when `jwtOnly` is set (a legacy backend without API-key minting); on
-   * current backends it is kept next to the API key solely for the JWT-only routes an
-   * API key may not call (`secrets/`). The client always prefers `apiKey`.
-   */
-  bearerAccessToken: external_exports.string().nullable(),
-  bearerRefreshToken: external_exports.string().nullable(),
-  /** The backend has no API-key minting route — authenticate every request with the JWT. */
-  jwtOnly: external_exports.boolean().default(false),
-  activeOrgId: external_exports.number().nullable()
-});
-function stateDir() {
-  return process.env.ES_MCP_STATE_DIR ?? join(homedir(), ".es_mcp");
-}
-var StateStore = class {
-  filePath;
-  state;
-  constructor(baseUrl, email2) {
-    this.filePath = join(stateDir(), stateFileName(baseUrl, email2));
-    this.state = this.loadOrInit(baseUrl, email2);
-  }
-  get() {
-    return this.state;
-  }
-  update(patch) {
-    this.state = { ...this.state, ...patch };
-    this.persist();
-    return this.state;
-  }
-  loadOrInit(baseUrl, email2) {
-    const empty = {
-      baseUrl,
-      email: email2,
-      apiKey: null,
-      keyPrefix: null,
-      bearerAccessToken: null,
-      bearerRefreshToken: null,
-      jwtOnly: false,
-      activeOrgId: null
-    };
-    if (!existsSync(this.filePath)) {
-      return empty;
-    }
-    try {
-      const parsed = stateSchema.safeParse(JSON.parse(readFileSync(this.filePath, "utf8")));
-      if (parsed.success && parsed.data.baseUrl === baseUrl && parsed.data.email === email2) {
-        return parsed.data;
-      }
-      logger.warn("State file did not match current config; starting fresh", { file: this.filePath });
-      return empty;
-    } catch (error2) {
-      logger.warn("Failed to read state file; starting fresh", error2);
-      return empty;
-    }
-  }
-  persist() {
-    mkdirSync(stateDir(), { recursive: true, mode: 448 });
-    writeFileSync(this.filePath, `${JSON.stringify(this.state, null, 2)}
-`, { mode: 384 });
-    chmodSync(this.filePath, 384);
-  }
-};
-function stateFileName(baseUrl, email2) {
-  const host = new URL(baseUrl).host.replace(/[^a-zA-Z0-9.-]/g, "_");
-  const emailHash = createHash("sha256").update(email2).digest("hex").slice(0, 12);
-  return `${host}-${emailHash}.json`;
-}
-
 // src/context.ts
 function createContext(config2) {
   const store = new StateStore(config2.apiUrl, config2.email ?? "api-token");
   const client = new EpicStaffClient(config2, store);
   const auth = new AuthService(config2, store, client);
-  const org = new OrgService(store, client);
+  const org = new OrgService(store, client, auth);
   return { config: config2, store, client, auth, org };
 }
 function createUnconfiguredContext(error2) {
@@ -29253,13 +29439,14 @@ function registerAuthOrgTools(server, context) {
     async () => runTool(async () => {
       await context.auth.ensureAuthenticated();
       const orgStatus = await context.org.resolve();
-      const { apiKey, keyPrefix, bearerAccessToken } = context.store.get();
-      const authMode = context.config.apiToken !== void 0 ? "api-token" : apiKey ? "api-key" : bearerAccessToken ? "jwt-bearer" : "unknown";
+      const state = context.store.get();
+      const held = activeApiKey(state);
+      const authMode = context.config.apiToken !== void 0 ? "api-token" : held ? "api-key" : state.bearerAccessToken ? "jwt-bearer" : "unknown";
       return {
         apiUrl: context.config.apiUrl,
         user: context.config.email ?? "api-token",
         authMode,
-        apiKeyPrefix: keyPrefix,
+        apiKeyPrefix: held?.prefix ?? null,
         organizations: orgStatus.organizations,
         activeOrgId: orgStatus.activeOrgId,
         ...orgStatus.selectionRequired && {
@@ -29284,7 +29471,7 @@ function registerAuthOrgTools(server, context) {
     "set_active_organization",
     {
       title: "Set active organization",
-      description: "Select the active organization. All subsequent API calls carry it as X-Organization-Id; flows and entities are created inside it. Required before any create/push when the user has several organizations.",
+      description: "Select the active organization. All subsequent API calls act in it \u2014 with the API key of that organization (EpicStaff binds every key to one organization; the server mints one on first use) and X-Organization-Id; flows and entities are created inside it. Required before any create/push when the user has several organizations. A server configured with EPICSTAFF_API_TOKEN alone is fixed to the organization of that token.",
       inputSchema: {
         organization_id: external_exports.number().int().describe("Organization id from list_organizations")
       }
@@ -29333,6 +29520,13 @@ var AgentDefinitionsApi = class {
   }
   async update(id, request) {
     return this.client.patch(`agent-definitions/${id}/`, { body: request });
+  }
+  /**
+   * Clone an agent together with the surfaces it owns. `name` omitted: the source's name; a taken name gets
+   * the next free " #N" suffix (AgentDefinitionCopyService).
+   */
+  async copy(id, name) {
+    return this.client.post(`agent-definitions/${id}/copy/`, { body: name !== void 0 ? { name } : {} });
   }
   /** Delete an agent definition. Backend responds 204 (AgentDefinitionViewSet ModelViewSet). */
   async delete(id) {
@@ -31075,6 +31269,9 @@ function parseVarPath(rawValue) {
   if (path6 === "") {
     return { error: "empty variable path" };
   }
+  if ((path6.match(TOKEN) ?? []).some((token) => token.startsWith("_"))) {
+    return { error: `Variable path '${path6}' is not allowed: path segments cannot start with '_'.` };
+  }
   if (SHARED.test(path6)) {
     return { raw: rawValue, root: "variables", segments: [], hasDefault, isShared: true };
   }
@@ -31127,7 +31324,6 @@ function validateDataflow(source) {
   return diagnostics;
   function checkReads(reads, readerNode) {
     for (const { at: readPath, path: rawValue } of reads) {
-      if (rawValue === "__all__") continue;
       const parsed = parseVarPath(rawValue);
       if (isVarPathError(parsed)) {
         diagnostics.push(makeError(readPath, parsed.error));
@@ -31396,6 +31592,14 @@ function normalizeCdtSectionColor(color) {
   const match = CDT_SECTION_COLOR_HEXES.find((hex) => hex.toLowerCase() === trimmed.toLowerCase());
   return match ?? trimmed.toUpperCase();
 }
+function systemOnePromptFields(config2) {
+  return {
+    ...config2.kind !== void 0 ? { kind: config2.kind } : {},
+    ...config2.system_one_config !== void 0 ? { system_one_config: config2.system_one_config } : {},
+    ...config2.questions !== void 0 ? { questions: config2.questions } : {},
+    ...config2.input_map !== void 0 ? { input_map: config2.input_map } : {}
+  };
+}
 
 // src/graph/edge-waypoints.ts
 function hasPersistedWaypoints(edge) {
@@ -31411,11 +31615,15 @@ function mergeWaypointsIntoMetadata(existingMetadata, waypoints) {
 
 // src/graph/metadata.ts
 function toNodeMetadata(node) {
+  return { position: node.position };
+}
+function toNoteMetadata(node) {
   return {
-    position: node.position,
-    color: node.color,
-    icon: node.icon,
-    size: node.size
+    ...toNodeMetadata(node),
+    size: node.size,
+    backgroundColor: node.data.backgroundColor ?? null,
+    fontSize: node.data.fontSize ?? null,
+    linkedRegion: node.data.linkedRegion ?? null
   };
 }
 
@@ -31694,7 +31902,7 @@ function toNoteComparable(node) {
   return {
     node_name: node.node_name,
     content: node.data.content,
-    metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null }
+    metadata: toNoteMetadata(node)
   };
 }
 function toKnowledgeRetrieverComparable(node) {
@@ -31755,7 +31963,8 @@ function toCdtComparable(node, allNodes) {
       llm_config: config2.llm_config ?? null,
       output_schema: config2.output_schema ?? null,
       result_variable: config2.result_variable ?? "",
-      variable_mappings: config2.variable_mappings ?? {}
+      variable_mappings: config2.variable_mappings ?? {},
+      ...systemOnePromptFields(config2)
     })),
     default_llm_config: tableData?.default_llm_config ?? null,
     // Divergence: the frontend compares these uuids raw (its two states share uuids). A pushed
@@ -33217,6 +33426,106 @@ async function emitFlow(source, flowDir) {
   return { entities, graph: { nodes, edges }, summary, diagnostics };
 }
 
+// src/compiler/flow-template.ts
+function templateRefusals(template) {
+  const fields = parseFields(template);
+  if (fields === null) return [];
+  const reasons = fields.map(refusalOf).filter((reason) => reason !== null);
+  return [...new Set(reasons)];
+}
+function parseFields(template) {
+  const fields = [];
+  let i = 0;
+  while (i < template.length) {
+    const char = template[i];
+    if (char === "}") {
+      if (template[i + 1] !== "}") return null;
+      i += 2;
+      continue;
+    }
+    if (char !== "{") {
+      i += 1;
+      continue;
+    }
+    if (template[i + 1] === "{") {
+      i += 2;
+      continue;
+    }
+    let depth = 1;
+    let end = i + 1;
+    for (; end < template.length && depth > 0; end++) {
+      if (template[end] === "{") depth += 1;
+      else if (template[end] === "}") depth -= 1;
+    }
+    if (depth > 0) return null;
+    const field = splitField(template.slice(i + 1, end - 1));
+    if (field === null) return null;
+    fields.push(field);
+    i = end;
+  }
+  return fields;
+}
+function splitField(text) {
+  let i = 0;
+  for (; i < text.length; i++) {
+    const char = text[i];
+    if (char === "{") return null;
+    if (char === "[") {
+      while (i < text.length && text[i] !== "]") i++;
+      continue;
+    }
+    if (char === "!" || char === ":") break;
+  }
+  const name = text.slice(0, i);
+  if (text[i] === "!") {
+    if (i + 1 >= text.length) return null;
+    const conversion = text[i + 1];
+    if (i + 2 < text.length && text[i + 2] !== ":") return null;
+    return { name, conversion, spec: text.slice(i + 3) };
+  }
+  return { name, conversion: null, spec: text[i] === ":" ? text.slice(i + 1) : "" };
+}
+var IDENTIFIER = /^[\p{L}\p{Nl}_][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}]*$/u;
+function refusalOf({ name, conversion, spec }) {
+  const headEnd = name.search(/[.[]/);
+  const head = headEnd === -1 ? name : name.slice(0, headEnd);
+  if (head === "" || /^\d+$/.test(head)) return null;
+  const field = name + (conversion !== null ? `!${conversion}` : "") + (spec ? `:${spec}` : "");
+  if (conversion !== null) {
+    return ["r", "s", "a"].includes(conversion) && IDENTIFIER.test(head) ? `Placeholder '{${field}}' is not allowed: conversions such as '!${conversion}' are not supported. Write '{${name}}'.` : null;
+  }
+  if (spec || headEnd === -1) return null;
+  const keys = pathKeys(name.slice(headEnd));
+  if (keys === null) return null;
+  const underscored = [head, ...keys].find((key) => key.startsWith("_"));
+  return underscored === void 0 ? null : `Placeholder '{${field}}' is not allowed: '${underscored}' starts with '_'. Rename that variable or key.`;
+}
+function pathKeys(rest) {
+  const keys = [];
+  let i = 0;
+  while (i < rest.length) {
+    const char = rest[i];
+    let key;
+    if (char === ".") {
+      let end = i + 1;
+      while (end < rest.length && rest[end] !== "." && rest[end] !== "[") end++;
+      key = rest.slice(i + 1, end);
+      i = end;
+    } else if (char === "[") {
+      const end = rest.indexOf("]", i + 1);
+      if (end === -1) return null;
+      key = rest.slice(i + 1, end);
+      i = end + 1;
+      if (i < rest.length && rest[i] !== "." && rest[i] !== "[") return null;
+    } else {
+      return null;
+    }
+    if (key === "") return null;
+    keys.push(key);
+  }
+  return keys;
+}
+
 // src/compiler/validate.ts
 var TRIGGER_NODE_TYPES = /* @__PURE__ */ new Set([
   "start",
@@ -33231,8 +33540,30 @@ function validateFlow(source, resolved) {
   validateTopology(source, diagnostics);
   validateKnowledgeRetrieverNodes(source, diagnostics);
   validateKeyValueNodes(source, diagnostics);
+  validateTemplates(source, diagnostics);
   validateUnusedEntities(source, resolved, diagnostics);
   return diagnostics;
+}
+function validateTemplates(source, diagnostics) {
+  const check2 = (path6, template) => {
+    if (template === void 0) return;
+    for (const reason of templateRefusals(template)) diagnostics.push(makeError(path6, reason));
+  };
+  for (const [nodeName, node] of Object.entries(source.flow.nodes)) {
+    const nodePath = `flow.nodes.${nodeName}`;
+    if (node.type === "task") {
+      check2(
+        `${nodePath}.task`,
+        node.expected_output !== void 0 ? `${node.task}
+
+Expected output: ${node.expected_output}` : node.task
+      );
+    } else if (node.type === "agent") {
+      node.tasks.forEach((task, index) => check2(`${nodePath}.tasks[${index}].instructions`, task.instructions));
+    } else if (node.type === "knowledge-retriever") {
+      check2(`${nodePath}.query`, node.query);
+    }
+  }
 }
 var QUERY_PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 function validateKnowledgeRetrieverNodes(source, diagnostics) {
@@ -34117,12 +34448,8 @@ function buildNodeBody(collected, registry2, names, warnings) {
       }
       return { type: "end", position };
     }
-    case "note": {
-      if (typeof metadataOf(entry.dto)["backgroundColor"] === "string") {
-        warnings.push(`${atPath}: note background color is not representable in flow source and resets on the next push`);
-      }
+    case "note":
       return { type: "note", position, text: entry.dto.content };
-    }
     case "file-extractor":
       return {
         type: "file-extractor",
@@ -34520,15 +34847,17 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
     llm_config: config2.llm_config ?? null,
     output_schema: config2.output_schema ?? {},
     result_variable: config2.result_variable ?? "",
-    variable_mappings: config2.variable_mappings ?? {}
+    variable_mappings: config2.variable_mappings ?? {},
+    // Divergence: the frontend defaults kind to 'llm'; sent only as read, since a wrong kind is a 400.
+    ...systemOnePromptFields(config2)
   }));
   return {
     graph: graphId,
     node_name: node.node_name,
     pre_python_code: isPythonCodeBlockSaved(preCodeValue, preSecretIds) ? {
       code: preCodeValue,
-      entrypoint: "main",
-      global_kwargs: {},
+      entrypoint: preComputation.entrypoint ?? "main",
+      global_kwargs: preComputation.global_kwargs ?? {},
       secret_ids: preSecretIds,
       execution_timeout: preComputation.execution_timeout
     } : null,
@@ -34537,8 +34866,8 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
     pre_use_storage: tableData?.pre_use_storage ?? false,
     post_python_code: isPythonCodeBlockSaved(postCodeValue, postSecretIds) ? {
       code: postCodeValue,
-      entrypoint: "main",
-      global_kwargs: {},
+      entrypoint: postComputation.entrypoint ?? "main",
+      global_kwargs: postComputation.global_kwargs ?? {},
       secret_ids: postSecretIds,
       execution_timeout: postComputation.execution_timeout
     } : null,
@@ -34759,7 +35088,7 @@ function buildBulkSavePayload(options) {
       node_name: node.node_name,
       graph: graphId,
       content: node.data.content,
-      metadata: { ...toNodeMetadata(node), backgroundColor: node.data.backgroundColor ?? null }
+      metadata: toNoteMetadata(node)
     })),
     classification_decision_table_node_list: nodeItems(
       nodeDiff.classificationDecisionTableNodes,
@@ -34906,7 +35235,8 @@ function toCdtTableState(dto, uuidOf) {
       llm_config: config2.llm_config,
       output_schema: config2.output_schema,
       result_variable: config2.result_variable,
-      variable_mappings: config2.variable_mappings
+      variable_mappings: config2.variable_mappings,
+      ...systemOnePromptFields(config2)
     };
   }
   return {
@@ -34931,6 +35261,7 @@ function toCdtTableState(dto, uuidOf) {
     next_error_node: uuidOf(dto.next_error_node_id),
     pre_computation: {
       code: dto.pre_python_code?.code ?? "",
+      ...dto.pre_python_code ? { entrypoint: dto.pre_python_code.entrypoint, global_kwargs: dto.pre_python_code.global_kwargs } : {},
       input_map: dto.pre_input_map ?? {},
       output_variable_path: dto.pre_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.pre_python_code?.secrets),
@@ -34938,6 +35269,7 @@ function toCdtTableState(dto, uuidOf) {
     },
     post_computation: {
       code: dto.post_python_code?.code ?? "",
+      ...dto.post_python_code ? { entrypoint: dto.post_python_code.entrypoint, global_kwargs: dto.post_python_code.global_kwargs } : {},
       input_map: dto.post_input_map ?? {},
       output_variable_path: dto.post_output_variable_path ?? null,
       secret_ids: toSecretIds(dto.post_python_code?.secrets),
@@ -35102,12 +35434,16 @@ function buildRemoteState(dto) {
     ...(dto.graph_note_list ?? []).map((node) => {
       const metadata = node.metadata ?? {};
       const backgroundColor = typeof metadata["backgroundColor"] === "string" ? metadata["backgroundColor"] : void 0;
+      const fontSize = typeof metadata["fontSize"] === "number" ? metadata["fontSize"] : void 0;
+      const linkedRegion = metadata["linkedRegion"] ?? void 0;
       return {
         ...baseNode("note", node),
         type: "note",
         data: {
           content: node.content,
-          ...backgroundColor !== void 0 ? { backgroundColor } : {}
+          ...backgroundColor !== void 0 ? { backgroundColor } : {},
+          ...fontSize !== void 0 ? { fontSize } : {},
+          ...linkedRegion !== void 0 ? { linkedRegion } : {}
         }
       };
     }),
@@ -35278,18 +35614,6 @@ var StorageApi = class {
     return info.id;
   }
 };
-
-// src/api/user-session.ts
-async function withUserSession(session, call) {
-  try {
-    return await call(await session.accessToken());
-  } catch (error2) {
-    if (error2 instanceof ApiError && error2.status === 401) {
-      return call(await session.renewAccessToken());
-    }
-    throw error2;
-  }
-}
 
 // src/api/secrets.ts
 var TAIL_LENGTH = 4;
@@ -36202,6 +36526,10 @@ function inheritUnrepresentableFields(desired, remote) {
       inheritAgentTaskIds(node.data.tasks ?? [], previous.data.tasks ?? []);
     } else if (node.type === "note" && previous.type === "note") {
       previous.node_name = node.node_name;
+      node.size = previous.size;
+      node.data.backgroundColor ??= previous.data.backgroundColor;
+      node.data.fontSize ??= previous.data.fontSize;
+      node.data.linkedRegion ??= previous.data.linkedRegion;
     }
   }
 }
@@ -38014,9 +38342,19 @@ function registerUiTools(server, context) {
       if (!isAbsolute2(output_path)) {
         throw new Error("output_path must be an absolute path to a .html file.");
       }
-      const apiKey = await context.auth.ensureAuthenticated();
+      await context.auth.ensureAuthenticated();
       const embedKey = embed_api_key === true;
-      const orgId = await context.org.requireActiveOrg();
+      await context.org.requireActiveOrg();
+      if (embedKey) await context.auth.ensureAuthenticated();
+      const snapshot = context.store.get();
+      const orgId = snapshot.activeOrgId;
+      const heldKey = activeApiKey(snapshot)?.key;
+      if (embedKey && !heldKey) {
+        throw new Error(
+          `No API key is held for organization ${orgId} (it may be at its active-key limit) \u2014 revoke an unused key with revoke_my_api_key, or generate the page without embed_api_key.`
+        );
+      }
+      const apiKey = embedKey ? heldKey : "";
       const light = await graphs.listLight();
       const graph = light.find((candidate) => candidate.id === graph_id);
       if (!graph) {
@@ -38027,7 +38365,7 @@ function registerUiTools(server, context) {
         graphId: graph_id,
         graphName: graph.name,
         orgId,
-        apiKey: embedKey ? apiKey : "",
+        apiKey,
         title,
         subtitle: subtitle ?? (graph.description || void 0),
         inputPath: input_path,
@@ -38274,6 +38612,36 @@ function registerKnowledgeTools(server, context) {
 
 // src/tools/catalog.tools.ts
 import { existsSync as existsSync5 } from "node:fs";
+
+// src/api/labels.ts
+var LABEL_COLORS = ["default", "purple", "blue", "green", "orange", "red"];
+var LABEL_PATHS = { flow: "labels/", tool: "tool-labels/", agent: "agent-labels/" };
+var LabelsApi = class {
+  constructor(client) {
+    this.client = client;
+  }
+  client;
+  async list(scope) {
+    return unwrap2(
+      await this.client.get(LABEL_PATHS[scope], { query: { limit: 1e3 } })
+    );
+  }
+  async create(scope, request) {
+    return this.client.post(LABEL_PATHS[scope], { body: request });
+  }
+  async patch(scope, id, request) {
+    return this.client.patch(`${LABEL_PATHS[scope]}${id}/`, { body: request });
+  }
+  /**
+   * Deletes the label and its child labels (CASCADE); flows/tools only lose the tag. An agent group has no
+   * children: its agents and surfaces are un-grouped (SET_NULL).
+   */
+  async delete(scope, id) {
+    await this.client.delete(`${LABEL_PATHS[scope]}${id}/`);
+  }
+};
+
+// src/tools/catalog.tools.ts
 var toolModeSchema2 = external_exports.enum(["allow", "deny"]).default("allow").describe('Tool permission. "deny" hard-wins over "allow" when surfaces combine.');
 var triStateSchema = external_exports.enum(["allow", "unset", "deny"]).default("unset").describe("Tri-state storage permission. When surfaces combine: deny > allow > unset.");
 var surfaceToolEntrySchema2 = external_exports.strictObject({
@@ -38299,12 +38667,19 @@ var surfaceBodyShape2 = {
   owner_agent: idOrName.nullable().optional().describe(
     "Owning agent (id or name). Set \u21D2 agent-specific (only that agent may attach it). null/omitted \u21D2 shared."
   ),
+  group: idOrName.nullable().optional().describe(
+    'Agent group (list_labels scope "agent"): id or name; null = ungrouped. Shared surfaces only \u2014 setting owner_agent ungroups the surface.'
+  ),
   allow_creation: external_exports.boolean().optional().describe("Whether the agent may create new files in this surface."),
   python_tools: external_exports.array(surfaceToolEntrySchema2).optional().describe("Python tool grants."),
   mcp_tools: external_exports.array(surfaceToolEntrySchema2).optional().describe("MCP tool grants."),
   storage_items: external_exports.array(surfaceStorageItemSchema2).optional().describe("Per-file storage permissions."),
   knowledge: external_exports.array(surfaceKnowledgeEntrySchema2).optional().describe("Knowledge collections this surface exposes.")
 };
+var fallbackLlmConfigSchema = idOrName.nullable().optional().describe(
+  "LLM config used instead of llm_config when it fails with a transient error: id or name; null = none. Must differ from llm_config (the backend refuses the same config with 400)."
+);
+var agentGroupSchema = idOrName.nullable().optional().describe('Agent group (list_labels scope "agent"): id or name; null = ungrouped.');
 var ragInputSchema = external_exports.strictObject({
   strategy: external_exports.enum(["naive", "graph"]).describe('RAG strategy: "naive" vector search or "graph" RAG.'),
   embedder: idOrName.optional().describe("Embedding config: id or name. Org default when omitted."),
@@ -38340,6 +38715,7 @@ function registerCatalogTools(server, context) {
   const knowledge = new KnowledgeApi(context.client);
   const llm = new LlmApi(context.client);
   const tools = new ToolsApi(context.client);
+  const labels = new LabelsApi(context.client);
   const resolveAgent = (ref) => resolveNamedRef(ref, "Agent", () => agents.list(), (agent) => agent.id, (agent) => agent.name);
   const resolveSurface = (ref) => resolveNamedRef(ref, "Surface", () => surfaces.list(), (surface) => surface.id, (surface) => surface.name);
   const resolveLlmConfig = (ref) => resolveNamedRef(ref, "LLM config", () => llm.listConfigs(), (config2) => config2.id, (config2) => config2.custom_name);
@@ -38352,6 +38728,7 @@ function registerCatalogTools(server, context) {
   );
   const resolvePythonTool = (ref) => resolveNamedRef(ref, "Python tool", () => tools.listPythonCodeTools(), (tool) => tool.id, (tool) => tool.name);
   const resolveMcpTool = (ref) => resolveNamedRef(ref, "MCP tool", () => tools.listMcpTools(), (tool) => tool.id, (tool) => tool.name);
+  const resolveGroup = async (ref) => ref === null ? null : resolveNamedRef(ref, "Agent group", () => labels.list("agent"), (label) => label.id, (label) => label.full_path);
   async function buildSurfaceRequest(name, body) {
     const request = { name };
     if (body.description !== void 0) request.description = body.description;
@@ -38360,6 +38737,7 @@ function registerCatalogTools(server, context) {
     if (body.owner_agent !== void 0) {
       request.owner_agent = body.owner_agent === null ? null : await resolveAgent(body.owner_agent);
     }
+    if (body.group !== void 0) request.group = await resolveGroup(body.group);
     if (body.python_tools !== void 0) {
       request.python_tools = await Promise.all(
         body.python_tools.map(async (entry) => ({
@@ -38486,6 +38864,7 @@ function registerCatalogTools(server, context) {
         instructions: external_exports.string().describe("Boot instructions \u2014 the agent system prompt. Stored as the agent's single instruction document."),
         description: external_exports.string().optional().describe("One-line summary of what this agent is for."),
         llm_config: idOrName.describe("LLM config the agent thinks with: backend id or exact name (list_llm_configs)."),
+        fallback_llm_config: fallbackLlmConfigSchema,
         fcm_llm_config: idOrName.optional().describe("Separate LLM config for function calling: id or name."),
         default_surfaces: external_exports.array(
           external_exports.strictObject({
@@ -38499,7 +38878,8 @@ function registerCatalogTools(server, context) {
         cache: external_exports.boolean().optional().describe("Whether tool-result caching is enabled."),
         max_retry_limit: external_exports.number().int().nonnegative().optional().describe("Max retries when an LLM call fails."),
         default_temperature: external_exports.number().optional().describe("Default sampling temperature."),
-        metadata: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("Free-form metadata stored with the agent.")
+        metadata: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("Free-form metadata stored with the agent."),
+        group: agentGroupSchema
       }
     },
     async ({ name, ...body }) => runTool(async () => {
@@ -38507,7 +38887,8 @@ function registerCatalogTools(server, context) {
       await context.org.requireActiveOrg();
       const request = await buildAgentRequest(name, body, {
         resolveLlmConfig,
-        resolveSurface
+        resolveSurface,
+        resolveGroup
       });
       const created = await createOrExplainConflict(() => agents.create(request), name, "update_agent");
       return {
@@ -38529,6 +38910,7 @@ function registerCatalogTools(server, context) {
         ),
         description: external_exports.string().optional(),
         llm_config: idOrName.optional(),
+        fallback_llm_config: fallbackLlmConfigSchema,
         fcm_llm_config: idOrName.optional(),
         default_surfaces: external_exports.array(
           external_exports.strictObject({
@@ -38542,16 +38924,37 @@ function registerCatalogTools(server, context) {
         cache: external_exports.boolean().optional(),
         max_retry_limit: external_exports.number().int().nonnegative().optional(),
         default_temperature: external_exports.number().optional(),
-        metadata: external_exports.record(external_exports.string(), external_exports.unknown()).optional()
+        metadata: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
+        group: agentGroupSchema
       }
     },
     async ({ agent, ...body }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
       const agentId = await resolveAgent(agent);
-      const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface });
+      const request = await buildAgentPatch(body, { resolveLlmConfig, resolveSurface, resolveGroup });
       const updated = await agents.update(agentId, request);
       return { agent: updated };
+    })
+  );
+  server.registerTool(
+    "copy_agent",
+    {
+      title: "Copy an agent definition",
+      description: 'Duplicate an agent definition together with the surfaces it owns (tools, storage and knowledge are linked, not cloned). The copy is independent of the source. A taken name gets the next free " #N" suffix.',
+      inputSchema: {
+        agent: idOrName.describe("The agent to copy: backend id or exact name."),
+        name: external_exports.string().min(1).optional().describe('Name of the copy. Omit to reuse the source name (suffixed " #N").')
+      }
+    },
+    async ({ agent, name }) => runTool(async () => {
+      await context.auth.ensureAuthenticated();
+      await context.org.requireActiveOrg();
+      const copy = await agents.copy(await resolveAgent(agent), name);
+      return {
+        agent: copy,
+        next: `Reference the copy from a flow agent node with existing: "${copy.name}".`
+      };
     })
   );
   server.registerTool(
@@ -38694,10 +39097,14 @@ async function buildAgentRequest(name, body, resolvers) {
     llm_config: await resolvers.resolveLlmConfig(body.llm_config)
   };
   if (body.description !== void 0) request.description = body.description;
+  if (body.fallback_llm_config !== void 0) {
+    request.fallback_llm_config = body.fallback_llm_config === null ? null : await resolvers.resolveLlmConfig(body.fallback_llm_config);
+  }
   if (body.fcm_llm_config !== void 0) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
   if (body.default_surfaces !== void 0) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
   }
+  if (body.group !== void 0) request.group = await resolvers.resolveGroup(body.group);
   assignAgentKnobs(request, body);
   return request;
 }
@@ -38707,10 +39114,14 @@ async function buildAgentPatch(body, resolvers) {
   if (body.instructions !== void 0) request.instruction_list = toInstructionList(body.instructions);
   if (body.description !== void 0) request.description = body.description;
   if (body.llm_config !== void 0) request.llm_config = await resolvers.resolveLlmConfig(body.llm_config);
+  if (body.fallback_llm_config !== void 0) {
+    request.fallback_llm_config = body.fallback_llm_config === null ? null : await resolvers.resolveLlmConfig(body.fallback_llm_config);
+  }
   if (body.fcm_llm_config !== void 0) request.fcm_llm_config = await resolvers.resolveLlmConfig(body.fcm_llm_config);
   if (body.default_surfaces !== void 0) {
     request.default_surfaces = await resolveDefaultSurfaces(body.default_surfaces, resolvers.resolveSurface);
   }
+  if (body.group !== void 0) request.group = await resolvers.resolveGroup(body.group);
   assignAgentKnobs(request, body);
   return request;
 }
@@ -38729,6 +39140,8 @@ function mergeSurfaceBody(current, newName, body) {
     instructions: body.instructions ?? current.instructions,
     allow_creation: body.allow_creation ?? current.allow_creation,
     owner_agent: body.owner_agent !== void 0 ? body.owner_agent : current.owner_agent,
+    // Not carried over: an omitted group stays as stored, and the backend ungroups a surface that gains an owner.
+    group: body.group,
     python_tools: body.python_tools ?? current.python_tools.map((entry) => ({ tool: entry.python_tool, mode: entry.mode })),
     mcp_tools: body.mcp_tools ?? current.mcp_tools.map((entry) => ({ tool: entry.mcp_tool, mode: entry.mode })),
     storage_items: body.storage_items ?? current.storage_items.map((item) => ({ ...item })),
@@ -38778,34 +39191,9 @@ async function attachAndIndexRag(collectionId, rag, ctx) {
 // src/tools/tool-catalog.tools.ts
 import { existsSync as existsSync6, readFileSync as readFileSync5 } from "node:fs";
 import { isAbsolute as isAbsolute3 } from "node:path";
-
-// src/api/labels.ts
-var LABEL_COLORS = ["default", "purple", "blue", "green", "orange", "red"];
-var LABEL_PATHS = { flow: "labels/", tool: "tool-labels/" };
-var LabelsApi = class {
-  constructor(client) {
-    this.client = client;
-  }
-  client;
-  async list(scope) {
-    return unwrap2(
-      await this.client.get(LABEL_PATHS[scope], { query: { limit: 1e3 } })
-    );
-  }
-  async create(scope, request) {
-    return this.client.post(LABEL_PATHS[scope], { body: request });
-  }
-  async patch(scope, id, request) {
-    return this.client.patch(`${LABEL_PATHS[scope]}${id}/`, { body: request });
-  }
-  /** Deletes the label and its child labels (CASCADE); flows/tools only lose the tag. */
-  async delete(scope, id) {
-    await this.client.delete(`${LABEL_PATHS[scope]}${id}/`);
-  }
-};
-
-// src/tools/tool-catalog.tools.ts
-var labelScopeSchema = external_exports.enum(["flow", "tool"]).describe('Which label tree: "flow" labels tag flows, "tool" labels tag python and MCP tools.');
+var labelScopeSchema = external_exports.enum(["flow", "tool", "agent"]).describe(
+  'Which label tree: "flow" labels tag flows, "tool" labels tag python and MCP tools, "agent" labels are the groups of agents and shared surfaces (flat \u2014 no parent).'
+);
 var pythonCodeShape = {
   code: external_exports.string().optional().describe("Inline Python source defining the entrypoint. Exactly one of code / code_file."),
   code_file: external_exports.string().optional().describe("Absolute path of a local .py file to upload as the code."),
@@ -39040,7 +39428,7 @@ function registerToolCatalogTools(server, context) {
     "list_labels",
     {
       title: "List labels",
-      description: 'List the flow labels or tool labels of the active organization (a tree: full_path is "parent/child"). Tag flows with set_flow_labels, tools with the labels field of create/update_python_tool / _mcp_tool.',
+      description: 'List the flow labels, tool labels or agent groups of the active organization (a tree: full_path is "parent/child"). Tag flows with set_flow_labels, tools with the labels field of create/update_python_tool / _mcp_tool, agents and shared surfaces with the group field of create/update_agent / _surface.',
       inputSchema: { scope: labelScopeSchema }
     },
     async ({ scope }) => runTool(async () => {
@@ -39059,7 +39447,7 @@ function registerToolCatalogTools(server, context) {
     "create_label",
     {
       title: "Create a label",
-      description: "Create a flow or tool label, optionally nested under a parent label. Names are unique per parent.",
+      description: 'Create a flow or tool label, optionally nested under a parent label, or an agent group (scope "agent", never nested). Names are unique per parent.',
       inputSchema: {
         scope: labelScopeSchema,
         name: external_exports.string().min(1).max(100),
@@ -39113,7 +39501,7 @@ function registerToolCatalogTools(server, context) {
     "delete_label",
     {
       title: "Delete a label",
-      description: "Delete a label for good together with its child labels. Flows/tools keep existing \u2014 they only lose the tag.",
+      description: "Delete a label for good together with its child labels. Flows/tools keep existing \u2014 they only lose the tag; the agents and surfaces of a deleted agent group become ungrouped.",
       inputSchema: {
         scope: labelScopeSchema,
         label: idOrName.describe("The label: id or full path.")
@@ -39135,10 +39523,11 @@ var libraryObjectSchema = external_exports.strictObject({
   name: external_exports.string().min(1).describe('Package name as on PyPI, e.g. "requests".'),
   specification: external_exports.string().regex(VENV_LIBRARY_SPECIFICATION_PATTERN, 'a PEP 440 specifier set, e.g. ">=2.31,<3"').optional().describe('PEP 440 specifier set the version must satisfy, e.g. ">=2.31,<3". Empty = any version.'),
   version: external_exports.string().regex(VENV_LIBRARY_VERSION_PATTERN, "a PEP 440 version, e.g. 2.31.0").optional().describe("Exact version to pin. Omit to let the build pick the newest one the specification allows."),
-  description: external_exports.string().optional().describe("Why the venv carries this package.")
+  description: external_exports.string().optional().describe("Why the venv carries this package."),
+  is_custom: external_exports.boolean().optional().describe("Install the org's uploaded custom library of this name instead of the PyPI package.")
 });
 var librarySchema = external_exports.union([external_exports.string().min(1), libraryObjectSchema]).describe(
-  'A requirement string ("pandas", "requests>=2.31", "numpy==1.26.4") or {name, specification?, version?, description?}.'
+  'A requirement string ("pandas", "requests>=2.31", "numpy==1.26.4") or {name, specification?, version?, description?, is_custom?}.'
 );
 var REQUIREMENT_OPERATOR = /[<>=!~]/;
 function toVenvLib(entry) {
@@ -39147,7 +39536,8 @@ function toVenvLib(entry) {
       name: entry.name.trim(),
       specification: (entry.specification ?? "").trim(),
       version: entry.version?.trim() || null,
-      description: entry.description?.trim() || null
+      description: entry.description?.trim() || null,
+      ...entry.is_custom !== void 0 ? { is_custom: entry.is_custom } : {}
     };
   }
   const requirement = entry.trim();
@@ -39169,7 +39559,7 @@ function summarizeVenv(venv) {
     status: venv.status,
     ...venv.error ? { error: venv.error } : {},
     libraries: venv.libs.map(
-      (lib) => `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ""}`
+      (lib) => `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ""}${lib.is_custom ? " (custom)" : ""}`
     ),
     owner: venv.owner ? venv.owner.display_name ?? venv.owner.email : null,
     created_at: venv.created_at
@@ -39242,9 +39632,17 @@ function registerVenvTools(server, context) {
         throw new Error("Nothing to change \u2014 pass name and/or libraries.");
       }
       const venvId = await resolveVenv(venv);
+      let libs;
+      if (libraries !== void 0) {
+        const stored = new Map((await venvs.get(venvId)).libs.map((lib) => [lib.name.toLowerCase(), lib.is_custom]));
+        libs = libraries.map(toVenvLib).map((lib) => {
+          const isCustom = stored.get(lib.name.toLowerCase());
+          return lib.is_custom === void 0 && isCustom !== void 0 ? { ...lib, is_custom: isCustom } : lib;
+        });
+      }
       const updated = await venvs.update(venvId, {
         ...name !== void 0 ? { name } : {},
-        ...libraries !== void 0 ? { libs: libraries.map(toVenvLib) } : {}
+        ...libs !== void 0 ? { libs } : {}
       });
       return { venv: summarizeVenv(updated), next: buildStatusNext(updated) };
     })
@@ -40179,7 +40577,8 @@ import { basename as basename2 } from "node:path";
 var TRANSFER_PATHS = {
   flow: "graphs/",
   python_tool: "python-code-tool/",
-  mcp_tool: "mcp-tools/"
+  mcp_tool: "mcp-tools/",
+  agent_definition: "agent-definitions/"
 };
 var ImportExportApi = class {
   constructor(client) {
@@ -40233,7 +40632,7 @@ function isExcludedExportEntity(value) {
 }
 
 // src/tools/flow-history.tools.ts
-var transferKindSchema = external_exports.enum(["flow", "python_tool", "mcp_tool"]).default("flow").describe("What the export document holds: flows (default), python tools or MCP tools.");
+var transferKindSchema = external_exports.enum(["flow", "python_tool", "mcp_tool", "agent_definition"]).default("flow").describe("What the export document holds: flows (default), python tools, MCP tools or agent definitions.");
 function registerFlowHistoryTools(server, context) {
   const graphs = new GraphsApi(context.client);
   const versions = new GraphVersionsApi(context.client);
@@ -40371,8 +40770,8 @@ function registerFlowHistoryTools(server, context) {
   server.registerTool(
     "export_entities",
     {
-      title: "Export flows or tools to a file",
-      description: "Write an EpicStaff export document (the editor's Export) for one or more flows, python tools or MCP tools to a local .json file. It carries everything they depend on (agents, LLM configs, tools \u2026) so import_entities can recreate them in another organization or instance. Secret values are never exported; entities you may not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. Refuses to overwrite an existing file unless overwrite: true, and never writes through a symbolic link.",
+      title: "Export flows, tools or agents to a file",
+      description: "Write an EpicStaff export document (the editor's Export) for one or more flows, python tools, MCP tools or agent definitions to a local .json file. It carries everything they depend on (agents, LLM configs, tools \u2026) so import_entities can recreate them in another organization or instance. Secret values are never exported; entities you may not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. Refuses to overwrite an existing file unless overwrite: true, and never writes through a symbolic link.",
       inputSchema: {
         kind: transferKindSchema,
         ids: external_exports.array(external_exports.number().int()).min(1).max(100).describe("Backend ids to export (one file for all)."),
@@ -40405,7 +40804,7 @@ function registerFlowHistoryTools(server, context) {
   server.registerTool(
     "import_entities",
     {
-      title: "Import flows or tools from a file",
+      title: "Import flows, tools or agents from a file",
       description: "Import an EpicStaff export document (from export_entities or the editor's Export) into the active organization. inspect_only: true first reports what the import would ask about, creating nothing. Flows: by default every import creates new copies; preserve_uuids + replace_existing overwrite the flows with the same uuid in place (needs flow update permission). Secrets are not in export files \u2014 re-attach credentials after importing.",
       inputSchema: {
         kind: transferKindSchema,
@@ -40416,7 +40815,7 @@ function registerFlowHistoryTools(server, context) {
         import_labels: external_exports.boolean().default(true).describe("Recreate the file's labels and tag the imports with them.")
       }
     },
-    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels: import_labels3 }) => runTool(async () => {
+    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels: import_labels4 }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
       if (!isAbsolute4(file_path)) throw new Error("file_path must be an absolute path.");
@@ -40433,9 +40832,12 @@ function registerFlowHistoryTools(server, context) {
       const result = await transfer.import(kind, file_path, {
         preserveUuids: preserve_uuids,
         replaceExisting: replace_existing,
-        importLabels: import_labels3
+        importLabels: import_labels4
       });
-      return { imported: result, next: "Check the created entities (list_graphs / list_tools) and re-attach secrets." };
+      return {
+        imported: result,
+        next: "Check the created entities (list_graphs / list_tools / list_agents) and re-attach secrets."
+      };
     })
   );
   server.registerTool(
@@ -41874,7 +42276,9 @@ function registerCodeRunTools(server, context) {
       if (!wait) {
         return { ...ran, execution_id: executionId, next: "Read the result with get_code_run_result(execution_id)." };
       }
-      const timeoutSeconds = match.node.python_code?.execution_timeout ?? (await timeoutLimits.get()).default_seconds;
+      const limits = await timeoutLimits.get();
+      const storedSeconds = match.node.python_code?.execution_timeout ?? limits.default_seconds;
+      const timeoutSeconds = limits.max_seconds === null ? storedSeconds : Math.min(storedSeconds, limits.max_seconds);
       const outcome = await pollPythonCodeResult(codeRuns, executionId, timeoutSeconds);
       if (!outcome.finished) {
         return {
@@ -42043,62 +42447,6 @@ function registerFilterPresetTools(server, context) {
     })
   );
 }
-
-// src/api/profile.ts
-var API_KEY_MAX_EXPIRES_IN_DAYS = 3650;
-var API_KEY_PREFIX_LENGTH = 12;
-function apiKeyPrefix(rawKey) {
-  return rawKey.slice(0, API_KEY_PREFIX_LENGTH);
-}
-var ProfileApi = class {
-  constructor(client, session) {
-    this.client = client;
-    this.session = session;
-  }
-  client;
-  session;
-  async getProfile() {
-    return this.client.get("profile/");
-  }
-  async updateProfile(changes) {
-    return this.client.patch("profile/", { body: changes });
-  }
-  /** Effective permissions in the active organization (X-Organization-Id). */
-  async getActivePermissions() {
-    return this.client.get("permissions/me/");
-  }
-  /** Effective permissions in every organization the user belongs to. */
-  async getOrgPermissions() {
-    return this.client.get("permissions/me/orgs/");
-  }
-  async getPermissionCatalog() {
-    return this.client.get("permissions/catalog/");
-  }
-  async listApiKeys() {
-    return withUserSession(this.session, (bearerToken) => this.client.get("profile/api-keys/", { bearerToken }));
-  }
-  /**
-   * Mint a personal API key. The response holds the raw key exactly once — callers must hand it
-   * to its destination immediately and never log or return it.
-   */
-  async createApiKey(name, expiresInDays) {
-    return withUserSession(
-      this.session,
-      (bearerToken) => this.client.post("profile/api-keys/", {
-        bearerToken,
-        // Omitting expires_in_days selects the backend's 90-day default; null means "never expires".
-        body: { name, ...expiresInDays !== void 0 ? { expires_in_days: expiresInDays } : {} }
-      })
-    );
-  }
-  /** Retire a key: it stops authenticating at once and stays listed as `revoked`. */
-  async revokeApiKey(id) {
-    return withUserSession(
-      this.session,
-      (bearerToken) => this.client.post(`profile/api-keys/${id}/revoke/`, { bearerToken, body: {} })
-    );
-  }
-};
 
 // src/util/secret-file.ts
 import { closeSync as closeSync2, lstatSync as lstatSync2, openSync as openSync2, statSync, writeFileSync as writeFileSync5 } from "node:fs";
@@ -42283,6 +42631,7 @@ function summarizeKey(key) {
     id: key.id,
     name: key.name,
     prefix: key.prefix,
+    organization: { id: key.org_id, name: key.org_name },
     status: key.status,
     created_at: key.created_at,
     expires_at: key.expires_at,
@@ -42292,10 +42641,7 @@ function summarizeKey(key) {
 }
 function registerAccountTools(server, context) {
   const profile = () => new ProfileApi(context.client, context.auth);
-  const ownKeyPrefix = () => {
-    const { apiKey } = context.store.get();
-    return apiKey ? apiKeyPrefix(apiKey) : null;
-  };
+  const ownKeyPrefixes = () => Object.values(context.store.get().apiKeys).map((held) => apiKeyPrefix(held.key));
   server.registerTool(
     "get_my_account",
     {
@@ -42321,7 +42667,8 @@ function registerAccountTools(server, context) {
           role: membership.role.name,
           joined_at: membership.joined_at
         })),
-        permissions: capabilities.is_superadmin ? "superadmin: every action in every organization" : (capabilities.orgs ?? []).map((scope) => ({
+        // `permissions: '*'` only for a superadmin's session; a superadmin's API key gets its one org's `orgs`.
+        permissions: capabilities.permissions === "*" ? "superadmin: every action in every organization" : (capabilities.orgs ?? []).map((scope) => ({
           organization: scope.org,
           role: scope.role?.name ?? null,
           permissions: scope.permissions
@@ -42354,10 +42701,10 @@ function registerAccountTools(server, context) {
     async () => runTool(async () => {
       requireSignedInSession(context, "Listing API keys");
       await context.auth.ensureAuthenticated();
-      const inUse = ownKeyPrefix();
+      const inUse = ownKeyPrefixes();
       const keys = await profile().listApiKeys();
       return {
-        keys: keys.map((key) => ({ ...summarizeKey(key), ...key.prefix === inUse ? { in_use_by_mcp: true } : {} }))
+        keys: keys.map((key) => ({ ...summarizeKey(key), ...inUse.includes(key.prefix) ? { in_use_by_mcp: true } : {} }))
       };
     })
   );
@@ -42365,21 +42712,22 @@ function registerAccountTools(server, context) {
     "create_my_api_key",
     {
       title: "Create a personal API key",
-      description: "Mint a personal API key for the configured user \u2014 it acts with all of that user's permissions. The raw key is written to a NEW file at output_file (mode 0600; an existing path or symbolic link is refused) and is never shown in the conversation; the result names only its prefix. Use it to give an app or script its own EpicStaff credential (X-Api-Key header). Keep the file out of version control. Requires confirm: true.",
+      description: "Mint a personal API key for the configured user, bound to one organization (EpicStaff lets it act only there, with all of that user's permissions in it; at most 5 active keys per user and organization). The raw key is written to a NEW file at output_file (mode 0600; an existing path or symbolic link is refused) and is never shown in the conversation; the result names only its prefix. Use it to give an app or script its own EpicStaff credential (X-Api-Key header). Keep the file out of version control. Requires confirm: true.",
       inputSchema: {
         name: external_exports.string().min(1).max(255).describe('What the key is for, e.g. "pallet-quote backend".'),
+        org_id: external_exports.number().int().positive().optional().describe("Organization the key works in (list_organizations); defaults to the active organization."),
         output_file: external_exports.string().min(1).describe("Absolute path of the new file to write the key into."),
         env_var_name: external_exports.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name").optional().describe("Write the key as a dotenv line NAME=<key> instead of the bare key."),
         expires_in_days: external_exports.number().int().min(1).max(API_KEY_MAX_EXPIRES_IN_DAYS).nullable().optional().describe(`Lifetime in days (1\u2013${API_KEY_MAX_EXPIRES_IN_DAYS}); omit for EpicStaff's 90-day default, null for a key that never expires.`),
         confirm: confirmFlag("create this API key")
       }
     },
-    async ({ name, output_file, env_var_name, expires_in_days }) => runTool(async () => {
+    async ({ name, org_id, output_file, env_var_name, expires_in_days }) => runTool(async () => {
       requireSignedInSession(context, "Creating an API key");
       assertNewSecretFilePath(output_file);
       await context.auth.ensureAuthenticated();
       const api = profile();
-      const created = await api.createApiKey(name, expires_in_days);
+      const created = await api.createApiKey(name, org_id ?? await context.org.requireActiveOrg(), expires_in_days);
       try {
         writeNewSecretFile(output_file, env_var_name ? `${env_var_name}=${created.api_key}
 ` : `${created.api_key}
@@ -42423,7 +42771,7 @@ function registerAccountTools(server, context) {
       }
       const target = matches[0];
       if (!target) throw new Error(`No API key "${key}" among yours (list_my_api_keys).`);
-      if (target.prefix === ownKeyPrefix()) {
+      if (ownKeyPrefixes().includes(target.prefix)) {
         throw new Error(
           `Key ${target.prefix}\u2026 is the one this MCP server authenticates with \u2014 revoking it would cut the server off. Revoke it in the EpicStaff UI if you really mean to.`
         );
@@ -42480,16 +42828,20 @@ var AdminMembershipsApi = class {
   client;
   session;
   async list(params = {}) {
-    return this.client.get("admin/memberships/", {
-      query: {
-        org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
-        role_id: params.role_id,
-        status: params.status,
-        search: params.search,
-        page: params.page,
-        page_size: params.page_size
-      }
-    });
+    return withUserSessionIfAvailable(
+      this.session,
+      (bearerToken) => this.client.get("admin/memberships/", {
+        bearerToken,
+        query: {
+          org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+          role_id: params.role_id,
+          status: params.status,
+          search: params.search,
+          page: params.page,
+          page_size: params.page_size
+        }
+      })
+    );
   }
   async create(request) {
     return withUserSession(
@@ -42521,9 +42873,13 @@ var AdminOrganizationsApi = class {
   client;
   session;
   async list(params = {}) {
-    return this.client.get("admin/organizations/", {
-      query: { is_active: params.is_active, search: params.search, page: params.page, page_size: params.page_size }
-    });
+    return withUserSessionIfAvailable(
+      this.session,
+      (bearerToken) => this.client.get("admin/organizations/", {
+        bearerToken,
+        query: { is_active: params.is_active, search: params.search, page: params.page, page_size: params.page_size }
+      })
+    );
   }
   async create(name) {
     return withUserSession(
@@ -42561,18 +42917,22 @@ var AdminRolesApi = class {
   client;
   session;
   async list(params = {}) {
-    return this.client.get("admin/roles/", {
-      query: {
-        org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
-        assignable_org_ids: params.assignable_org_ids?.length ? params.assignable_org_ids.join(",") : void 0,
-        search: params.search,
-        page: params.page,
-        page_size: params.page_size
-      }
-    });
+    return withUserSessionIfAvailable(
+      this.session,
+      (bearerToken) => this.client.get("admin/roles/", {
+        bearerToken,
+        query: {
+          org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+          assignable_org_ids: params.assignable_org_ids?.length ? params.assignable_org_ids.join(",") : void 0,
+          search: params.search,
+          page: params.page,
+          page_size: params.page_size
+        }
+      })
+    );
   }
   async get(roleId) {
-    return this.client.get(`admin/roles/${roleId}/`);
+    return withUserSessionIfAvailable(this.session, (bearerToken) => this.client.get(`admin/roles/${roleId}/`, { bearerToken }));
   }
   async create(request) {
     return withUserSession(this.session, (bearerToken) => this.client.post("admin/roles/", { bearerToken, body: request }));
@@ -42612,17 +42972,21 @@ var AdminUsersApi = class {
    * account-state filter UserValidationService.validate_list_users_query reads is `status`.
    */
   async list(params = {}) {
-    return this.client.get("admin/users/", {
-      query: {
-        search: params.search,
-        status: params.status,
-        is_superadmin: params.is_superadmin,
-        role_id: params.role_id,
-        org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
-        page: params.page,
-        page_size: params.page_size
-      }
-    });
+    return withUserSessionIfAvailable(
+      this.session,
+      (bearerToken) => this.client.get("admin/users/", {
+        bearerToken,
+        query: {
+          search: params.search,
+          status: params.status,
+          is_superadmin: params.is_superadmin,
+          role_id: params.role_id,
+          org_ids: params.org_ids?.length ? params.org_ids.join(",") : void 0,
+          page: params.page,
+          page_size: params.page_size
+        }
+      })
+    );
   }
   /** Create an account. The password never reaches an error message (see withRedactedErrors). */
   async create(request) {
@@ -42698,7 +43062,7 @@ function summarizeAdminKey(key) {
     prefix: key.prefix,
     status: key.status,
     owner: key.owner ? { id: key.owner.id, email: key.owner.email } : null,
-    organization_ids: key.org_ids,
+    organization: { id: key.org_id, name: key.org_name },
     created_at: key.created_at,
     expires_at: key.expires_at,
     last_used_at: key.last_used_at,
@@ -43169,11 +43533,12 @@ function registerAdminRbacTools(server, context) {
     async ({ key_id }) => runTool(async () => {
       requireSignedInSession(context, "Revoking an API key");
       await context.auth.ensureAuthenticated();
-      const { apiKey } = context.store.get();
-      if (apiKey) {
-        const inUse = apiKeyPrefix(apiKey);
-        const own = (await new ProfileApi(context.client, context.auth).listApiKeys()).find((key) => key.prefix === inUse);
-        if (own?.id === key_id) {
+      const inUse = Object.values(context.store.get().apiKeys).map((held) => apiKeyPrefix(held.key));
+      if (inUse.length > 0) {
+        const own = (await new ProfileApi(context.client, context.auth).listApiKeys()).find(
+          (key) => key.id === key_id && inUse.includes(key.prefix)
+        );
+        if (own) {
           throw new Error(
             `Key ${own.prefix}\u2026 is the one this MCP server authenticates with \u2014 revoking it would cut the server off. Revoke it in the EpicStaff UI if you really mean to.`
           );
@@ -44078,7 +44443,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.4.1"
+      version: "1.5.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );
