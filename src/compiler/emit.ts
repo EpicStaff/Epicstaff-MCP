@@ -314,27 +314,44 @@ function upsertPlan(
   };
 }
 
+/** The `params` keys that are LLMConfig columns; every other one is a model setting (`parameters`). */
+const LLM_CONFIG_COLUMNS = new Set([
+  'timeout',
+  'context_window',
+  'extra_headers',
+  'input_cost_per_token',
+  'output_cost_per_token',
+  'is_visible',
+]);
+
 /** Payload template shaped like `CreateLlmConfigRequest` (src/api/llm.ts). */
 function buildLlmConfigPlans(source: FlowSource, registry: RefRegistry): EntityPlan[] {
   return Object.entries(source.llm_configs).map(([name, config]) => {
-    const model: ModelRef = {
-      $model: config.model,
-      ...(config.provider !== undefined ? { provider: config.provider } : {}),
+    const settings: Record<string, unknown> = {
+      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+      ...(config.max_tokens !== undefined ? { max_tokens: config.max_tokens } : {}),
+      ...config.params,
+    };
+    const columns = Object.entries(settings).filter(([key]) => LLM_CONFIG_COLUMNS.has(key));
+    const parameters = Object.entries(settings).filter(([key]) => !LLM_CONFIG_COLUMNS.has(key));
+    const connection = {
+      ...config.connection,
       ...(config.base_url !== undefined ? { base_url: config.base_url } : {}),
     };
+    // A model with its provider is resolved by the backend from the two names. A bare model
+    // name is a {$model} template ref the pusher resolves to the row id (see template-refs.ts).
+    const bareModel: ModelRef = { $model: config.model };
     const payload: Record<string, unknown> = {
       custom_name: name,
-      // `model` is a numeric id on the wire; flow source only knows the model
-      // NAME, so a {$model} template ref sits here — the pusher resolves it
-      // via the llm-models list (see template-refs.ts).
-      model,
+      ...(config.provider !== undefined ? { provider: config.provider, model_name: config.model } : { model: bareModel }),
       // The key is an org Secret (LLMConfigSerializer.api_key_secret_id), never a raw value.
       // Omitted without api_key_env so an update never clears a secret attached in the UI.
       ...(config.api_key_env !== undefined ? { api_key_secret_id: registry.secret(config.api_key_env) } : {}),
-      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-      ...(config.max_tokens !== undefined ? { max_tokens: config.max_tokens } : {}),
-      // Extra provider params (top_p, timeout, …) pass through at top level.
-      ...config.params,
+      ...Object.fromEntries(columns),
+      // Sent only when the source sets something: a create without `parameters` stores the model's
+      // defaults, and an update without them (or without `connection`) keeps what the config has.
+      ...(parameters.length > 0 ? { parameters: Object.fromEntries(parameters) } : {}),
+      ...(Object.keys(connection).length > 0 ? { connection } : {}),
     };
     return upsertPlan('llm_configs', name, 'llm_config', config, payload);
   });

@@ -328,7 +328,6 @@ describe('buildBulkSavePayload', () => {
             output_variable_path: 'variables.pre',
             execution_timeout: 45,
           },
-          pre_use_storage: true,
           // No code but a declared secret: the block is still emitted (secrets-only computation).
           post_computation: { code: '', secret_ids: [31] },
           sections: [
@@ -338,6 +337,7 @@ describe('buildBulkSavePayload', () => {
         },
       },
       explanations: { 'step-1': { text: 'Routes yes', fingerprint: 'f1', generatedBy: 'gpt' } },
+      preStorageGrants: { read: true, write: false, delete: false },
     };
 
     const remote: GraphState = { nodes: [taskNode], edges: [] };
@@ -368,7 +368,9 @@ describe('buildBulkSavePayload', () => {
         },
         pre_input_map: { a: 'variables.a' },
         pre_output_variable_path: 'variables.pre',
-        pre_use_storage: true,
+        pre_storage_grant_read: true,
+        pre_storage_grant_write: false,
+        pre_storage_grant_delete: false,
         post_python_code: {
           code: '',
           entrypoint: 'main',
@@ -378,7 +380,9 @@ describe('buildBulkSavePayload', () => {
         },
         post_input_map: {},
         post_output_variable_path: null,
-        post_use_storage: false,
+        post_storage_grant_read: false,
+        post_storage_grant_write: false,
+        post_storage_grant_delete: false,
         prompt_configs: [
           {
             prompt_key: 'p1',
@@ -433,11 +437,11 @@ describe('buildBulkSavePayload', () => {
           name: 'code',
           code: 'def main(): pass',
           entrypoint: 'main',
-          use_storage: true,
           secret_ids: [3],
           venv_id: 4,
           execution_timeout: 30,
         },
+        storageGrants: { read: true, write: false, delete: false },
         test_input: { n: 1 },
       },
       // End nodes are never numbered: a stray nodeNumber must not become a hint.
@@ -451,8 +455,8 @@ describe('buildBulkSavePayload', () => {
           webhook_trigger: 12,
           python_code: { name: 'hook', code: 'c', entrypoint: 'main' },
           test_payload: { order: 1 },
-          use_storage: true,
         },
+        storageGrants: { read: true, write: false, delete: false },
       },
       telegram: {
         ...baseNode('tg-new', null, 'Bot', 0, 4),
@@ -544,7 +548,9 @@ describe('buildBulkSavePayload', () => {
         },
         input_map: {},
         output_variable_path: null,
-        use_storage: true,
+        storage_grant_read: true,
+        storage_grant_write: false,
+        storage_grant_delete: false,
         test_input: { n: 1 },
         metadata: metadataOf(nodes.python),
       },
@@ -593,7 +599,9 @@ describe('buildBulkSavePayload', () => {
         webhook_trigger_path: '',
         webhook_trigger: 12,
         test_payload: { order: 1 },
-        use_storage: true,
+        storage_grant_read: true,
+        storage_grant_write: false,
+        storage_grant_delete: false,
         metadata: metadataOf(nodes.webhook),
       },
     ]);

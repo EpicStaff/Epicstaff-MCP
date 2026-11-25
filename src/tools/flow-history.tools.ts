@@ -12,14 +12,24 @@ import { idOrName, recycleBinHint, resolveNamedRef } from './catalog-helpers.js'
 
 /**
  * Flow lifecycle beyond push: versions (named snapshots + restore), copy, delete, labels on a flow,
- * export / import of flows, tools and agents as EpicStaff export documents, and the persistent variables a
+ * export / import of flows, tools, agents and knowledge collections as EpicStaff export archives, and the persistent variables a
  * flow carries across sessions.
  */
 
 const transferKindSchema = z
-  .enum(['flow', 'python_tool', 'mcp_tool', 'agent_definition'])
+  .enum(['flow', 'python_tool', 'mcp_tool', 'agent_definition', 'collection'])
   .default('flow')
-  .describe('What the export document holds: flows (default), python tools, MCP tools or agent definitions.');
+  .describe(
+    'What the export holds: flows (default), python tools, MCP tools, agent definitions or knowledge collections.',
+  );
+
+const waitSecondsSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(1800)
+  .default(300)
+  .describe('How long to wait for the background job EpicStaff runs it as, in seconds (default 300).');
 
 export function registerFlowHistoryTools(server: McpServer, context: AppContext): void {
   const graphs = new GraphsApi(context.client);
@@ -204,42 +214,49 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
   server.registerTool(
     'export_entities',
     {
-      title: 'Export flows, tools or agents to a file',
+      title: 'Export flows, tools, agents or collections to a file',
       description:
-        'Write an EpicStaff export document (the editor\'s Export) for one or more flows, python tools, MCP tools or ' +
-        'agent definitions ' +
-        'to a local .json file. It carries everything they depend on (agents, LLM configs, tools …) so import_entities ' +
-        'can recreate them in another organization or instance. Secret values are never exported; entities you may ' +
-        'not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. ' +
+        'Write an EpicStaff export archive (the editor\'s Export) for one or more flows, python tools, MCP tools, ' +
+        'agent definitions or knowledge collections to a local .zip file. EpicStaff builds it as a background job; ' +
+        'this waits for the job and downloads the archive. It holds export.json with everything the items depend on ' +
+        '(agents, LLM configs, tools …), and for flows and agents the knowledge collections they use with their ' +
+        'files unless include_knowledge: false, so import_entities can recreate them in another organization or ' +
+        'instance. Secret values are never exported; dependencies you may not export are left out and listed in ' +
+        '`excluded`. Unlike dump_graph this is the portable import/export format. ' +
         'Refuses to overwrite an existing file unless overwrite: true, and never writes through a symbolic link.',
       inputSchema: {
         kind: transferKindSchema,
         ids: z.array(z.number().int()).min(1).max(100).describe('Backend ids to export (one file for all).'),
-        output_path: z.string().describe('Absolute path of the .json file to write (parent dirs are created).'),
+        output_path: z.string().describe('Absolute path of the .zip file to write (parent dirs are created).'),
+        include_knowledge: z
+          .boolean()
+          .default(true)
+          .describe('Flows and agent definitions only: carry the knowledge collections they use, with their files.'),
+        wait_seconds: waitSecondsSchema,
         overwrite: z
           .boolean()
           .default(false)
           .describe('Replace output_path when it already exists (a symbolic link is still refused).'),
       },
     },
-    async ({ kind, ids, output_path, overwrite }) =>
+    async ({ kind, ids, output_path, include_knowledge, wait_seconds, overwrite }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
-        if (!isAbsolute(output_path) || extname(output_path).toLowerCase() !== '.json') {
-          throw new Error('output_path must be an absolute path to a .json file.');
+        if (!isAbsolute(output_path) || extname(output_path).toLowerCase() !== '.zip') {
+          throw new Error('output_path must be an absolute path to a .zip file.');
         }
         // Checked before the export so a refused path costs no request; writeExportFile re-checks atomically.
         assertWritableExportPath(output_path, overwrite);
-        const result = await transfer.export(kind as TransferKind, ids);
-        const body = `${JSON.stringify(result.document, null, 2)}\n`;
+        const result = await transfer.export(kind as TransferKind, ids, include_knowledge, wait_seconds * 1000);
         mkdirSync(dirname(output_path), { recursive: true });
-        writeExportFile(output_path, body, overwrite);
+        writeExportFile(output_path, result.archive, overwrite);
         return {
           output_path,
+          file_name: result.fileName,
           kind,
           ids,
-          bytes: body.length,
+          bytes: result.archive.length,
           excluded: result.excluded,
           next: 'Recreate it elsewhere with import_entities(kind, file_path).',
         };
@@ -249,16 +266,18 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
   server.registerTool(
     'import_entities',
     {
-      title: 'Import flows, tools or agents from a file',
+      title: 'Import flows, tools, agents or collections from a file',
       description:
-        'Import an EpicStaff export document (from export_entities or the editor\'s Export) into the active ' +
-        'organization. inspect_only: true first reports what the import would ask about, creating nothing. Flows: ' +
+        'Import an EpicStaff export (the .zip archive from export_entities or the editor\'s Export, or a .json ' +
+        'export of an older version) into the active organization. A .zip of flows, agents or collections runs as ' +
+        'a background job this waits for; knowledge collections import from a .zip only. inspect_only: true first ' +
+        'reports what the import would ask about, creating nothing. Flows: ' +
         'by default every import creates new copies; preserve_uuids + replace_existing overwrite the flows with the ' +
         'same uuid in place (needs flow update permission). Secrets are not in export files — re-attach credentials ' +
         'after importing.',
       inputSchema: {
         kind: transferKindSchema,
-        file_path: z.string().describe('Absolute path of the export .json file.'),
+        file_path: z.string().describe('Absolute path of the export file (.zip or .json).'),
         inspect_only: z.boolean().default(false).describe('Dry run: report what would be imported, change nothing.'),
         preserve_uuids: z.boolean().default(false).describe('Flows only: keep the file\'s uuids.'),
         replace_existing: z
@@ -266,9 +285,10 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
           .default(false)
           .describe('Flows only: overwrite flows with the same uuid in place (requires preserve_uuids).'),
         import_labels: z.boolean().default(true).describe('Recreate the file\'s labels and tag the imports with them.'),
+        wait_seconds: waitSecondsSchema,
       },
     },
-    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels }) =>
+    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels, wait_seconds }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
@@ -283,14 +303,15 @@ export function registerFlowHistoryTools(server: McpServer, context: AppContext)
         if (inspect_only) {
           return { inspected: await transfer.inspect(kind as TransferKind, file_path) };
         }
-        const result = await transfer.import(kind as TransferKind, file_path, {
-          preserveUuids: preserve_uuids,
-          replaceExisting: replace_existing,
-          importLabels: import_labels,
-        });
+        const result = await transfer.import(
+          kind as TransferKind,
+          file_path,
+          { preserveUuids: preserve_uuids, replaceExisting: replace_existing, importLabels: import_labels },
+          wait_seconds * 1000,
+        );
         return {
           imported: result,
-          next: 'Check the created entities (list_graphs / list_tools / list_agents) and re-attach secrets.',
+          next: 'Check the created entities (list_graphs / list_tools / list_agents / list_source_collections) and re-attach secrets.',
         };
       }),
   );
@@ -363,7 +384,7 @@ function assertWritableExportPath(outputPath: string, overwrite: boolean): void 
  * Write the export: `wx` (create-only, fails on any existing entry — a symlink included) by default;
  * with `overwrite`, truncate in place without following a symbolic link where the platform has O_NOFOLLOW.
  */
-function writeExportFile(outputPath: string, body: string, overwrite: boolean): void {
+function writeExportFile(outputPath: string, body: Uint8Array, overwrite: boolean): void {
   const flags = overwrite
     ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0)
     : 'wx';
@@ -378,7 +399,7 @@ function writeExportFile(outputPath: string, body: string, overwrite: boolean): 
   }
   try {
     // writeFileSync on a descriptor writes until the whole body is out.
-    writeFileSync(descriptor, body, 'utf8');
+    writeFileSync(descriptor, body);
   } finally {
     closeSync(descriptor);
   }

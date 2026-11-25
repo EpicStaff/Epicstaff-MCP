@@ -838,7 +838,7 @@ flow:
     (response.ok && response.data.graphId === flowId) || failure(response),
   );
   trackGraph(await step(server, 'cov: copy_flow', 'copy_flow', { graph_id: flowId, name: `${prefix}-copy` }));
-  const exportPath = join(RUN_DIR, 'cov-export.json');
+  const exportPath = join(RUN_DIR, 'cov-export.zip');
   await step(server, 'cov: export_entities', 'export_entities', { kind: 'flow', ids: [flowId], output_path: exportPath }, (response) =>
     (response.ok && existsSync(exportPath)) || failure(response),
   );
@@ -894,7 +894,7 @@ flow:
     name: `${prefix}-llm`, model: MODEL, provider: PROVIDER, api_key_secret: `${prefix}-secret`, temperature: 0.2,
   }, (response) => (response.ok && response.data.config.api_key_secret_id === secret.data?.secret?.id) || failure(response));
   await step(server, 'cov: update_llm_config', 'update_llm_config', { config: `${prefix}-llm`, temperature: 0.5 }, (response) =>
-    (response.ok && response.data.config.temperature === 0.5) || failure(response),
+    (response.ok && response.data.config.parameters?.temperature === 0.5) || failure(response),
   );
   await step(server, 'cov: delete_llm_config dry_run deletes nothing', 'delete_llm_config', { config: `${prefix}-llm`, dry_run: true }, (response) =>
     (response.ok && response.data.dry_run === true && response.data.deleted_ids.length === 0) || failure(response),

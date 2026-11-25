@@ -147,9 +147,10 @@ the chunks indexing actually stored for a document (empty or garbled text, chunk
   group ungroups its members.
 - **Flows:** `copy_flow`, `delete_flow`, `list_graph_versions`, `create_graph_version`,
   `restore_graph_version` (overwrite in place with a backup version, or `mode: new_flow`),
-  `export_entities` / `import_entities` (EpicStaff export documents of flows, python tools, MCP
-  tools or agent definitions — `inspect_only` first; export writes a new `.json` file and replaces an existing one only
-  with `overwrite: true`), `get_flow_persistent_state` (read-only persistent variables).
+  `export_entities` / `import_entities` (EpicStaff export archives of flows, python tools, MCP
+  tools, agent definitions or knowledge collections — `inspect_only` first; export runs as a background job
+  the tool waits for, writes a new `.zip` file and replaces an existing one only with `overwrite: true`;
+  flows and agents carry their knowledge collections unless `include_knowledge: false`), `get_flow_persistent_state` (read-only persistent variables).
 - **Recycle bin:** `list_recycle_bin`, `restore_from_recycle_bin`, `purge_from_recycle_bin`,
   `empty_recycle_bin` (every bin of the organization at once — see below).
 - **Saved list filters:** `list_filter_presets`, `create_filter_preset`, `update_filter_preset`,

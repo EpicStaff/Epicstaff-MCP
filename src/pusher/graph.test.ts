@@ -25,7 +25,8 @@ function remoteState(): GraphState {
     {
       ...base('r-py', 1, 'transform'),
       type: 'python',
-      data: { id: 11, name: 'transform', code: 'c', entrypoint: 'main', secret_ids: [3], venv_id: 4, execution_timeout: 90, use_storage: false },
+      data: { id: 11, name: 'transform', code: 'c', entrypoint: 'main', secret_ids: [3], venv_id: 4, execution_timeout: 90 },
+      storageGrants: { read: true, write: false, delete: false },
       test_input: {},
     },
     {
@@ -35,8 +36,8 @@ function remoteState(): GraphState {
         webhook_trigger: 33,
         python_code: { id: 12, name: 'hook', code: '', entrypoint: 'main', secret_ids: [], execution_timeout: 20 },
         test_payload: { order: 1 },
-        use_storage: true,
       },
+      storageGrants: { read: true, write: false, delete: false },
     },
     {
       ...base('r-bot', 3, 'bot'),
@@ -92,9 +93,10 @@ describe('inheritUnrepresentableFields', () => {
     expect(hook?.type === 'webhook-trigger' && hook.data).toMatchObject({
       webhook_trigger: 33,
       test_payload: { order: 1 },
-      use_storage: true,
       python_code: { id: 12, execution_timeout: 20 },
     });
+    expect(python?.storageGrants).toEqual({ read: true, write: false, delete: false });
+    expect(hook?.storageGrants).toEqual({ read: true, write: false, delete: false });
     expect(bot?.type === 'telegram-trigger' && bot.data.test_payload).toEqual({ message: { text: 'hi' } });
     expect(bot?.type === 'telegram-trigger' && bot.data.fields).toEqual([
       { id: 90, parent: 'message', field_name: 'text', variable_path: 'variables.text' },

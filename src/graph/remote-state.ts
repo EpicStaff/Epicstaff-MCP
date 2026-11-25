@@ -35,6 +35,7 @@ import {
 import type { DecisionTableNodeDto } from '../models/nodes/decision-table-node.js';
 import type { NoteLinkedRegion } from '../models/nodes/note-node.js';
 import type { CustomPythonCode, DeclaredSecretRef, GetPythonCodeDto } from '../models/nodes/python-node.js';
+import { storageGrantsFromDto } from '../models/nodes/storage-grants.js';
 import type { ScheduleTriggerNodeDto } from '../models/nodes/schedule-trigger-node.js';
 import type {
   CdtTableState,
@@ -250,8 +251,6 @@ function toCdtTableState(dto: ClassificationDecisionTableNodeDto, uuidOf: UuidRe
         ? { execution_timeout: dto.post_python_code.execution_timeout }
         : {}),
     },
-    pre_use_storage: dto.pre_use_storage ?? false,
-    post_use_storage: dto.post_use_storage ?? false,
     sections: (dto.sections ?? []).map((section) => ({
       id: section.id,
       name: section.name,
@@ -333,10 +332,8 @@ export function buildRemoteState(dto: GraphDto): GraphState {
       (node): GraphNode => ({
         ...baseNode('python', node),
         type: 'python',
-        data: {
-          ...toCustomPythonCode(node.python_code, node.node_name),
-          ...(node.use_storage !== undefined ? { use_storage: node.use_storage } : {}),
-        },
+        data: toCustomPythonCode(node.python_code, node.node_name),
+        storageGrants: storageGrantsFromDto(node),
         test_input: node.test_input ?? {},
       })
     ),
@@ -394,8 +391,8 @@ export function buildRemoteState(dto: GraphDto): GraphState {
           webhook_trigger: node.webhook_trigger ?? null,
           python_code: toCustomPythonCode(node.python_code, node.node_name),
           test_payload: node.test_payload ?? {},
-          use_storage: node.use_storage ?? false,
         },
+        storageGrants: storageGrantsFromDto(node),
       })
     ),
     ...(dto.telegram_trigger_node_list ?? []).map(
@@ -451,6 +448,8 @@ export function buildRemoteState(dto: GraphDto): GraphState {
         type: 'classification-decision-table',
         data: { table: toCdtTableState(node, uuidOf) },
         explanations: readCdtExplanations(node.metadata),
+        preStorageGrants: storageGrantsFromDto(node, 'pre_'),
+        postStorageGrants: storageGrantsFromDto(node, 'post_'),
       })
     ),
     ...(dto.knowledge_node_list ?? []).map(

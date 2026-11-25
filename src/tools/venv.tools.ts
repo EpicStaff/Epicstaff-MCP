@@ -89,6 +89,7 @@ export function summarizeVenv(venv: Venv): Record<string, unknown> {
     name: venv.name,
     status: venv.status,
     ...(venv.error ? { error: venv.error } : {}),
+    ...(venv.libs_lock ? { libs_lock: venv.libs_lock } : {}),
     libraries: venv.libs.map(
       (lib) =>
         `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ''}${lib.is_custom ? ' (custom)' : ''}`,

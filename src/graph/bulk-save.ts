@@ -19,6 +19,7 @@ import {
   type ClassificationDecisionTableNodeWrite,
   type PromptConfigWrite,
 } from '../models/nodes/classification-decision-table-node.js';
+import { storageGrantsToPayload } from '../models/nodes/storage-grants.js';
 import type { DecisionTableConditionGroupWrite, DecisionTableNodeWrite } from '../models/nodes/decision-table-node.js';
 import type { BulkEdgeCreate, BulkEdgeUpdate } from '../models/nodes/edge.js';
 import type { ScheduleBlockWrite } from '../models/nodes/schedule-trigger-node.js';
@@ -247,7 +248,7 @@ function buildCdtNodePayload(
       : null,
     pre_input_map: preComputation.input_map ?? tableData?.pre_input_map ?? {},
     pre_output_variable_path: preComputation.output_variable_path || tableData?.pre_output_variable_path || null,
-    pre_use_storage: tableData?.pre_use_storage ?? false,
+    ...storageGrantsToPayload(node.preStorageGrants, 'pre_'),
     post_python_code: isPythonCodeBlockSaved(postCodeValue, postSecretIds)
       ? {
           code: postCodeValue,
@@ -259,7 +260,7 @@ function buildCdtNodePayload(
       : null,
     post_input_map: postComputation.input_map ?? tableData?.post_input_map ?? {},
     post_output_variable_path: postComputation.output_variable_path || tableData?.post_output_variable_path || null,
-    post_use_storage: tableData?.post_use_storage ?? false,
+    ...storageGrantsToPayload(node.postStorageGrants, 'post_'),
     prompt_configs: promptConfigs,
     default_llm_config: tableData?.default_llm_config ?? null,
     ...(defaultRef.backendId != null ? { default_next_node_id: defaultRef.backendId } : {}),
@@ -416,19 +417,16 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       variables: node.data.initialState ?? {},
       metadata: toNodeMetadata(node),
     })),
-    python_node_list: nodeItems(nodeDiff.pythonNodes, (node) => {
-      const { use_storage, ...pythonCode } = node.data;
-      return {
-        node_name: node.node_name,
-        graph: graphId,
-        python_code: pythonCode,
-        input_map: node.input_map || {},
-        output_variable_path: node.output_variable_path || null,
-        use_storage: use_storage ?? false,
-        test_input: node.test_input ?? {},
-        metadata: toNodeMetadata(node),
-      };
-    }),
+    python_node_list: nodeItems(nodeDiff.pythonNodes, (node) => ({
+      node_name: node.node_name,
+      graph: graphId,
+      python_code: node.data,
+      input_map: node.input_map || {},
+      output_variable_path: node.output_variable_path || null,
+      ...storageGrantsToPayload(node.storageGrants),
+      test_input: node.test_input ?? {},
+      metadata: toNodeMetadata(node),
+    })),
     task_node_list: nodeItems(nodeDiff.taskNodes, (node) => ({
       node_name: node.node_name,
       graph: graphId,
@@ -489,7 +487,7 @@ export function buildBulkSavePayload(options: BuildBulkSavePayloadOptions): Bulk
       webhook_trigger_path: '',
       webhook_trigger: node.data.webhook_trigger,
       test_payload: node.data.test_payload ?? {},
-      use_storage: node.data.use_storage ?? false,
+      ...storageGrantsToPayload(node.storageGrants),
       metadata: toNodeMetadata(node),
     })),
     telegram_trigger_node_list: nodeItems(nodeDiff.telegramNodes, (node) => ({

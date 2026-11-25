@@ -6,7 +6,7 @@ import { StorageApi } from '../api/storage.js';
 import { AgentDefinitionsApi } from '../api/agent-definitions.js';
 import { KeyValueTablesApi } from '../api/key-value-tables.js';
 import { KnowledgeApi } from '../api/knowledge.js';
-import { LlmApi, buildModelIndex, lookupModelId, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
+import { LlmApi, resolveDefaultEmbeddingConfigId } from '../api/llm.js';
 import { SecretsApi } from '../api/secrets.js';
 import { SurfacesApi } from '../api/surfaces.js';
 import { ToolsApi } from '../api/tools.js';
@@ -65,7 +65,6 @@ export class EntityPusher {
   private readonly venvs;
   /** Venvs seen while resolving `venv:` references — their build status feeds push warnings. */
   private readonly venvById = new Map<number, Venv>();
-  private modelIndex: Map<string, number> | null = null;
   private builtinToolIdByName: Map<string, number> | null = null;
 
   constructor(private readonly context: AppContext) {
@@ -228,7 +227,7 @@ export class EntityPusher {
 
   private async substituteTemplateRefs(value: unknown): Promise<unknown> {
     if (isModelRef(value)) {
-      return this.resolveModelId(value.$model, value.provider);
+      return this.llm.findModelId(value.$model);
     }
     if (isBuiltinToolRef(value)) {
       return this.resolveBuiltinToolId(value.$tool);
@@ -293,11 +292,6 @@ export class EntityPusher {
       );
     }
     return id;
-  }
-
-  private async resolveModelId(modelName: string, providerHint?: string): Promise<number> {
-    this.modelIndex ??= buildModelIndex(...(await Promise.all([this.llm.listModels(), this.llm.listProviders()])));
-    return lookupModelId(this.modelIndex, 'LLM model', modelName, providerHint, 'list_llm_models');
   }
 
   private async resolveExisting(plan: EntityPlan): Promise<number> {

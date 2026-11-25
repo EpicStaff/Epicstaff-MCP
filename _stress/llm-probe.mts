@@ -3,7 +3,7 @@ import { connect } from './lib.mjs';
 import { LlmApi } from '../src/api/llm.js';
 
 const configName = process.argv[2] ?? process.env.STRESS_LLM_CONFIG ?? 'stress-4o-mini';
-const modelPattern = new RegExp(process.env.STRESS_LLM_MODEL ?? 'gpt-4o-mini', 'i');
+const modelName = process.env.STRESS_LLM_MODEL ?? 'gpt-4o-mini';
 const context = await connect();
 const llm = new LlmApi(context.client);
 const config = (await llm.listConfigs()).find((candidate) => candidate.custom_name === configName);
@@ -18,5 +18,5 @@ if (!config) {
   }
   console.log(`LLM_CONFIG "${configName}" (#${config.id}):`, JSON.stringify(masked, null, 2));
 }
-const models = (await llm.listModels()).filter((model) => modelPattern.test(model.name));
+const models = (await llm.searchModels({ nameContains: modelName })).results;
 console.log('matching models:', JSON.stringify(models.map((model) => ({ id: model.id, name: model.name, provider: model.llm_provider }))));

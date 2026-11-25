@@ -31,7 +31,7 @@ const EPICSTAFF_INSTRUCTIONS = [
   'to their own state paths, not output_variable_path. Credentials come from env vars',
   '(api_key_env, bot_token_env) and are stored as org secrets on push — never in flow source;',
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
-  'llm_configs follow the backend bounds: temperature 0–2, max_tokens >= 500.',
+  'llm_configs follow the backend bounds: temperature 0–2, max_tokens >= 500; the backend checks every model setting against its catalog and refuses one the model does not take.',
   'Call describe_node_types for the full node catalog (fields + runtime caveats).',
   'Deleted flows, agents, surfaces, tools, collections, tables and secrets go to the recycle bin',
   '(list_recycle_bin / restore_from_recycle_bin); snapshot a flow before risky edits (create_graph_version).',

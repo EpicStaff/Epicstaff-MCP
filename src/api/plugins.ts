@@ -23,11 +23,15 @@ export interface AvailablePlugin {
   name: string;
   description: string;
   icon_url: string;
-  frame_origin: string;
+  /** null when the plugin is `unavailable`. */
+  frame_origin: string | null;
   /** Always contains `read`. */
   permissions: PluginAction[];
-  /** `maintenance`: being updated; it can't be opened until then. */
-  availability: 'ready' | 'maintenance';
+  /**
+   * `maintenance`: being updated; it can't be opened until then. `unavailable`: the plugin's host
+   * did not prove it is served by this EpicStaff, so it is not opened.
+   */
+  availability: 'ready' | 'maintenance' | 'unavailable';
   development: boolean;
   navigation: Array<{ label: string; path: string; icon_url: string }>;
 }

@@ -1,11 +1,12 @@
 /**
  * Ported from frontend `visual-programming/core/models/python-node.model.ts`,
  * `shared/models/tools/python-code.model.ts`, and the bulk-save emission in
- * `visual-programming/utils/save/payload.ts` (which sends `python_code` = node data minus `use_storage`).
+ * `visual-programming/utils/save/payload.ts` (which sends `python_code` = the node data, and the storage grant columns next to it).
  */
 
 import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
+import type { StorageGrantFields } from './storage-grants.js';
 
 /** A secret a python code block may read, by name (`DeclaredSecretRef`). Never carries the value. */
 export interface DeclaredSecretRef {
@@ -38,7 +39,6 @@ export interface CustomPythonCode {
   name: string;
   code: string;
   entrypoint: string;
-  use_storage?: boolean;
   /** Secrets this code may read (write side of `GetPythonCodeDto.secrets`). */
   secret_ids?: number[];
   venv_id?: number | null;
@@ -46,10 +46,7 @@ export interface CustomPythonCode {
   execution_timeout?: number;
 }
 
-/** `python_code` as emitted inside a python-node bulk-save item: `CustomPythonCode` minus `use_storage`. */
-export type PythonNodeCodeWrite = Omit<CustomPythonCode, 'use_storage'>;
-
-export interface PythonNodeDto extends AuthorshipFields, NumberedNodeDto {
+export interface PythonNodeDto extends AuthorshipFields, NumberedNodeDto, StorageGrantFields {
   id: number;
   /** Stable node identity (EpicStaff 1.5+), immutable once created. */
   uuid?: string;
@@ -61,16 +58,14 @@ export interface PythonNodeDto extends AuthorshipFields, NumberedNodeDto {
   test_input: Record<string, string | number | boolean>;
   output_variable_path: string | null;
   metadata: Record<string, unknown>;
-  use_storage?: boolean;
 }
 
-export interface PythonNodeWrite {
+export interface PythonNodeWrite extends Required<StorageGrantFields> {
   node_name: string;
   graph: number;
-  python_code: PythonNodeCodeWrite;
+  python_code: CustomPythonCode;
   input_map: Record<string, unknown>;
   output_variable_path: string | null;
-  use_storage: boolean;
   test_input: Record<string, string | number | boolean>;
   metadata: NodeDtoMetadata;
 }

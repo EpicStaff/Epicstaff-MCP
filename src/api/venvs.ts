@@ -59,6 +59,8 @@ export interface Venv {
   owner: VenvOwner | null;
   created_at: string | null;
   is_favorite: boolean;
+  /** Non-null when code with storage grants the user lacks runs in this venv: its libraries cannot be changed (renaming still can). */
+  libs_lock?: string | null;
 }
 
 export interface CreateVenvRequest {

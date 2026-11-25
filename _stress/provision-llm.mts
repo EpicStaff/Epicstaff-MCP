@@ -26,13 +26,6 @@ const context = await connect();
 const llm = new LlmApi(context.client);
 const secrets = new SecretsApi(context.client, context.auth);
 
-const [models, providers] = await Promise.all([llm.listModels(), llm.listProviders()]);
-const provider = providers.find((candidate) => candidate.name.toLowerCase() === providerName);
-const model = models.find(
-  (candidate) => candidate.name.toLowerCase() === modelName.toLowerCase() && (!provider || candidate.llm_provider === provider.id),
-);
-if (!model) throw new Error(`model "${modelName}" (provider ${providerName}) not found on this instance`);
-
 const name = secretName(KEY_ENV);
 let secret = await secrets.findByName(name);
 if (secret && secret.tail !== secretTail(key)) {
@@ -42,13 +35,14 @@ secret ??= await secrets.create(name, key);
 
 const body = {
   custom_name: configName,
-  model: model.id,
+  // The backend resolves the model from the two names (EpicStaff 1.6).
+  provider: providerName,
+  model_name: modelName,
   api_key_secret_id: secret.id,
-  temperature: 0,
-  max_tokens: 1000,
+  parameters: { temperature: 0, max_tokens: 1000 },
   timeout: 120,
   is_visible: true,
 };
 const existing = (await llm.listConfigs()).find((config) => config.custom_name === configName);
 const result = existing ? await llm.updateConfig(existing.id, body) : await llm.createConfig(body);
-console.log(`${existing ? 'UPDATED' : 'CREATED'} llm-config #${result.id} "${configName}" → model ${modelName} (#${model.id})`);
+console.log(`${existing ? 'UPDATED' : 'CREATED'} llm-config #${result.id} "${configName}" → model ${providerName}/${modelName} (#${result.model})`);

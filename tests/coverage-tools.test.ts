@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -436,8 +436,6 @@ describe('coverage tools (mock backend)', () => {
     process.env.COVERAGE_TEST_KEY = SECRET_VALUE;
     route('GET /api/secrets/', { status: 200, body: { count: 0, results: [] } });
     route('POST /api/secrets/', { status: 201, body: { id: 21, name: 'es-mcp:COVERAGE_TEST_KEY', tail: '1234' } });
-    route('GET /api/llm-models/', { status: 200, body: [{ id: 10, name: 'gpt-4o-mini', llm_provider: 1 }] });
-    route('GET /api/providers/', { status: 200, body: [{ id: 1, name: 'openai' }] });
     route('POST /api/llm-configs/', (request) => ({ status: 201, body: { id: 55, ...(request.body as object) } }));
 
     const result = await call('create_llm_config', {
@@ -446,17 +444,61 @@ describe('coverage tools (mock backend)', () => {
       provider: 'openai',
       api_key_env: 'COVERAGE_TEST_KEY',
       temperature: 0.3,
+      timeout: 30,
+      parameters: { top_k: 5 },
+      connection: { base_url: 'https://proxy.example/v1' },
     });
 
     expect(result.isError, result.text).toBe(false);
     expect(requests('POST', '/api/secrets/')[0]?.body).toEqual({ name: 'es-mcp:COVERAGE_TEST_KEY', value: SECRET_VALUE });
+    // Model settings travel in `parameters`, endpoint fields in `connection`; the backend resolves the pair of names.
     expect(requests('POST', '/api/llm-configs/')[0]?.body).toEqual({
       custom_name: 'fast',
-      model: 10,
+      provider: 'openai',
+      model_name: 'gpt-4o-mini',
       api_key_secret_id: 21,
-      temperature: 0.3,
+      timeout: 30,
+      parameters: { temperature: 0.3, top_k: 5 },
+      connection: { base_url: 'https://proxy.example/v1' },
     });
     expect(result.text).not.toContain(SECRET_VALUE);
+  });
+
+  it('create_llm_config looks a bare model name up by exact name and sends no parameters when none is set', async () => {
+    route('GET /api/llm-models/', { status: 200, body: { count: 1, results: [{ id: 10, name: 'gpt-4o-mini', llm_provider: 1 }] } });
+    route('POST /api/llm-configs/', (request) => ({ status: 201, body: { id: 55, ...(request.body as object) } }));
+
+    const result = await call('create_llm_config', { name: 'fast', model: 'gpt-4o-mini' });
+
+    expect(result.isError, result.text).toBe(false);
+    expect(requests('GET', '/api/llm-models/')[0]?.query.get('name')).toBe('gpt-4o-mini');
+    expect(requests('POST', '/api/llm-configs/')[0]?.body).toEqual({ custom_name: 'fast', model: 10, api_key_secret_id: null });
+  });
+
+  it('update_llm_config merges a changed setting into the stored parameters and connection', async () => {
+    const stored = {
+      id: 55,
+      custom_name: 'fast',
+      model: 10,
+      parameters: { temperature: 0.7, max_tokens: 4096, seed: 1 },
+      connection: { base_url: 'https://old.example', api_version: '2024-06-01' },
+    };
+    route('GET /api/llm-configs/', { status: 200, body: [stored] });
+    route('GET /api/llm-configs/55/', { status: 200, body: stored });
+    route('PATCH /api/llm-configs/55/', (request) => ({ status: 200, body: { ...stored, ...(request.body as object) } }));
+
+    const result = await call('update_llm_config', {
+      config: 'fast',
+      temperature: 0.1,
+      seed: null,
+      connection: { base_url: null },
+    });
+
+    expect(result.isError, result.text).toBe(false);
+    expect(requests('PATCH', '/api/llm-configs/55/')[0]?.body).toEqual({
+      parameters: { temperature: 0.1, max_tokens: 4096 },
+      connection: { api_version: '2024-06-01' },
+    });
   });
 
   it('delete_llm_config uses the bulk-delete route and passes dry_run through', async () => {
@@ -570,28 +612,50 @@ describe('coverage tools (mock backend)', () => {
     expect(requests('PATCH', '/api/graphs/77/')[0]?.body).toEqual({ save_version: 3, label_ids: [2] });
   });
 
-  it('export_entities writes the export document and reports what was left out', async () => {
-    const outputPath = join(stateDir, 'out', 'flows.json');
-    route('POST /api/graphs/bulk-export/', {
-      status: 200,
-      body: { main_entity: 'Flow', Flow: [{ id: 1 }, { id: 2 }] },
-      headers: { 'X-Export-Excluded': JSON.stringify([{ type: 'Agent', count: 1, names: ['Secret agent'] }]) },
-    });
+  /** Mock one export job: accepted, `job` on the first poll, the archive bytes on download. */
+  const routeExportJob = (listPath: string, job: Record<string, unknown>): void => {
+    route(`POST /api/${listPath}export-jobs/`, { status: 202, body: { job_id: 'job-1' } });
+    route('GET /api/transfer-jobs/job-1/', { status: 200, body: { id: 'job-1', kind: 'export', result: null, error: null, ...job } });
+    route('GET /api/transfer-jobs/job-1/download/', { status: 200, body: 'archive-bytes' });
+  };
+  const COMPLETED_EXPORT = { status: 'completed', file_name: 'flows.zip', result: { excluded: [] } };
+
+  it('export_entities runs an export job, downloads the archive and reports what was left out', async () => {
+    const outputPath = join(stateDir, 'out', 'flows.zip');
+    const excluded = [{ entity_type: 'Agent', entity_id: 4, name: null }];
+    routeExportJob('graphs/', { ...COMPLETED_EXPORT, result: { excluded } });
 
     const { isError, body } = await call('export_entities', { ids: [1, 2], output_path: outputPath });
 
     expect(isError, JSON.stringify(body)).toBe(false);
-    expect(requests('POST', '/api/graphs/bulk-export/')[0]?.body).toEqual({ ids: [1, 2] });
-    expect(JSON.parse(readFileSync(outputPath, 'utf8'))).toEqual({ main_entity: 'Flow', Flow: [{ id: 1 }, { id: 2 }] });
-    expect(body.data.excluded).toEqual([{ type: 'Agent', count: 1, names: ['Secret agent'] }]);
+    expect(requests('POST', '/api/graphs/export-jobs/')[0]?.body).toEqual({ ids: [1, 2], include_knowledge: true });
+    expect(readFileSync(outputPath, 'utf8')).toBe('"archive-bytes"');
+    expect(body.data).toMatchObject({ output_path: outputPath, file_name: 'flows.zip', bytes: 15, excluded });
   });
 
-  it('export_entities refuses an existing file, a non-.json path and a symbolic link; overwrite: true replaces', async () => {
+  it('export_entities reports a failed job and one that outlasts wait_seconds, writing nothing', async () => {
+    const outputPath = join(stateDir, 'flows.zip');
+    routeExportJob('python-code-tool/', { status: 'failed', error: { code: 'not_found', message: 'Tool 9 was not found.' } });
+
+    const failed = await call('export_entities', { kind: 'python_tool', ids: [9], output_path: outputPath });
+    expect(failed.body.error).toBe('The export failed: Tool 9 was not found.');
+    // Only flows and agent definitions take include_knowledge.
+    expect(requests('POST', '/api/python-code-tool/export-jobs/')[0]?.body).toEqual({ ids: [9] });
+
+    routeExportJob('python-code-tool/', { status: 'running' });
+    const slow = await call('export_entities', { kind: 'python_tool', ids: [9], output_path: outputPath, wait_seconds: 0 });
+    expect(slow.body.error).toMatch(/job job-1\) is still running on the server after 0s/);
+
+    expect(requests('GET', '/api/transfer-jobs/job-1/download/')).toHaveLength(0);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it('export_entities refuses an existing file, a non-.zip path and a symbolic link; overwrite: true replaces', async () => {
     const outDir = join(stateDir, 'exports');
     mkdirSync(outDir, { recursive: true });
-    const outputPath = join(outDir, 'flows.json');
+    const outputPath = join(outDir, 'flows.zip');
     writeFileSync(outputPath, 'keep me');
-    route('POST /api/graphs/bulk-export/', { status: 200, body: { main_entity: 'Flow', Flow: [{ id: 1 }, { id: 2 }] } });
+    routeExportJob('graphs/', COMPLETED_EXPORT);
 
     const existing = await call('export_entities', { ids: [1, 2], output_path: outputPath });
     expect(existing.isError).toBe(true);
@@ -600,13 +664,13 @@ describe('coverage tools (mock backend)', () => {
     );
     expect(readFileSync(outputPath, 'utf8')).toBe('keep me');
 
-    const notJson = await call('export_entities', { ids: [1, 2], output_path: join(outDir, 'flows.txt'), overwrite: true });
-    expect(notJson.body.error).toMatch(/must be an absolute path to a \.json file/);
+    const notZip = await call('export_entities', { ids: [1, 2], output_path: join(outDir, 'flows.json'), overwrite: true });
+    expect(notZip.body.error).toMatch(/must be an absolute path to a \.zip file/);
 
     // A link to a file elsewhere: never written through, with or without overwrite.
-    const target = join(stateDir, 'elsewhere.json');
+    const target = join(stateDir, 'elsewhere.zip');
     writeFileSync(target, 'precious');
-    const link = join(outDir, 'link.json');
+    const link = join(outDir, 'link.zip');
     symlinkSync(target, link);
     for (const overwrite of [false, true]) {
       const linked = await call('export_entities', { ids: [1, 2], output_path: link, overwrite });
@@ -614,14 +678,14 @@ describe('coverage tools (mock backend)', () => {
     }
     expect(readFileSync(target, 'utf8')).toBe('precious');
     // Refused paths cost no export request.
-    expect(requests('POST', '/api/graphs/bulk-export/')).toHaveLength(0);
+    expect(requests('POST', '/api/graphs/export-jobs/')).toHaveLength(0);
 
     const replaced = await call('export_entities', { ids: [1, 2], output_path: outputPath, overwrite: true });
     expect(replaced.isError, JSON.stringify(replaced.body)).toBe(false);
-    expect(JSON.parse(readFileSync(outputPath, 'utf8'))).toEqual({ main_entity: 'Flow', Flow: [{ id: 1 }, { id: 2 }] });
+    expect(readFileSync(outputPath, 'utf8')).toBe('"archive-bytes"');
   });
 
-  it('import_entities uploads the file as multipart with the editor\'s import options', async () => {
+  it('import_entities uploads a .json export as multipart with the editor\'s import options', async () => {
     const filePath = join(stateDir, 'flows.json');
     writeFileSync(filePath, '{"main_entity":"Flow"}');
     route('POST /api/graphs/import/', { status: 200, body: { Flow: { created: 1 } } });
@@ -640,19 +704,68 @@ describe('coverage tools (mock backend)', () => {
     expect(form.get('file')).toBeInstanceOf(Blob);
   });
 
-  it('export_entities and import_entities reach the agent-definitions transfer actions', async () => {
-    const outputPath = join(stateDir, 'agent.json');
-    route('GET /api/agent-definitions/5/export/', { status: 200, body: { main_entity: 'AgentDefinition' } });
-    route('POST /api/agent-definitions/import/', { status: 200, body: { AgentDefinition: { created: 1 } } });
+  it('import_entities uploads a .zip archive raw as an import job and returns its summary', async () => {
+    const filePath = join(stateDir, 'flows.zip');
+    writeFileSync(filePath, 'PK\x03\x04rest-of-archive', 'latin1');
+    const importJob = (job: Record<string, unknown>): void =>
+      route('GET /api/transfer-jobs/job-2/', { status: 200, body: { id: 'job-2', kind: 'import', result: null, error: null, ...job } });
+    for (const listPath of ['graphs', 'agent-definitions', 'source-collections']) {
+      route(`POST /api/${listPath}/import-jobs/`, { status: 202, body: { job_id: 'job-2' } });
+    }
+    importJob({ status: 'completed', result: { Flow: { created: 1 } } });
 
-    const exported = await call('export_entities', { kind: 'agent_definition', ids: [5], output_path: outputPath });
-    const imported = await call('import_entities', { kind: 'agent_definition', file_path: outputPath, import_labels: false });
+    const imported = await call('import_entities', { file_path: filePath, preserve_uuids: true });
 
-    expect(exported.isError, JSON.stringify(exported.body)).toBe(false);
     expect(imported.isError, JSON.stringify(imported.body)).toBe(false);
+    expect(imported.body.data.imported).toEqual({ Flow: { created: 1 } });
+    const upload = requests('POST', '/api/graphs/import-jobs/')[0]!;
+    expect(Object.fromEntries(upload.query)).toEqual({
+      file_name: 'flows.zip',
+      preserve_uuids: 'true',
+      replace_existing: 'false',
+      import_labels: 'true',
+    });
+    expect((upload.body as Blob).type).toBe('application/zip');
+    expect((upload.body as Blob).size).toBe(19);
+
+    // Each kind sends only the query parameters its route declares.
+    await call('import_entities', { kind: 'agent_definition', file_path: filePath, import_labels: false });
+    expect(Object.fromEntries(requests('POST', '/api/agent-definitions/import-jobs/')[0]!.query)).toEqual({
+      file_name: 'flows.zip',
+      import_labels: 'false',
+    });
+    await call('import_entities', { kind: 'collection', file_path: filePath });
+    expect(Object.fromEntries(requests('POST', '/api/source-collections/import-jobs/')[0]!.query)).toEqual({ file_name: 'flows.zip' });
+
+    importJob({ status: 'failed', error: { code: 'invalid_archive', message: 'export.json is missing.' } });
+    expect((await call('import_entities', { file_path: filePath })).body.error).toBe('The import failed: export.json is missing.');
+    importJob({ status: 'queued' });
+    expect((await call('import_entities', { file_path: filePath, wait_seconds: 0 })).body.error).toMatch(
+      /still queued on the server after 0s.*before importing the file again/,
+    );
+  });
+
+  it('import_entities keeps tool archives and .json files on the in-request import; collections need a .zip', async () => {
+    const zipPath = join(stateDir, 'tools.zip');
+    writeFileSync(zipPath, 'PK\x03\x04rest-of-archive', 'latin1');
+    const jsonPath = join(stateDir, 'agent.json');
+    writeFileSync(jsonPath, '{"main_entity":"AgentDefinition"}');
+    route('POST /api/python-code-tool/import/', { status: 200, body: { PythonCodeTool: { created: 1 } } });
+    route('POST /api/agent-definitions/import/', { status: 200, body: { AgentDefinition: { created: 1 } } });
+    route('POST /api/source-collections/import/inspect/', { status: 200, body: { review_items: [] } });
+
+    const tool = await call('import_entities', { kind: 'python_tool', file_path: zipPath });
+    const agent = await call('import_entities', { kind: 'agent_definition', file_path: jsonPath, import_labels: false });
+    const collection = await call('import_entities', { kind: 'collection', file_path: jsonPath });
+    const inspected = await call('import_entities', { kind: 'collection', file_path: zipPath, inspect_only: true });
+
+    expect(tool.isError, JSON.stringify(tool.body)).toBe(false);
+    expect(agent.isError, JSON.stringify(agent.body)).toBe(false);
     const form = requests('POST', '/api/agent-definitions/import/')[0]!.body as FormData;
     expect(form.get('import_labels')).toBe('false');
     expect(form.has('preserve_uuids')).toBe(false);
+    expect(collection.body.error).toMatch(/imported from the \.zip archive/);
+    expect(inspected.body.data.inspected).toEqual({ review_items: [] });
   });
 
   it('get_flow_persistent_state returns only the asked flow\'s org and member state', async () => {
