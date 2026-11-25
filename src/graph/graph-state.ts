@@ -13,6 +13,7 @@ import type { AgentNodeTaskUi } from '../models/nodes/agent-node.js';
 import type { KeyValueNodeData } from '../models/nodes/key-value-node.js';
 import type { KnowledgeRetrieverNodeData } from '../models/nodes/knowledge-retriever-node.js';
 import type { CustomPythonCode } from '../models/nodes/python-node.js';
+import type { StorageGrants } from '../models/nodes/storage-grants.js';
 import type { NoteLinkedRegion } from '../models/nodes/note-node.js';
 import type { InlineSurface } from '../models/nodes/task-node.js';
 import type { TelegramTriggerFieldWrite } from '../models/nodes/telegram-trigger-node.js';
@@ -46,6 +47,11 @@ export interface GraphNodeBase {
   nodeNumber?: number;
   input_map: Record<string, unknown>;
   output_variable_path: string | null;
+  /**
+   * What this node's code may do with the flow's attached files (python and webhook-trigger nodes).
+   * Flow source cannot author it: it is carried over from the persisted node; absent means no access.
+   */
+  storageGrants?: StorageGrants;
 }
 
 export interface StartGraphNode extends GraphNodeBase {
@@ -117,8 +123,6 @@ export interface WebhookTriggerGraphNode extends GraphNodeBase {
     webhook_trigger: WebhookTriggerRef | null;
     python_code: CustomPythonCode;
     test_payload?: Record<string, unknown>;
-    /** Whether the code gets the flow's file storage (`epicstaff_storage`). */
-    use_storage?: boolean;
   };
 }
 
@@ -259,9 +263,6 @@ export interface CdtTableState {
   next_error_node?: string | null;
   pre_computation?: CdtComputationState;
   post_computation?: CdtComputationState;
-  /** Whether the pre / post computation code gets the flow's file storage. */
-  pre_use_storage?: boolean;
-  post_use_storage?: boolean;
   sections?: CdtSectionState[];
   /** Legacy flat fields — read as fallbacks, mirroring the frontend. */
   pre_computation_code?: string;
@@ -280,6 +281,9 @@ export interface ClassificationDecisionTableGraphNode extends GraphNodeBase {
    * cannot author them; they are carried over from the persisted node so a repush keeps them.
    */
   explanations?: Record<string, unknown>;
+  /** Grants of the pre-code and the post-code slot; they replace `storageGrants`, which this node never uses. */
+  preStorageGrants?: StorageGrants;
+  postStorageGrants?: StorageGrants;
 }
 
 export type GraphNode =

@@ -10,6 +10,10 @@ import { type Paginated, unwrap } from './paging.js';
  *
  * Configs are org-scoped and name-unique per org; models are a hybrid catalog (built-in models
  * plus the org's custom ones); providers are a global catalog only a superadmin may change.
+ *
+ * Since EpicStaff 1.6 a config keeps its generation settings in `parameters` and its endpoint
+ * fields in `connection` (shared/models/llms/model-catalog.model.ts); the backend checks both
+ * against its model catalog and refuses the old flat fields (temperature, base_url, …) by name.
  */
 export interface LlmProvider {
   id: number;
@@ -21,57 +25,69 @@ export interface LlmModel {
   id: number;
   name: string;
   llm_provider: number;
-  base_url?: string | null;
   is_visible?: boolean;
   is_custom?: boolean;
 }
 
-export interface LlmConfig extends Partial<AuthorshipFields> {
+export interface LlmConfig extends Partial<AuthorshipFields>, CatalogConfigFields {
   id: number;
   custom_name: string;
   model: number;
   is_visible?: boolean;
-  temperature?: number | null;
   api_key_secret_id?: number | null;
   [key: string]: unknown;
 }
 
 /** `CreateLLMConfigRequest` (shared/models/llms/llm-config.model.ts), the fields MCP sends. */
-export interface CreateLlmConfigRequest {
+interface LlmConfigWriteFields {
   custom_name: string;
-  model: number;
   /** Org Secret holding the provider API key (LLMConfigSerializer.api_key_secret_id). */
   api_key_secret_id?: number | null;
-  temperature?: number | null;
-  top_p?: number | null;
-  stop?: string[] | null;
-  max_tokens?: number | null;
-  presence_penalty?: number | null;
-  frequency_penalty?: number | null;
-  seed?: number | null;
+  /** Left out on create, the backend stores the model's defaults. */
+  parameters?: Record<string, unknown>;
+  connection?: Record<string, string>;
   timeout?: number | null;
-  reasoning_effort?: string | null;
   is_visible?: boolean;
   extra_headers?: Record<string, string>;
   input_cost_per_token?: number | null;
   output_cost_per_token?: number | null;
 }
 
+export type CreateLlmConfigRequest = LlmConfigWriteFields & ConfigModelReference;
+/** A PATCH body: any subset, the model named either way. */
+export type UpdateLlmConfigRequest = Partial<LlmConfigWriteFields> & Partial<{ model: number; provider: string; model_name: string }>;
+
 export interface EmbeddingModel {
   id: number;
   name: string;
   embedding_provider: number;
-  base_url?: string | null;
   is_visible?: boolean;
   is_custom?: boolean;
 }
 
+/** `CatalogConfigFields`: what a stored LLM or embedding config carries about its model. */
+export interface CatalogConfigFields {
+  /** Read-only: the provider row's name; null when the config has no model. */
+  provider?: string | null;
+  /** Read-only: the model row's name. */
+  model_name?: string | null;
+  /** The model's settings (temperature, max_tokens, …). A PATCH replaces the whole object. */
+  parameters?: Record<string, unknown>;
+  /** The provider's connection fields (base_url, api_version, …). A PATCH replaces the whole object. */
+  connection?: Record<string, string>;
+  /** Read-only: the model or settings no longer match the catalog. The config still runs. */
+  needs_review?: boolean;
+  review_reasons?: string[];
+}
+
+/** `ConfigModelReference`: a model row id, or the provider and model name (resolved by the backend). */
+export type ConfigModelReference = { model: number } | { provider: string; model_name: string };
+
 /** `GetEmbeddingConfigRequest` (shared/models/embeddings/embedding-config.model.ts). */
-export interface EmbeddingConfig extends Partial<AuthorshipFields> {
+export interface EmbeddingConfig extends Partial<AuthorshipFields>, CatalogConfigFields {
   id: number;
   custom_name: string;
   model: number;
-  task_type?: string;
   api_key_secret_id?: number | null;
   is_visible?: boolean;
   extra_headers?: Record<string, string>;
@@ -83,7 +99,8 @@ export interface CreateEmbeddingConfigRequest {
   custom_name: string;
   model: number;
   api_key_secret_id: number | null;
-  task_type?: string;
+  parameters?: Record<string, unknown>;
+  connection?: Record<string, string>;
   is_visible?: boolean;
   extra_headers?: Record<string, string>;
 }
@@ -109,8 +126,41 @@ export class LlmApi {
     return unwrap(await this.client.get<Paginated<LlmProvider> | LlmProvider[]>('providers/', { query: { limit: 1000 } }));
   }
 
-  async listModels(): Promise<LlmModel[]> {
-    return unwrap(await this.client.get<Paginated<LlmModel> | LlmModel[]>('llm-models/', { query: { limit: 1000 } }));
+  /**
+   * One page of the model rows, filtered by the backend (LLMModelFilter): the catalog holds
+   * thousands of models and a list request is capped at 1000 rows, so it is never loaded whole.
+   */
+  async searchModels(filter: { name?: string; nameContains?: string; providerId?: number; limit?: number }): Promise<Paginated<LlmModel>> {
+    const response = await this.client.get<Paginated<LlmModel> | LlmModel[]>('llm-models/', {
+      query: {
+        limit: filter.limit ?? 1000,
+        ...(filter.name !== undefined ? { name: filter.name } : {}),
+        ...(filter.nameContains !== undefined ? { name__icontains: filter.nameContains } : {}),
+        ...(filter.providerId !== undefined ? { llm_provider: filter.providerId } : {}),
+      },
+    });
+    return Array.isArray(response) ? { count: response.length, results: response } : response;
+  }
+
+  /**
+   * How a config write names the LLM model `modelName`. With a provider the backend resolves the
+   * pair itself (aliases, provider-prefixed names, and a new custom model where the provider takes
+   * them); without one the model row of that exact name is looked up, the first when providers share it.
+   */
+  async modelReference(modelName: string, provider: string | undefined): Promise<ConfigModelReference> {
+    return provider !== undefined ? { provider, model_name: modelName } : { model: await this.findModelId(modelName) };
+  }
+
+  /** The id of the model row named exactly `modelName`; an unknown name is an actionable error. */
+  async findModelId(modelName: string): Promise<number> {
+    const row = (await this.searchModels({ name: modelName, limit: 1 })).results[0];
+    if (row === undefined) {
+      throw new Error(
+        `LLM model "${modelName}" not found on the backend. Check the name with list_llm_models, ` +
+          'or name its provider too (a provider that takes custom models then accepts a new model name).',
+      );
+    }
+    return row.id;
   }
 
   async listConfigs(): Promise<LlmConfig[]> {
@@ -126,7 +176,7 @@ export class LlmApi {
   }
 
   /** PATCH, not the frontend's full PUT: only the fields the caller names change. */
-  async updateConfig(id: number, request: Partial<CreateLlmConfigRequest>): Promise<LlmConfig> {
+  async updateConfig(id: number, request: UpdateLlmConfigRequest): Promise<LlmConfig> {
     return this.client.patch(`llm-configs/${id}/`, { body: request });
   }
 

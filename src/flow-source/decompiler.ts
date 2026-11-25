@@ -18,7 +18,7 @@
  *
  * Known lossy pulls (each emits a warning; none affect graph topology):
  *  - agent-node sub-tasks; task-node output_schema / remember_output;
- *  - python-node test_input / use_storage; declared python secrets and execution
+ *  - python-node test_input / storage grants; declared python secrets and execution
  *    timeout (both kept on repush);
  *  - webhook-trigger python code + input map; telegram-trigger field mappings; the
  *    attached webhook trigger and telegram bot-token secret are not representable
@@ -802,8 +802,8 @@ function buildNodeBody(
     }
 
     case 'python': {
-      if (entry.dto.use_storage) {
-        warnings.push(`${atPath}: use_storage is not representable in flow source and resets on the next push`);
+      if (entry.dto.storage_grant_read || entry.dto.storage_grant_write || entry.dto.storage_grant_delete) {
+        warnings.push(`${atPath}: storage grants are not representable in flow source — they are kept on the next push`);
       }
       if ((entry.dto.python_code.secrets ?? []).length > 0) {
         warnings.push(

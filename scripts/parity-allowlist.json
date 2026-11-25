@@ -79,7 +79,7 @@
     {
       "pattern": "classification-decision-table-node/*",
       "category": "per-node-crud",
-      "reason": "CRUD is covered by the graph bulk save. Its export / explain / explanations actions (CSV-JSON export and LLM explanations of the table's steps in the editor panel) are not exposed yet."
+      "reason": "CRUD is covered by the graph bulk save. Its export-jobs / explain / explanations actions (CSV-JSON export and LLM explanations of the table's steps in the editor panel) are not exposed yet."
     },
     {
       "pattern": "telegram-trigger-nodes/*",
@@ -225,6 +225,36 @@
       "pattern": "graph-rag/{}/documents/*",
       "category": "backlog",
       "reason": "Graph RAG document selection (list / initialize / remove). Not exposed yet; also what a full-collection graph indexing needs to send its document ids."
+    },
+    {
+      "pattern": "graph-rag/{}/visualization/",
+      "category": "ui-preview",
+      "reason": "Graph RAG explorer of the knowledge page (the entity graph, its tables and one entity's or relationship's description) \u2014 a visual read of an index, not exposed yet."
+    },
+    {
+      "pattern": "graph-rag/{}/entity/{}/",
+      "category": "ui-preview",
+      "reason": "Graph RAG explorer of the knowledge page (the entity graph, its tables and one entity's or relationship's description) \u2014 a visual read of an index, not exposed yet."
+    },
+    {
+      "pattern": "graph-rag/{}/relationship/{}/",
+      "category": "ui-preview",
+      "reason": "Graph RAG explorer of the knowledge page (the entity graph, its tables and one entity's or relationship's description) \u2014 a visual read of an index, not exposed yet."
+    },
+    {
+      "pattern": "graph-rag/{}/table-summary/",
+      "category": "ui-preview",
+      "reason": "Graph RAG explorer of the knowledge page (the entity graph, its tables and one entity's or relationship's description) \u2014 a visual read of an index, not exposed yet."
+    },
+    {
+      "pattern": "graph-rag/{}/tables/{}/",
+      "category": "ui-preview",
+      "reason": "Graph RAG explorer of the knowledge page (the entity graph, its tables and one entity's or relationship's description) \u2014 a visual read of an index, not exposed yet."
+    },
+    {
+      "pattern": "ai-models//*",
+      "category": "backlog",
+      "reason": "Model catalog behind the config form: providers per kind, models per provider, and one model's settings and connection schemas. MCP names a config's model by provider and name and lets the backend check the settings (create_llm_config); reading a model's schema is not exposed yet."
     },
     {
       "pattern": "process-rag-indexing/{}/{}/cancel/",

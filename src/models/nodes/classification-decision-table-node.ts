@@ -7,6 +7,7 @@
 import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 import type { DeclaredSecretRef } from './python-node.js';
+import type { CdtStorageGrantFields } from './storage-grants.js';
 
 export interface CdtPythonCodeBlock {
   code: string;
@@ -137,7 +138,7 @@ export interface CdtConditionGroupWrite {
   field_manipulations: Record<string, string>;
 }
 
-export interface ClassificationDecisionTableNodeDto extends AuthorshipFields, NumberedNodeDto {
+export interface ClassificationDecisionTableNodeDto extends AuthorshipFields, NumberedNodeDto, CdtStorageGrantFields {
   id: number;
   /** Stable node identity (EpicStaff 1.5+), immutable once created. */
   uuid?: string;
@@ -147,11 +148,9 @@ export interface ClassificationDecisionTableNodeDto extends AuthorshipFields, Nu
   pre_python_code: CdtPythonCodeBlock | null;
   pre_input_map: Record<string, string>;
   pre_output_variable_path: string | null;
-  pre_use_storage: boolean;
   post_python_code: CdtPythonCodeBlock | null;
   post_input_map: Record<string, string>;
   post_output_variable_path: string | null;
-  post_use_storage: boolean;
   prompt_configs: PromptConfigDto[];
   default_llm_config: number | null;
   default_next_node_id: number | null;
@@ -161,17 +160,15 @@ export interface ClassificationDecisionTableNodeDto extends AuthorshipFields, Nu
   metadata?: unknown;
 }
 
-export interface ClassificationDecisionTableNodeWrite {
+export interface ClassificationDecisionTableNodeWrite extends Required<CdtStorageGrantFields> {
   graph: number;
   node_name: string;
   pre_python_code: CdtPythonCodeBlock | null;
   pre_input_map: Record<string, string>;
   pre_output_variable_path: string | null;
-  pre_use_storage: boolean;
   post_python_code: CdtPythonCodeBlock | null;
   post_input_map: Record<string, string>;
   post_output_variable_path: string | null;
-  post_use_storage: boolean;
   prompt_configs: PromptConfigWrite[];
   default_llm_config: number | null;
   /** Emitted only when resolved to a persisted node (mirrors frontend conditional spread). */

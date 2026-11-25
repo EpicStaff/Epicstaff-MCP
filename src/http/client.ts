@@ -23,6 +23,10 @@ export interface RequestOptions {
   body?: unknown;
   /** Multipart body — used by document upload; takes precedence over `body`. */
   formData?: FormData;
+  /** Raw body sent as is, with the blob's type as Content-Type (import-job archive upload). */
+  rawBody?: Blob;
+  /** Resolve with the response bytes (`Uint8Array`) instead of parsed JSON (export archive download). */
+  binary?: boolean;
   /** Skip API-key + org headers (auth endpoints). */
   skipAuth?: boolean;
   /** Use a one-off bearer token instead of the API key (minting the key, JWT-only routes). */
@@ -115,8 +119,8 @@ export class EpicStaffClient {
     const headers = this.buildHeaders(url, options);
 
     const init: RequestInit = { method, headers };
-    if (options.formData) {
-      init.body = options.formData;
+    if (options.formData ?? options.rawBody) {
+      init.body = options.formData ?? options.rawBody;
     } else if (options.body !== undefined) {
       headers.set('Content-Type', 'application/json');
       init.body = JSON.stringify(options.body);
@@ -150,6 +154,9 @@ export class EpicStaffClient {
 
     if (response.status === 204) {
       return undefined as T;
+    }
+    if (options.binary) {
+      return new Uint8Array(await response.arrayBuffer()) as T;
     }
     const text = await response.text();
     return (text ? JSON.parse(text) : undefined) as T;

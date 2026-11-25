@@ -55,8 +55,9 @@ latest plugin `1.2.*`, whatever EpicStaff patch you run. `main` of this repo tra
 
 | EpicStaff | Plugin |
 |---|---|
-| 1.6 (`developer`, unreleased) | `1.6.0-dev.N` (`main`) |
-| 1.5.x | `1.5.y` (`release/v1.5.x`) |
+| 1.7 (`developer`, unreleased) | `1.7.0-dev.N` (`main`) |
+| 1.6.x | `1.6.y` (`release/v1.6.x`) |
+| 1.5.x | `1.5.y` (`release/v1.5.x`) — does not work with EpicStaff 1.6 (LLM config settings, exports and node storage access changed there) |
 | 1.4.x | `1.4.y` (`release/v1.4.x`) — does not work with EpicStaff 1.5 (API keys are bound to one organization there) |
 | 1.2.x | `1.2.y` (`release/v1.2.x` line, coming) |
 
@@ -220,7 +221,7 @@ the fields selected on the node, which flow source cannot express — select the
 | Flow source | `init_flow`, `validate_flow`, `build_flow`, `diff_flow`, `push_flow`, `pull_flow`, `provision_knowledge`, `describe_node_types` |
 | Flows | `list_graphs`, `describe_graph` (with node numbers and who created / last edited the flow and each node), `copy_flow`, `delete_flow`, `set_flow_labels`, `get_flow_persistent_state`, `dump_graph`, `restore_graph` |
 | Versions | `list_graph_versions`, `create_graph_version`, `restore_graph_version` (in place with a backup version, or as a new flow) |
-| Import / export | `export_entities`, `import_entities` — EpicStaff export documents of flows, python tools, MCP tools or agent definitions (export writes a new `.json` file; it replaces an existing one only with `overwrite: true`, never through a symbolic link) |
+| Import / export | `export_entities`, `import_entities` — EpicStaff export archives of flows, python tools, MCP tools, agent definitions or knowledge collections. EpicStaff runs an export as a background job; the tool waits for it (`wait_seconds`) and writes a new `.zip` file (it replaces an existing one only with `overwrite: true`, never through a symbolic link). Flows and agents carry the knowledge collections they use unless `include_knowledge: false`. Import takes a `.zip`, or a `.json` export of an older version |
 | Recycle bin | `list_recycle_bin`, `restore_from_recycle_bin` (by ids, or a whole bin of one kind with `all: true`), `purge_from_recycle_bin` (by ids only; superadmin, `confirm: true`), `empty_recycle_bin` (every bin of the active organization; superadmin, `confirm: true` + `organization_id`) |
 | Catalog | `create_agent`, `update_agent`, `copy_agent`, `get_agent`, `delete_agent`, `create_surface`, `update_surface`, `get_surface`, `delete_surface`, `list_agents`, `list_surfaces` |
 | Tools | `list_tools`, `create_python_tool`, `update_python_tool`, `delete_python_tool`, `create_mcp_tool`, `update_mcp_tool`, `delete_mcp_tool` |

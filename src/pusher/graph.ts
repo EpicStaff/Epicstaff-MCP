@@ -461,10 +461,10 @@ export class GraphPusher {
 /**
  * Keep node settings flow source cannot express, so a repush does not wipe what a user
  * attached in the EpicStaff editor: a trigger node's `webhook_trigger` (path / provider
- * live in `webhook-triggers/`), test payload and storage access, a telegram node's
+ * live in `webhook-triggers/`), test payload, a telegram node's
  * bot-token secret when the source sets no `bot_token_env` and its fields, the secrets, virtual
- * environment and execution timeout of python code, and a classification table's
- * generated step explanations. Only nodes matched to a persisted node (same backend id
+ * environment and execution timeout of python code, the storage grants of python, webhook-trigger and
+ * classification nodes, and a classification table's generated step explanations. Only nodes matched to a persisted node (same backend id
  * and type) inherit; the source still wins wherever it states a value.
  *
  * It also carries over the backend identities the compiler cannot know, so an unchanged node
@@ -484,7 +484,7 @@ export function inheritUnrepresentableFields(desired: GraphState, remote: GraphS
     if (node.type === 'webhook-trigger' && previous.type === 'webhook-trigger') {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.test_payload ??= previous.data.test_payload;
-      node.data.use_storage ??= previous.data.use_storage;
+      node.storageGrants ??= previous.storageGrants;
       inheritPythonCodeSettings(node.data.python_code, previous.data.python_code);
     } else if (node.type === 'telegram-trigger' && previous.type === 'telegram-trigger') {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
@@ -495,10 +495,11 @@ export function inheritUnrepresentableFields(desired: GraphState, remote: GraphS
       if (node.data.fields.length === 0) node.data.fields = previous.data.fields;
     } else if (node.type === 'python' && previous.type === 'python') {
       inheritPythonCodeSettings(node.data, previous.data);
-      // Flow source cannot set use_storage; the wire default is false (bulk-save `?? false`).
-      node.data.use_storage ??= false;
+      node.storageGrants ??= previous.storageGrants;
     } else if (node.type === 'classification-decision-table' && previous.type === 'classification-decision-table') {
       node.explanations ??= previous.explanations;
+      node.preStorageGrants ??= previous.preStorageGrants;
+      node.postStorageGrants ??= previous.postStorageGrants;
     } else if (node.type === 'agent' && previous.type === 'agent') {
       inheritAgentTaskIds(node.data.tasks ?? [], previous.data.tasks ?? []);
     } else if (node.type === 'note' && previous.type === 'note') {

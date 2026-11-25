@@ -6,6 +6,7 @@ import {
   type CreateEmbeddingConfigRequest,
   type CreateLlmConfigRequest,
   type DefaultModels,
+  type UpdateLlmConfigRequest,
   LlmApi,
   buildModelIndex,
   lookupModelId,
@@ -41,10 +42,67 @@ const apiKeyEnvSchema = credentialEnvName(
 
 const apiKeySecretSchema = idOrName.describe('An existing org Secret (list_secrets) holding the provider API key: id or name.');
 
-/** Generation settings of an LLM config (CreateLLMConfigRequest), bounded like the backend model. */
+/** The tool inputs that are model settings: they are stored in the config's `parameters`. */
+const LLM_PARAMETER_INPUTS = new Set([
+  'temperature',
+  'max_tokens',
+  'top_p',
+  'seed',
+  'stop',
+  'presence_penalty',
+  'frequency_penalty',
+  'reasoning_effort',
+]);
+
+/** `changes` applied over `current`; a null value removes the key (stored "not set"). */
+function mergeSettings<T>(current: Record<string, T> | undefined, changes: Record<string, T | null>): Record<string, T> {
+  const merged: Record<string, T> = { ...current };
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+
+/**
+ * Split the flat tool inputs into the config's own columns and the changes to its `parameters`
+ * (the named settings, then the free-form `parameters` input).
+ */
+function splitLlmFields(fields: Record<string, unknown>): {
+  columns: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+} {
+  const { parameters: extra, ...flat } = fields;
+  const columns: Record<string, unknown> = {};
+  const parameters: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(pickDefined(flat))) {
+    (LLM_PARAMETER_INPUTS.has(key) ? parameters : columns)[key] = value;
+  }
+  return { columns, parameters: { ...parameters, ...(extra as Record<string, unknown> | undefined) } };
+}
+
+const connectionSchema = z
+  .record(z.string(), z.string().nullable())
+  .optional()
+  .describe(
+    'Connection fields the provider declares: base_url (custom / self-hosted endpoint), azure api_version and ' +
+      'deployment_id, bedrock aws_region_name, vertex_ai vertex_project / vertex_location, … A secret field takes an ' +
+      '"epicstaff_secret(<org secret name>)" marker, never the value. null removes a field.',
+  );
+
+/**
+ * Settings of an LLM config. The model settings (LLM_PARAMETER_INPUTS, `parameters`) are checked by
+ * the backend against its model catalog: a setting or value the model does not take is refused.
+ */
 const llmConfigFieldsShape = {
-  temperature: z.number().min(0).max(2).nullable().optional().describe('Sampling temperature, 0–2.'),
-  max_tokens: z.number().int().min(500).nullable().optional().describe('Max output tokens (backend minimum 500).'),
+  temperature: z.number().min(0).max(2).nullable().optional().describe('Sampling temperature, 0–2 (some providers stop at 1).'),
+  max_tokens: z
+    .number()
+    .int()
+    .min(500)
+    .nullable()
+    .optional()
+    .describe('Max output tokens (backend minimum 500, at most the model\'s output limit).'),
   top_p: z.number().min(0).max(1).nullable().optional(),
   timeout: z.number().positive().nullable().optional().describe('Request timeout in seconds.'),
   seed: z.number().int().nullable().optional(),
@@ -58,6 +116,11 @@ const llmConfigFieldsShape = {
     .describe('Reasoning effort for models that support it (the backend refuses levels the model lacks).'),
   input_cost_per_token: z.number().min(0).nullable().optional().describe('USD per prompt token; set with output_cost_per_token.'),
   output_cost_per_token: z.number().min(0).nullable().optional().describe('USD per completion token; set with input_cost_per_token.'),
+  parameters: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe('Any other model setting by its catalog name (top_k, verbosity, logit_bias, …); null removes one.'),
+  connection: connectionSchema,
   extra_headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers sent to the provider.'),
   is_visible: z.boolean().optional().describe('Whether the config is offered in pickers.'),
 } as const;
@@ -84,11 +147,11 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
       (config) => config.custom_name,
     );
 
-  async function resolveLlmModel(ref: number | string, provider: string | undefined): Promise<number> {
-    if (typeof ref === 'number') return ref;
-    const index = buildModelIndex(...(await Promise.all([llm.listModels(), llm.listProviders()])));
-    return lookupModelId(index, 'LLM model', ref, provider, 'list_llm_models');
-  }
+  const resolveLlmModel = async (
+    ref: number | string,
+    provider: string | undefined,
+  ): Promise<{ model: number } | { provider: string; model_name: string }> =>
+    typeof ref === 'number' ? { model: ref } : llm.modelReference(ref, provider);
 
   async function resolveEmbeddingModel(ref: number | string, provider: string | undefined): Promise<number> {
     if (typeof ref === 'number') return ref;
@@ -128,25 +191,37 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
       description:
         'Create an org LLM config (a model + its generation settings + the provider key) that agents and ' +
         'classification tables reference by name. Names are org-unique; on a clash use update_llm_config. ' +
-        'The key comes from api_key_env (an env var of the MCP server) or api_key_secret (an existing org secret).',
+        'The key comes from api_key_env (an env var of the MCP server) or api_key_secret (an existing org secret). ' +
+        'With no model setting passed the backend stores the model\'s defaults; once any is passed, only those are ' +
+        'stored and the rest stay unset (provider default).',
       inputSchema: {
         name: z.string().min(1).describe('Org-unique config name (custom_name) — the handle flows reference.'),
         model: idOrName.describe('LLM model: backend id or exact model name (list_llm_models).'),
-        provider: z.string().optional().describe('Provider name to disambiguate a model name several providers share.'),
+        provider: z
+          .string()
+          .optional()
+          .describe(
+            'Provider name (openai, anthropic, azure, …). Name it for a model several providers share, and for a ' +
+              'model the catalog does not list: a provider that takes custom models (azure, ollama, openrouter, …) ' +
+              'then gets a new custom model of that name.',
+          ),
         api_key_env: apiKeyEnvSchema.optional(),
         api_key_secret: apiKeySecretSchema.optional(),
         ...llmConfigFieldsShape,
       },
     },
-    async ({ name, model, provider, api_key_env, api_key_secret, ...fields }) =>
+    async ({ name, model, provider, api_key_env, api_key_secret, connection, ...fields }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
+        const { columns, parameters } = splitLlmFields(fields);
         const request: CreateLlmConfigRequest = {
           custom_name: name,
-          model: await resolveLlmModel(model, provider),
+          ...(await resolveLlmModel(model, provider)),
           api_key_secret_id: (await resolveApiKey(api_key_env, api_key_secret)) ?? null,
-          ...pickDefined(fields),
+          ...columns,
+          ...(Object.keys(parameters).length > 0 ? { parameters: mergeSettings({}, parameters) } : {}),
+          ...(connection !== undefined ? { connection: mergeSettings({}, connection) } : {}),
         };
         const created = await createOrExplainConflict(() => llm.createConfig(request), name, 'update_llm_config');
         return {
@@ -161,8 +236,9 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
     {
       title: 'Update an LLM config',
       description:
-        'Change an LLM config (PATCH — only the fields you pass change; null clears a setting). Every agent and ' +
-        'flow using it picks the change up on its next run.',
+        'Change an LLM config (only the fields and settings you pass change; null clears a setting). Every agent and ' +
+        'flow using it picks the change up on its next run. A new model must take the settings the config keeps, ' +
+        'or the backend refuses the change and names them: clear those in the same call.',
       inputSchema: {
         config: idOrName.describe('The config to update: backend id or exact name (list_llm_configs).'),
         name: z.string().min(1).optional().describe('New name.'),
@@ -173,17 +249,24 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
         ...llmConfigFieldsShape,
       },
     },
-    async ({ config, name, model, provider, api_key_env, api_key_secret, ...fields }) =>
+    async ({ config, name, model, provider, api_key_env, api_key_secret, connection, ...fields }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
         const configId = await resolveLlmConfig(config);
         const credential = await resolveApiKey(api_key_env, api_key_secret);
-        const request: Partial<CreateLlmConfigRequest> = {
+        const { columns, parameters } = splitLlmFields(fields);
+        // The backend replaces `parameters` and `connection` whole, so a partial change is merged
+        // into what the config holds now.
+        const changesSettings = Object.keys(parameters).length > 0 || connection !== undefined;
+        const current = changesSettings ? await llm.getConfig(configId) : undefined;
+        const request: UpdateLlmConfigRequest = {
           ...(name !== undefined ? { custom_name: name } : {}),
-          ...(model !== undefined ? { model: await resolveLlmModel(model, provider) } : {}),
+          ...(model !== undefined ? await resolveLlmModel(model, provider) : {}),
           ...(credential !== undefined ? { api_key_secret_id: credential } : {}),
-          ...pickDefined(fields),
+          ...columns,
+          ...(Object.keys(parameters).length > 0 ? { parameters: mergeSettings(current?.parameters, parameters) } : {}),
+          ...(connection !== undefined ? { connection: mergeSettings(current?.connection, connection) } : {}),
         };
         if (Object.keys(request).length === 0) throw new Error('Nothing to change — pass at least one field.');
         return { config: summarizeAuthored(await llm.updateConfig(configId, request)) };
@@ -236,7 +319,10 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
             id: config.id,
             custom_name: config.custom_name,
             model: config.model,
+            provider: config.provider,
+            model_name: config.model_name,
             has_api_key: config.api_key_secret_id != null,
+            ...(config.needs_review ? { needs_review: config.review_reasons } : {}),
           })),
         };
         if (include_models) {
@@ -265,11 +351,12 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
         provider: z.string().optional().describe('Provider hint for a model name.'),
         api_key_env: apiKeyEnvSchema.optional(),
         api_key_secret: apiKeySecretSchema.optional(),
+        connection: connectionSchema,
         extra_headers: z.record(z.string(), z.string()).optional(),
         is_visible: z.boolean().optional(),
       },
     },
-    async ({ name, model, provider, api_key_env, api_key_secret, extra_headers, is_visible }) =>
+    async ({ name, model, provider, api_key_env, api_key_secret, connection, extra_headers, is_visible }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
@@ -277,6 +364,7 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
           custom_name: name,
           model: await resolveEmbeddingModel(model, provider),
           api_key_secret_id: (await resolveApiKey(api_key_env, api_key_secret)) ?? null,
+          ...(connection !== undefined ? { connection: mergeSettings({}, connection) } : {}),
           ...(extra_headers !== undefined ? { extra_headers } : {}),
           ...(is_visible !== undefined ? { is_visible } : {}),
         };
@@ -303,11 +391,12 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
         provider: z.string().optional(),
         api_key_env: apiKeyEnvSchema.optional(),
         api_key_secret: apiKeySecretSchema.nullable().optional().describe('Existing secret (id or name); null removes the key.'),
+        connection: connectionSchema,
         extra_headers: z.record(z.string(), z.string()).optional(),
         is_visible: z.boolean().optional(),
       },
     },
-    async ({ config, name, model, provider, api_key_env, api_key_secret, extra_headers, is_visible }) =>
+    async ({ config, name, model, provider, api_key_env, api_key_secret, connection, extra_headers, is_visible }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
         await context.org.requireActiveOrg();
@@ -317,6 +406,15 @@ export function registerConfigTools(server: McpServer, context: AppContext): voi
           ...(name !== undefined ? { custom_name: name } : {}),
           ...(model !== undefined ? { model: await resolveEmbeddingModel(model, provider) } : {}),
           ...(credential !== undefined ? { api_key_secret_id: credential } : {}),
+          // Replaced whole by the backend, so the change is merged into the stored fields.
+          ...(connection !== undefined
+            ? {
+                connection: mergeSettings(
+                  (await llm.listEmbeddingConfigs()).find((stored) => stored.id === configId)?.connection,
+                  connection,
+                ),
+              }
+            : {}),
           ...(extra_headers !== undefined ? { extra_headers } : {}),
           ...(is_visible !== undefined ? { is_visible } : {}),
         };

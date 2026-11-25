@@ -77,7 +77,11 @@ nested JSON. The object model is for *your* structuring discipline; the backend 
      early-read anchor, or a `persist:` scope.
    - `llm_configs` — model by name (e.g. `model: gpt-4o`); reuse `{ existing: ... }` when possible.
      Numeric bounds follow the backend: `temperature` 0–2, `max_tokens` ≥ 500, `context_window`
-     (in `params`) ≥ 1000 — `build_flow` reports violations.
+     (in `params`) ≥ 1000 — `build_flow` reports violations. Other model settings (`top_p`, `seed`,
+     `reasoning_effort`, …) go in `params`; the backend checks them against its model catalog on push
+     and refuses one the model does not take. With no setting written, the model's defaults are
+     stored. Add `provider:` for a model several providers share or one the catalog does not list
+     (azure, ollama, openrouter …); endpoint fields go in `base_url:` / `connection: { api_version: … }`.
      A provider key goes in `api_key_env: <ENV_NAME>` (never the value): push stores it as the org
      secret `es-mcp:<ENV_NAME>`. Same for a telegram trigger's `bot_token_env`. Never name
      `EPICSTAFF_*` / `ES_MCP_*` variables there — they are the MCP server's own credentials and

@@ -339,7 +339,6 @@ class MockBackend {
           );
         }
         if (listKey === 'python_node_list') {
-          row.use_storage ??= false;
           row.test_input ??= {};
         }
         const index = kept.findIndex((existing) => existing.id === row.id);
@@ -495,9 +494,14 @@ describe('push pipeline (mock backend)', () => {
       '/api/agent-definitions/',
     ]);
 
-    // $model resolved to the real model id; $ref → ids in the agent payload.
+    // The model travels as its provider + name, its settings in `parameters`; $ref → ids in the agent payload.
     const llmCreate = backend.received.find((r) => r.path === '/api/llm-configs/' && r.method === 'POST')!;
-    expect((llmCreate.body as { model: number }).model).toBe(10);
+    expect(llmCreate.body).toStrictEqual({
+      custom_name: 'default',
+      provider: 'openai',
+      model_name: 'gpt-4o',
+      parameters: { temperature: 0.2 },
+    });
     const agentCreate = backend.received.find((r) => r.path === '/api/agent-definitions/' && r.method === 'POST')!;
     const agentBody = agentCreate.body as {
       llm_config: number;

@@ -28754,8 +28754,8 @@ var EpicStaffClient = class {
     }
     const headers = this.buildHeaders(url, options);
     const init = { method, headers };
-    if (options.formData) {
-      init.body = options.formData;
+    if (options.formData ?? options.rawBody) {
+      init.body = options.formData ?? options.rawBody;
     } else if (options.body !== void 0) {
       headers.set("Content-Type", "application/json");
       init.body = JSON.stringify(options.body);
@@ -28775,6 +28775,9 @@ var EpicStaffClient = class {
     }
     if (response.status === 204) {
       return void 0;
+    }
+    if (options.binary) {
+      return new Uint8Array(await response.arrayBuffer());
     }
     const text = await response.text();
     return text ? JSON.parse(text) : void 0;
@@ -29813,8 +29816,38 @@ var LlmApi = class {
   async listProviders() {
     return unwrap2(await this.client.get("providers/", { query: { limit: 1e3 } }));
   }
-  async listModels() {
-    return unwrap2(await this.client.get("llm-models/", { query: { limit: 1e3 } }));
+  /**
+   * One page of the model rows, filtered by the backend (LLMModelFilter): the catalog holds
+   * thousands of models and a list request is capped at 1000 rows, so it is never loaded whole.
+   */
+  async searchModels(filter) {
+    const response = await this.client.get("llm-models/", {
+      query: {
+        limit: filter.limit ?? 1e3,
+        ...filter.name !== void 0 ? { name: filter.name } : {},
+        ...filter.nameContains !== void 0 ? { name__icontains: filter.nameContains } : {},
+        ...filter.providerId !== void 0 ? { llm_provider: filter.providerId } : {}
+      }
+    });
+    return Array.isArray(response) ? { count: response.length, results: response } : response;
+  }
+  /**
+   * How a config write names the LLM model `modelName`. With a provider the backend resolves the
+   * pair itself (aliases, provider-prefixed names, and a new custom model where the provider takes
+   * them); without one the model row of that exact name is looked up, the first when providers share it.
+   */
+  async modelReference(modelName, provider) {
+    return provider !== void 0 ? { provider, model_name: modelName } : { model: await this.findModelId(modelName) };
+  }
+  /** The id of the model row named exactly `modelName`; an unknown name is an actionable error. */
+  async findModelId(modelName) {
+    const row = (await this.searchModels({ name: modelName, limit: 1 })).results[0];
+    if (row === void 0) {
+      throw new Error(
+        `LLM model "${modelName}" not found on the backend. Check the name with list_llm_models, or name its provider too (a provider that takes custom models then accepts a new model name).`
+      );
+    }
+    return row.id;
   }
   async listConfigs() {
     return unwrap2(await this.client.get("llm-configs/", { query: { limit: 1e3 } }));
@@ -30496,24 +30529,29 @@ var llmParamsSchema = external_exports.record(external_exports.string(), externa
     context.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["temperature"], message: "temperature must be between 0 and 2" });
   }
 }).default({}).describe(
-  "Extra provider-specific LLMConfig fields (top_p, timeout, context_window \u2265 1000, \u2026), passed through to the backend as-is."
+  "Extra settings: model settings the model takes (top_p, seed, stop, reasoning_effort, top_k, \u2026; the backend refuses one the model does not support) and the config fields timeout, context_window \u2265 1000, extra_headers, input_cost_per_token / output_cost_per_token, is_visible."
 );
 var llmConfigSchema = external_exports.strictObject({
   model: external_exports.string().min(1).describe('Model name, e.g. "gpt-4o" or "claude-sonnet-4".'),
   provider: external_exports.string().optional().describe(
-    'LLM provider, e.g. "openai", "anthropic", "groq". When omitted the backend infers it from the model name.'
+    'LLM provider, e.g. "openai", "anthropic", "groq". When omitted, the model with exactly this name is used. Name it for a model several providers share, and for a model the catalog does not list (a custom model on azure, ollama, openrouter, \u2026).'
   ),
-  // Bounds mirror the backend LLMConfig model validators (tables/models/llm_models.py):
-  // temperature MinValueValidator(0.0)/MaxValueValidator(2.0), max_tokens MinValueValidator(500),
-  // context_window MinValueValidator(1000) — so build_flow reports what push would be refused for.
-  temperature: external_exports.number().min(0).max(2).optional().describe("Sampling temperature (0\u20132). Backend default when omitted."),
-  max_tokens: external_exports.number().int().min(500, "max_tokens must be at least 500 (EpicStaff LLMConfig minimum)").optional().describe("Maximum tokens per completion (at least 500). Backend default (4096) when omitted."),
-  base_url: external_exports.string().optional().describe("Custom API base URL for self-hosted or proxied providers."),
+  // Bounds mirror the backend's parameter registry (ai_models/data/parameter_registry.yaml:
+  // temperature 0–2, max_tokens >= 500) and the LLMConfig model (context_window >= 1000), so
+  // build_flow reports what push would be refused for. A model may narrow them further.
+  temperature: external_exports.number().min(0).max(2).optional().describe("Sampling temperature (0\u20132; some providers stop at 1)."),
+  max_tokens: external_exports.number().int().min(500, "max_tokens must be at least 500 (EpicStaff LLMConfig minimum)").optional().describe("Maximum tokens per completion (at least 500, at most the model's output limit)."),
+  base_url: external_exports.string().optional().describe("Custom API base URL for self-hosted or proxied providers (the `base_url` connection field)."),
+  connection: external_exports.record(external_exports.string(), external_exports.string()).optional().describe(
+    'Other connection fields the provider declares, e.g. azure { api_version, deployment_id }, bedrock { aws_region_name }, vertex_ai { vertex_project, vertex_location }. A secret field takes an "epicstaff_secret(<org secret name>)" marker, never the value. On an existing config these replace its connection fields.'
+  ),
   api_key_env: credentialEnvName(
     'Name of the environment variable that holds the provider API key. The key value itself never lives in flow source: on push it is stored as an org Secret (named "es-mcp:<ENV>") and the LLM config references that secret. EPICSTAFF_* / ES_MCP_* names are rejected.'
   ).optional(),
   params: llmParamsSchema
-}).describe("One named LLM configuration.");
+}).describe(
+  "One named LLM configuration. With no temperature / max_tokens / params the backend stores the model's default settings; once any is set, only the ones written here are stored (the rest stay unset)."
+);
 var llmConfigsSectionSchema = external_exports.record(symbolicNameSchema, llmConfigSchema).default({}).describe("Named LLM configurations, keyed by symbolic name.");
 
 // src/flow-source/schema/tools.ts
@@ -31581,6 +31619,23 @@ function isNumberedNodeType(type) {
 // src/graph/temp-id.ts
 import { randomUUID } from "node:crypto";
 
+// src/models/nodes/storage-grants.ts
+function storageGrantsFromDto(dto, prefix = "") {
+  const columns = dto;
+  const read = columns[`${prefix}storage_grant_read`];
+  const write2 = columns[`${prefix}storage_grant_write`];
+  const remove = columns[`${prefix}storage_grant_delete`];
+  if (read === void 0 && write2 === void 0 && remove === void 0) return void 0;
+  return { read: read === true, write: write2 === true, delete: remove === true };
+}
+function storageGrantsToPayload(grants, prefix = "") {
+  return {
+    [`${prefix}storage_grant_read`]: grants?.read ?? false,
+    [`${prefix}storage_grant_write`]: grants?.write ?? false,
+    [`${prefix}storage_grant_delete`]: grants?.delete ?? false
+  };
+}
+
 // src/models/nodes/classification-decision-table-node.ts
 var CDT_SECTION_COLOR_HEXES = ["#685FFF", "#48CBFF", "#2ABA6B", "#FF8F3F", "#F54242"];
 var CDT_SECTION_DEFAULT_COLOR = CDT_SECTION_COLOR_HEXES[0];
@@ -31778,6 +31833,7 @@ function toPythonComparable(node) {
     },
     input_map: node.input_map || {},
     output_variable_path: node.output_variable_path || null,
+    ...storageGrantsToPayload(node.storageGrants),
     test_input: node.test_input ?? {},
     metadata: toNodeMetadata(node)
   };
@@ -31867,7 +31923,7 @@ function toWebhookComparable(node) {
     webhook_trigger_path: "",
     webhook_trigger: node.data.webhook_trigger,
     test_payload: node.data.test_payload ?? {},
-    use_storage: node.data.use_storage ?? false,
+    ...storageGrantsToPayload(node.storageGrants),
     metadata: toNodeMetadata(node)
   };
 }
@@ -31974,11 +32030,11 @@ function toCdtComparable(node, allNodes) {
     next_error_node: resolveRef(tableData?.next_error_node || null),
     pre_input_map: tableData?.pre_computation?.input_map || tableData?.pre_input_map || {},
     pre_output_variable_path: tableData?.pre_computation?.output_variable_path || tableData?.pre_output_variable_path || null,
-    pre_use_storage: tableData?.pre_use_storage ?? false,
+    ...storageGrantsToPayload(node.preStorageGrants, "pre_"),
     post_computation_code: postCode,
     post_input_map: tableData?.post_computation?.input_map || tableData?.post_input_map || {},
     post_output_variable_path: tableData?.post_computation?.output_variable_path || tableData?.post_output_variable_path || null,
-    post_use_storage: tableData?.post_use_storage ?? false,
+    ...storageGrantsToPayload(node.postStorageGrants, "post_"),
     pre_secret_ids: [...tableData?.pre_computation?.secret_ids || []].sort(),
     post_secret_ids: [...tableData?.post_computation?.secret_ids || []].sort(),
     pre_execution_timeout: tableData?.pre_computation?.execution_timeout,
@@ -32740,26 +32796,39 @@ function upsertPlan(section, name, kind, sourceDefinition, payload, extra) {
     ...extra?.rag !== void 0 ? { rag: extra.rag } : {}
   };
 }
+var LLM_CONFIG_COLUMNS = /* @__PURE__ */ new Set([
+  "timeout",
+  "context_window",
+  "extra_headers",
+  "input_cost_per_token",
+  "output_cost_per_token",
+  "is_visible"
+]);
 function buildLlmConfigPlans(source, registry2) {
   return Object.entries(source.llm_configs).map(([name, config2]) => {
-    const model = {
-      $model: config2.model,
-      ...config2.provider !== void 0 ? { provider: config2.provider } : {},
+    const settings = {
+      ...config2.temperature !== void 0 ? { temperature: config2.temperature } : {},
+      ...config2.max_tokens !== void 0 ? { max_tokens: config2.max_tokens } : {},
+      ...config2.params
+    };
+    const columns = Object.entries(settings).filter(([key]) => LLM_CONFIG_COLUMNS.has(key));
+    const parameters = Object.entries(settings).filter(([key]) => !LLM_CONFIG_COLUMNS.has(key));
+    const connection = {
+      ...config2.connection,
       ...config2.base_url !== void 0 ? { base_url: config2.base_url } : {}
     };
+    const bareModel = { $model: config2.model };
     const payload = {
       custom_name: name,
-      // `model` is a numeric id on the wire; flow source only knows the model
-      // NAME, so a {$model} template ref sits here — the pusher resolves it
-      // via the llm-models list (see template-refs.ts).
-      model,
+      ...config2.provider !== void 0 ? { provider: config2.provider, model_name: config2.model } : { model: bareModel },
       // The key is an org Secret (LLMConfigSerializer.api_key_secret_id), never a raw value.
       // Omitted without api_key_env so an update never clears a secret attached in the UI.
       ...config2.api_key_env !== void 0 ? { api_key_secret_id: registry2.secret(config2.api_key_env) } : {},
-      ...config2.temperature !== void 0 ? { temperature: config2.temperature } : {},
-      ...config2.max_tokens !== void 0 ? { max_tokens: config2.max_tokens } : {},
-      // Extra provider params (top_p, timeout, …) pass through at top level.
-      ...config2.params
+      ...Object.fromEntries(columns),
+      // Sent only when the source sets something: a create without `parameters` stores the model's
+      // defaults, and an update without them (or without `connection`) keeps what the config has.
+      ...parameters.length > 0 ? { parameters: Object.fromEntries(parameters) } : {},
+      ...Object.keys(connection).length > 0 ? { connection } : {}
     };
     return upsertPlan("llm_configs", name, "llm_config", config2, payload);
   });
@@ -34418,8 +34487,8 @@ function buildNodeBody(collected, registry2, names, warnings) {
       };
     }
     case "python": {
-      if (entry.dto.use_storage) {
-        warnings.push(`${atPath}: use_storage is not representable in flow source and resets on the next push`);
+      if (entry.dto.storage_grant_read || entry.dto.storage_grant_write || entry.dto.storage_grant_delete) {
+        warnings.push(`${atPath}: storage grants are not representable in flow source \u2014 they are kept on the next push`);
       }
       if ((entry.dto.python_code.secrets ?? []).length > 0) {
         warnings.push(
@@ -34863,7 +34932,7 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
     } : null,
     pre_input_map: preComputation.input_map ?? tableData?.pre_input_map ?? {},
     pre_output_variable_path: preComputation.output_variable_path || tableData?.pre_output_variable_path || null,
-    pre_use_storage: tableData?.pre_use_storage ?? false,
+    ...storageGrantsToPayload(node.preStorageGrants, "pre_"),
     post_python_code: isPythonCodeBlockSaved(postCodeValue, postSecretIds) ? {
       code: postCodeValue,
       entrypoint: postComputation.entrypoint ?? "main",
@@ -34873,7 +34942,7 @@ function buildCdtNodePayload(node, graphId, allNodes, idMap, edges) {
     } : null,
     post_input_map: postComputation.input_map ?? tableData?.post_input_map ?? {},
     post_output_variable_path: postComputation.output_variable_path || tableData?.post_output_variable_path || null,
-    post_use_storage: tableData?.post_use_storage ?? false,
+    ...storageGrantsToPayload(node.postStorageGrants, "post_"),
     prompt_configs: promptConfigs,
     default_llm_config: tableData?.default_llm_config ?? null,
     ...defaultRef.backendId != null ? { default_next_node_id: defaultRef.backendId } : {},
@@ -34988,19 +35057,16 @@ function buildBulkSavePayload(options) {
       variables: node.data.initialState ?? {},
       metadata: toNodeMetadata(node)
     })),
-    python_node_list: nodeItems(nodeDiff.pythonNodes, (node) => {
-      const { use_storage, ...pythonCode } = node.data;
-      return {
-        node_name: node.node_name,
-        graph: graphId,
-        python_code: pythonCode,
-        input_map: node.input_map || {},
-        output_variable_path: node.output_variable_path || null,
-        use_storage: use_storage ?? false,
-        test_input: node.test_input ?? {},
-        metadata: toNodeMetadata(node)
-      };
-    }),
+    python_node_list: nodeItems(nodeDiff.pythonNodes, (node) => ({
+      node_name: node.node_name,
+      graph: graphId,
+      python_code: node.data,
+      input_map: node.input_map || {},
+      output_variable_path: node.output_variable_path || null,
+      ...storageGrantsToPayload(node.storageGrants),
+      test_input: node.test_input ?? {},
+      metadata: toNodeMetadata(node)
+    })),
     task_node_list: nodeItems(nodeDiff.taskNodes, (node) => ({
       node_name: node.node_name,
       graph: graphId,
@@ -35061,7 +35127,7 @@ function buildBulkSavePayload(options) {
       webhook_trigger_path: "",
       webhook_trigger: node.data.webhook_trigger,
       test_payload: node.data.test_payload ?? {},
-      use_storage: node.data.use_storage ?? false,
+      ...storageGrantsToPayload(node.storageGrants),
       metadata: toNodeMetadata(node)
     })),
     telegram_trigger_node_list: nodeItems(nodeDiff.telegramNodes, (node) => ({
@@ -35275,8 +35341,6 @@ function toCdtTableState(dto, uuidOf) {
       secret_ids: toSecretIds(dto.post_python_code?.secrets),
       ...dto.post_python_code?.execution_timeout !== void 0 ? { execution_timeout: dto.post_python_code.execution_timeout } : {}
     },
-    pre_use_storage: dto.pre_use_storage ?? false,
-    post_use_storage: dto.post_use_storage ?? false,
     sections: (dto.sections ?? []).map((section) => ({
       id: section.id,
       name: section.name,
@@ -35335,10 +35399,8 @@ function buildRemoteState(dto) {
       (node) => ({
         ...baseNode("python", node),
         type: "python",
-        data: {
-          ...toCustomPythonCode(node.python_code, node.node_name),
-          ...node.use_storage !== void 0 ? { use_storage: node.use_storage } : {}
-        },
+        data: toCustomPythonCode(node.python_code, node.node_name),
+        storageGrants: storageGrantsFromDto(node),
         test_input: node.test_input ?? {}
       })
     ),
@@ -35395,9 +35457,9 @@ function buildRemoteState(dto) {
         data: {
           webhook_trigger: node.webhook_trigger ?? null,
           python_code: toCustomPythonCode(node.python_code, node.node_name),
-          test_payload: node.test_payload ?? {},
-          use_storage: node.use_storage ?? false
-        }
+          test_payload: node.test_payload ?? {}
+        },
+        storageGrants: storageGrantsFromDto(node)
       })
     ),
     ...(dto.telegram_trigger_node_list ?? []).map(
@@ -35452,7 +35514,9 @@ function buildRemoteState(dto) {
         ...baseNode("classification-decision-table", node),
         type: "classification-decision-table",
         data: { table: toCdtTableState(node, uuidOf) },
-        explanations: readCdtExplanations(node.metadata)
+        explanations: readCdtExplanations(node.metadata),
+        preStorageGrants: storageGrantsFromDto(node, "pre_"),
+        postStorageGrants: storageGrantsFromDto(node, "post_")
       })
     ),
     ...(dto.knowledge_node_list ?? []).map(
@@ -35726,7 +35790,6 @@ var EntityPusher = class {
   venvs;
   /** Venvs seen while resolving `venv:` references — their build status feeds push warnings. */
   venvById = /* @__PURE__ */ new Map();
-  modelIndex = null;
   builtinToolIdByName = null;
   /**
    * @param options.sections When set, only entity plans whose `section` is in
@@ -35835,7 +35898,7 @@ var EntityPusher = class {
   }
   async substituteTemplateRefs(value) {
     if (isModelRef(value)) {
-      return this.resolveModelId(value.$model, value.provider);
+      return this.llm.findModelId(value.$model);
     }
     if (isBuiltinToolRef(value)) {
       return this.resolveBuiltinToolId(value.$tool);
@@ -35897,10 +35960,6 @@ var EntityPusher = class {
       );
     }
     return id;
-  }
-  async resolveModelId(modelName, providerHint) {
-    this.modelIndex ??= buildModelIndex(...await Promise.all([this.llm.listModels(), this.llm.listProviders()]));
-    return lookupModelId(this.modelIndex, "LLM model", modelName, providerHint, "list_llm_models");
   }
   async resolveExisting(plan) {
     const remoteName = plan.remoteName ?? plan.name;
@@ -36510,7 +36569,7 @@ function inheritUnrepresentableFields(desired, remote) {
     if (node.type === "webhook-trigger" && previous.type === "webhook-trigger") {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
       node.data.test_payload ??= previous.data.test_payload;
-      node.data.use_storage ??= previous.data.use_storage;
+      node.storageGrants ??= previous.storageGrants;
       inheritPythonCodeSettings(node.data.python_code, previous.data.python_code);
     } else if (node.type === "telegram-trigger" && previous.type === "telegram-trigger") {
       node.data.webhook_trigger ??= previous.data.webhook_trigger;
@@ -36519,9 +36578,11 @@ function inheritUnrepresentableFields(desired, remote) {
       if (node.data.fields.length === 0) node.data.fields = previous.data.fields;
     } else if (node.type === "python" && previous.type === "python") {
       inheritPythonCodeSettings(node.data, previous.data);
-      node.data.use_storage ??= false;
+      node.storageGrants ??= previous.storageGrants;
     } else if (node.type === "classification-decision-table" && previous.type === "classification-decision-table") {
       node.explanations ??= previous.explanations;
+      node.preStorageGrants ??= previous.preStorageGrants;
+      node.postStorageGrants ??= previous.postStorageGrants;
     } else if (node.type === "agent" && previous.type === "agent") {
       inheritAgentTaskIds(node.data.tasks ?? [], previous.data.tasks ?? []);
     } else if (node.type === "note" && previous.type === "note") {
@@ -37902,7 +37963,11 @@ function registerReferenceTools(server, context) {
         configs: configs.map((config2) => ({
           id: config2.id,
           custom_name: config2.custom_name,
-          model: config2.model
+          model: config2.model,
+          provider: config2.provider,
+          model_name: config2.model_name,
+          // Set when the model or settings no longer match the backend's catalog; the config still runs.
+          ...config2.needs_review ? { needs_review: config2.review_reasons } : {}
         }))
       };
     })
@@ -37920,26 +37985,21 @@ function registerReferenceTools(server, context) {
     },
     async ({ search, provider, limit }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
-      const [providers, models] = await Promise.all([llm.listProviders(), llm.listModels()]);
+      const providers = await llm.listProviders();
       const providerName = new Map(providers.map((p) => [p.id, p.name]));
-      const searchLower = search?.toLowerCase();
-      const providerLower = provider?.toLowerCase();
       const cap = limit ?? 50;
-      const matches = models.map((model) => ({
+      const providerLower = provider?.toLowerCase();
+      const providerIds = providerLower === void 0 ? [void 0] : providers.filter((p) => p.name.toLowerCase().includes(providerLower)).map((p) => p.id);
+      const pages = await Promise.all(
+        providerIds.map((providerId) => llm.searchModels({ nameContains: search, providerId, limit: cap }))
+      );
+      const total = pages.reduce((sum, page) => sum + page.count, 0);
+      const models = pages.flatMap((page) => page.results).slice(0, cap).map((model) => ({
         id: model.id,
         name: model.name,
         provider: providerName.get(model.llm_provider) ?? String(model.llm_provider)
-      })).filter((model) => {
-        if (searchLower && !model.name.toLowerCase().includes(searchLower)) return false;
-        if (providerLower && !model.provider.toLowerCase().includes(providerLower)) return false;
-        return true;
-      });
-      return {
-        total_matches: matches.length,
-        returned: Math.min(matches.length, cap),
-        truncated: matches.length > cap,
-        models: matches.slice(0, cap)
-      };
+      }));
+      return { total_matches: total, returned: models.length, truncated: total > models.length, models };
     })
   );
   server.registerTool(
@@ -39558,6 +39618,7 @@ function summarizeVenv(venv) {
     name: venv.name,
     status: venv.status,
     ...venv.error ? { error: venv.error } : {},
+    ...venv.libs_lock ? { libs_lock: venv.libs_lock } : {},
     libraries: venv.libs.map(
       (lib) => `${lib.name}${lib.specification}${lib.version ? ` (installed ${lib.version})` : ""}${lib.is_custom ? " (custom)" : ""}`
     ),
@@ -39940,9 +40001,39 @@ var apiKeyEnvSchema = credentialEnvName(
   'Environment variable of the MCP server holding the provider API key. Stored as the org Secret "es-mcp:<ENV>" (reused when it already holds that value); the key itself never appears in a tool call.'
 );
 var apiKeySecretSchema = idOrName.describe("An existing org Secret (list_secrets) holding the provider API key: id or name.");
+var LLM_PARAMETER_INPUTS = /* @__PURE__ */ new Set([
+  "temperature",
+  "max_tokens",
+  "top_p",
+  "seed",
+  "stop",
+  "presence_penalty",
+  "frequency_penalty",
+  "reasoning_effort"
+]);
+function mergeSettings(current, changes) {
+  const merged = { ...current };
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+function splitLlmFields(fields) {
+  const { parameters: extra, ...flat } = fields;
+  const columns = {};
+  const parameters = {};
+  for (const [key, value] of Object.entries(pickDefined(flat))) {
+    (LLM_PARAMETER_INPUTS.has(key) ? parameters : columns)[key] = value;
+  }
+  return { columns, parameters: { ...parameters, ...extra } };
+}
+var connectionSchema = external_exports.record(external_exports.string(), external_exports.string().nullable()).optional().describe(
+  'Connection fields the provider declares: base_url (custom / self-hosted endpoint), azure api_version and deployment_id, bedrock aws_region_name, vertex_ai vertex_project / vertex_location, \u2026 A secret field takes an "epicstaff_secret(<org secret name>)" marker, never the value. null removes a field.'
+);
 var llmConfigFieldsShape = {
-  temperature: external_exports.number().min(0).max(2).nullable().optional().describe("Sampling temperature, 0\u20132."),
-  max_tokens: external_exports.number().int().min(500).nullable().optional().describe("Max output tokens (backend minimum 500)."),
+  temperature: external_exports.number().min(0).max(2).nullable().optional().describe("Sampling temperature, 0\u20132 (some providers stop at 1)."),
+  max_tokens: external_exports.number().int().min(500).nullable().optional().describe("Max output tokens (backend minimum 500, at most the model's output limit)."),
   top_p: external_exports.number().min(0).max(1).nullable().optional(),
   timeout: external_exports.number().positive().nullable().optional().describe("Request timeout in seconds."),
   seed: external_exports.number().int().nullable().optional(),
@@ -39952,6 +40043,8 @@ var llmConfigFieldsShape = {
   reasoning_effort: external_exports.enum(REASONING_EFFORTS).nullable().optional().describe("Reasoning effort for models that support it (the backend refuses levels the model lacks)."),
   input_cost_per_token: external_exports.number().min(0).nullable().optional().describe("USD per prompt token; set with output_cost_per_token."),
   output_cost_per_token: external_exports.number().min(0).nullable().optional().describe("USD per completion token; set with input_cost_per_token."),
+  parameters: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("Any other model setting by its catalog name (top_k, verbosity, logit_bias, \u2026); null removes one."),
+  connection: connectionSchema,
   extra_headers: external_exports.record(external_exports.string(), external_exports.string()).optional().describe("Extra HTTP headers sent to the provider."),
   is_visible: external_exports.boolean().optional().describe("Whether the config is offered in pickers.")
 };
@@ -39970,11 +40063,7 @@ function registerConfigTools(server, context) {
     (config2) => config2.id,
     (config2) => config2.custom_name
   );
-  async function resolveLlmModel(ref, provider) {
-    if (typeof ref === "number") return ref;
-    const index = buildModelIndex(...await Promise.all([llm.listModels(), llm.listProviders()]));
-    return lookupModelId(index, "LLM model", ref, provider, "list_llm_models");
-  }
+  const resolveLlmModel = async (ref, provider) => typeof ref === "number" ? { model: ref } : llm.modelReference(ref, provider);
   async function resolveEmbeddingModel(ref, provider) {
     if (typeof ref === "number") return ref;
     const index = buildModelIndex(...await Promise.all([llm.listEmbeddingModels(), llm.listProviders()]));
@@ -39999,24 +40088,29 @@ function registerConfigTools(server, context) {
     "create_llm_config",
     {
       title: "Create an LLM config",
-      description: "Create an org LLM config (a model + its generation settings + the provider key) that agents and classification tables reference by name. Names are org-unique; on a clash use update_llm_config. The key comes from api_key_env (an env var of the MCP server) or api_key_secret (an existing org secret).",
+      description: "Create an org LLM config (a model + its generation settings + the provider key) that agents and classification tables reference by name. Names are org-unique; on a clash use update_llm_config. The key comes from api_key_env (an env var of the MCP server) or api_key_secret (an existing org secret). With no model setting passed the backend stores the model's defaults; once any is passed, only those are stored and the rest stay unset (provider default).",
       inputSchema: {
         name: external_exports.string().min(1).describe("Org-unique config name (custom_name) \u2014 the handle flows reference."),
         model: idOrName.describe("LLM model: backend id or exact model name (list_llm_models)."),
-        provider: external_exports.string().optional().describe("Provider name to disambiguate a model name several providers share."),
+        provider: external_exports.string().optional().describe(
+          "Provider name (openai, anthropic, azure, \u2026). Name it for a model several providers share, and for a model the catalog does not list: a provider that takes custom models (azure, ollama, openrouter, \u2026) then gets a new custom model of that name."
+        ),
         api_key_env: apiKeyEnvSchema.optional(),
         api_key_secret: apiKeySecretSchema.optional(),
         ...llmConfigFieldsShape
       }
     },
-    async ({ name, model, provider, api_key_env, api_key_secret, ...fields }) => runTool(async () => {
+    async ({ name, model, provider, api_key_env, api_key_secret, connection, ...fields }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
+      const { columns, parameters } = splitLlmFields(fields);
       const request = {
         custom_name: name,
-        model: await resolveLlmModel(model, provider),
+        ...await resolveLlmModel(model, provider),
         api_key_secret_id: await resolveApiKey(api_key_env, api_key_secret) ?? null,
-        ...pickDefined(fields)
+        ...columns,
+        ...Object.keys(parameters).length > 0 ? { parameters: mergeSettings({}, parameters) } : {},
+        ...connection !== void 0 ? { connection: mergeSettings({}, connection) } : {}
       };
       const created = await createOrExplainConflict(() => llm.createConfig(request), name, "update_llm_config");
       return {
@@ -40029,7 +40123,7 @@ function registerConfigTools(server, context) {
     "update_llm_config",
     {
       title: "Update an LLM config",
-      description: "Change an LLM config (PATCH \u2014 only the fields you pass change; null clears a setting). Every agent and flow using it picks the change up on its next run.",
+      description: "Change an LLM config (only the fields and settings you pass change; null clears a setting). Every agent and flow using it picks the change up on its next run. A new model must take the settings the config keeps, or the backend refuses the change and names them: clear those in the same call.",
       inputSchema: {
         config: idOrName.describe("The config to update: backend id or exact name (list_llm_configs)."),
         name: external_exports.string().min(1).optional().describe("New name."),
@@ -40040,16 +40134,21 @@ function registerConfigTools(server, context) {
         ...llmConfigFieldsShape
       }
     },
-    async ({ config: config2, name, model, provider, api_key_env, api_key_secret, ...fields }) => runTool(async () => {
+    async ({ config: config2, name, model, provider, api_key_env, api_key_secret, connection, ...fields }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
       const configId = await resolveLlmConfig(config2);
       const credential = await resolveApiKey(api_key_env, api_key_secret);
+      const { columns, parameters } = splitLlmFields(fields);
+      const changesSettings = Object.keys(parameters).length > 0 || connection !== void 0;
+      const current = changesSettings ? await llm.getConfig(configId) : void 0;
       const request = {
         ...name !== void 0 ? { custom_name: name } : {},
-        ...model !== void 0 ? { model: await resolveLlmModel(model, provider) } : {},
+        ...model !== void 0 ? await resolveLlmModel(model, provider) : {},
         ...credential !== void 0 ? { api_key_secret_id: credential } : {},
-        ...pickDefined(fields)
+        ...columns,
+        ...Object.keys(parameters).length > 0 ? { parameters: mergeSettings(current?.parameters, parameters) } : {},
+        ...connection !== void 0 ? { connection: mergeSettings(current?.connection, connection) } : {}
       };
       if (Object.keys(request).length === 0) throw new Error("Nothing to change \u2014 pass at least one field.");
       return { config: summarizeAuthored(await llm.updateConfig(configId, request)) };
@@ -40090,7 +40189,10 @@ function registerConfigTools(server, context) {
           id: config2.id,
           custom_name: config2.custom_name,
           model: config2.model,
-          has_api_key: config2.api_key_secret_id != null
+          provider: config2.provider,
+          model_name: config2.model_name,
+          has_api_key: config2.api_key_secret_id != null,
+          ...config2.needs_review ? { needs_review: config2.review_reasons } : {}
         }))
       };
       if (include_models) {
@@ -40116,17 +40218,19 @@ function registerConfigTools(server, context) {
         provider: external_exports.string().optional().describe("Provider hint for a model name."),
         api_key_env: apiKeyEnvSchema.optional(),
         api_key_secret: apiKeySecretSchema.optional(),
+        connection: connectionSchema,
         extra_headers: external_exports.record(external_exports.string(), external_exports.string()).optional(),
         is_visible: external_exports.boolean().optional()
       }
     },
-    async ({ name, model, provider, api_key_env, api_key_secret, extra_headers, is_visible }) => runTool(async () => {
+    async ({ name, model, provider, api_key_env, api_key_secret, connection, extra_headers, is_visible }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
       const request = {
         custom_name: name,
         model: await resolveEmbeddingModel(model, provider),
         api_key_secret_id: await resolveApiKey(api_key_env, api_key_secret) ?? null,
+        ...connection !== void 0 ? { connection: mergeSettings({}, connection) } : {},
         ...extra_headers !== void 0 ? { extra_headers } : {},
         ...is_visible !== void 0 ? { is_visible } : {}
       };
@@ -40150,11 +40254,12 @@ function registerConfigTools(server, context) {
         provider: external_exports.string().optional(),
         api_key_env: apiKeyEnvSchema.optional(),
         api_key_secret: apiKeySecretSchema.nullable().optional().describe("Existing secret (id or name); null removes the key."),
+        connection: connectionSchema,
         extra_headers: external_exports.record(external_exports.string(), external_exports.string()).optional(),
         is_visible: external_exports.boolean().optional()
       }
     },
-    async ({ config: config2, name, model, provider, api_key_env, api_key_secret, extra_headers, is_visible }) => runTool(async () => {
+    async ({ config: config2, name, model, provider, api_key_env, api_key_secret, connection, extra_headers, is_visible }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
       const configId = await resolveEmbeddingConfig(config2);
@@ -40163,6 +40268,13 @@ function registerConfigTools(server, context) {
         ...name !== void 0 ? { custom_name: name } : {},
         ...model !== void 0 ? { model: await resolveEmbeddingModel(model, provider) } : {},
         ...credential !== void 0 ? { api_key_secret_id: credential } : {},
+        // Replaced whole by the backend, so the change is merged into the stored fields.
+        ...connection !== void 0 ? {
+          connection: mergeSettings(
+            (await llm.listEmbeddingConfigs()).find((stored) => stored.id === configId)?.connection,
+            connection
+          )
+        } : {},
         ...extra_headers !== void 0 ? { extra_headers } : {},
         ...is_visible !== void 0 ? { is_visible } : {}
       };
@@ -40528,7 +40640,7 @@ async function findEntry(tables, tableId, key) {
 }
 
 // src/tools/flow-history.tools.ts
-import { closeSync, constants as fsConstants, existsSync as existsSync7, lstatSync, mkdirSync as mkdirSync4, openSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { closeSync as closeSync2, constants as fsConstants, existsSync as existsSync7, lstatSync, mkdirSync as mkdirSync4, openSync as openSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname3, extname, isAbsolute as isAbsolute4 } from "node:path";
 
 // src/api/graph-versions.ts
@@ -40572,41 +40684,84 @@ var GraphVersionsApi = class {
 };
 
 // src/api/import-export.ts
-import { readFileSync as readFileSync6 } from "node:fs";
+import { openSync, readFileSync as readFileSync6, readSync, closeSync } from "node:fs";
 import { basename as basename2 } from "node:path";
 var TRANSFER_PATHS = {
   flow: "graphs/",
   python_tool: "python-code-tool/",
   mcp_tool: "mcp-tools/",
-  agent_definition: "agent-definitions/"
+  agent_definition: "agent-definitions/",
+  collection: "source-collections/"
 };
+var KNOWLEDGE_EXPORT_KINDS = /* @__PURE__ */ new Set(["flow", "agent_definition"]);
+var IMPORT_JOB_KINDS = /* @__PURE__ */ new Set(["flow", "agent_definition", "collection"]);
+var POLL_INTERVAL_MS = 2e3;
+var ZIP_SIGNATURE = Buffer.from("PK", "latin1");
 var ImportExportApi = class {
   constructor(client) {
     this.client = client;
   }
   client;
-  /** One id → `GET <list>{id}/export/`; several → `POST <list>bulk-export/ {ids}`. */
-  async export(kind, ids) {
-    let excludedHeader = null;
-    const onResponseHeaders = (headers) => {
-      excludedHeader = headers.get("X-Export-Excluded");
-    };
-    const path6 = TRANSFER_PATHS[kind];
-    const document = ids.length === 1 ? await this.client.get(`${path6}${ids[0]}/export/`, { onResponseHeaders }) : await this.client.post(`${path6}bulk-export/`, { body: { ids }, onResponseHeaders });
-    return { document, excluded: parseExcludedHeader(excludedHeader) };
+  /** `POST <list>export-jobs/` → wait for the job → `GET transfer-jobs/{id}/download/`. */
+  async export(kind, ids, includeKnowledge, waitMs) {
+    const { job_id } = await this.client.post(`${TRANSFER_PATHS[kind]}export-jobs/`, {
+      body: { ids, ...KNOWLEDGE_EXPORT_KINDS.has(kind) ? { include_knowledge: includeKnowledge } : {} }
+    });
+    const job = await this.waitForJob(job_id, waitMs);
+    const archive = await this.client.get(`transfer-jobs/${job_id}/download/`, { binary: true });
+    const excluded = job.result?.["excluded"];
+    return { archive, fileName: job.file_name, excluded: Array.isArray(excluded) ? excluded : [] };
   }
-  /** Dry run: what importing the file would ask about (`import/inspect/`) — nothing is created. */
+  /** Dry run: what importing the file would ask about (`import/inspect/`, a `.json` or a `.zip`) — nothing is created. */
   async inspect(kind, filePath) {
     return this.client.post(`${TRANSFER_PATHS[kind]}import/inspect/`, { formData: fileForm(filePath) });
   }
-  async import(kind, filePath, options) {
+  /**
+   * A `.zip` of a kind that has an import job is uploaded raw to `<list>import-jobs/` and waited for
+   * (the in-request import refuses an archive carrying knowledge collections); anything else goes to
+   * the in-request `<list>import/`, which takes a `.json` export or a `.zip` without collections.
+   */
+  async import(kind, filePath, options, waitMs) {
+    const path6 = TRANSFER_PATHS[kind];
+    const importLabels = options.importLabels ?? true;
+    if (IMPORT_JOB_KINDS.has(kind) && isZipFile(filePath)) {
+      const query = {
+        // Cut by code point, as the server counts.
+        file_name: Array.from(basename2(filePath)).slice(0, 255).join(""),
+        ...kind === "flow" ? { preserve_uuids: options.preserveUuids ?? false, replace_existing: options.replaceExisting ?? false } : {},
+        ...kind === "collection" ? {} : { import_labels: importLabels }
+      };
+      const { job_id } = await this.client.post(`${path6}import-jobs/`, {
+        query,
+        rawBody: new Blob([new Uint8Array(readFileSync6(filePath))], { type: "application/zip" })
+      });
+      return (await this.waitForJob(job_id, waitMs)).result;
+    }
+    if (kind === "collection") {
+      throw new Error("A knowledge collection is imported from the .zip archive export_entities writes; this file is not a zip.");
+    }
     const formData = fileForm(filePath);
     if (kind === "flow") {
       formData.append("preserve_uuids", String(options.preserveUuids ?? false));
       formData.append("replace_existing", String(options.replaceExisting ?? false));
     }
-    formData.append("import_labels", String(options.importLabels ?? true));
-    return this.client.post(`${TRANSFER_PATHS[kind]}import/`, { formData });
+    formData.append("import_labels", String(importLabels));
+    return this.client.post(`${path6}import/`, { formData });
+  }
+  /** Poll `transfer-jobs/{id}/` until the job completes; a failed job or one still unfinished after `waitMs` throws. */
+  async waitForJob(jobId, waitMs) {
+    const deadline = Date.now() + waitMs;
+    for (; ; ) {
+      const job = await this.client.get(`transfer-jobs/${jobId}/`);
+      if (job.status === "completed") return job;
+      if (job.status === "failed") throw new Error(`The ${job.kind} failed: ${job.error?.message || "no reason given."}`);
+      if (Date.now() + POLL_INTERVAL_MS > deadline) {
+        throw new Error(
+          `The ${job.kind} (job ${jobId}) is still ${job.status} on the server after ${Math.round(waitMs / 1e3)}s. ` + (job.kind === "import" ? "It may still finish: check the list for the new items before importing the file again, so it is not imported twice." : 'It may still finish: download it from "Exports and imports" in EpicStaff, or run the export again with a longer wait_seconds.')
+        );
+      }
+      await new Promise((resolve2) => setTimeout(resolve2, POLL_INTERVAL_MS));
+    }
   }
 };
 function fileForm(filePath) {
@@ -40614,25 +40769,22 @@ function fileForm(filePath) {
   formData.append("file", new Blob([new Uint8Array(readFileSync6(filePath))]), basename2(filePath));
   return formData;
 }
-function parseExcludedHeader(header) {
-  if (!header) return [];
-  let parsed;
+function isZipFile(filePath) {
+  const head = Buffer.alloc(ZIP_SIGNATURE.length);
+  const descriptor = openSync(filePath, "r");
   try {
-    parsed = JSON.parse(header);
-  } catch {
-    return [];
+    readSync(descriptor, head, 0, head.length, 0);
+  } finally {
+    closeSync(descriptor);
   }
-  if (!Array.isArray(parsed)) return [];
-  return parsed.every(isExcludedExportEntity) ? parsed : [];
-}
-function isExcludedExportEntity(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const { type, count, names } = value;
-  return typeof type === "string" && typeof count === "number" && Array.isArray(names) && names.every((name) => typeof name === "string");
+  return head.equals(ZIP_SIGNATURE);
 }
 
 // src/tools/flow-history.tools.ts
-var transferKindSchema = external_exports.enum(["flow", "python_tool", "mcp_tool", "agent_definition"]).default("flow").describe("What the export document holds: flows (default), python tools, MCP tools or agent definitions.");
+var transferKindSchema = external_exports.enum(["flow", "python_tool", "mcp_tool", "agent_definition", "collection"]).default("flow").describe(
+  "What the export holds: flows (default), python tools, MCP tools, agent definitions or knowledge collections."
+);
+var waitSecondsSchema = external_exports.number().int().min(0).max(1800).default(300).describe("How long to wait for the background job EpicStaff runs it as, in seconds (default 300).");
 function registerFlowHistoryTools(server, context) {
   const graphs = new GraphsApi(context.client);
   const versions = new GraphVersionsApi(context.client);
@@ -40770,32 +40922,33 @@ function registerFlowHistoryTools(server, context) {
   server.registerTool(
     "export_entities",
     {
-      title: "Export flows, tools or agents to a file",
-      description: "Write an EpicStaff export document (the editor's Export) for one or more flows, python tools, MCP tools or agent definitions to a local .json file. It carries everything they depend on (agents, LLM configs, tools \u2026) so import_entities can recreate them in another organization or instance. Secret values are never exported; entities you may not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. Refuses to overwrite an existing file unless overwrite: true, and never writes through a symbolic link.",
+      title: "Export flows, tools, agents or collections to a file",
+      description: "Write an EpicStaff export archive (the editor's Export) for one or more flows, python tools, MCP tools, agent definitions or knowledge collections to a local .zip file. EpicStaff builds it as a background job; this waits for the job and downloads the archive. It holds export.json with everything the items depend on (agents, LLM configs, tools \u2026), and for flows and agents the knowledge collections they use with their files unless include_knowledge: false, so import_entities can recreate them in another organization or instance. Secret values are never exported; dependencies you may not export are left out and listed in `excluded`. Unlike dump_graph this is the portable import/export format. Refuses to overwrite an existing file unless overwrite: true, and never writes through a symbolic link.",
       inputSchema: {
         kind: transferKindSchema,
         ids: external_exports.array(external_exports.number().int()).min(1).max(100).describe("Backend ids to export (one file for all)."),
-        output_path: external_exports.string().describe("Absolute path of the .json file to write (parent dirs are created)."),
+        output_path: external_exports.string().describe("Absolute path of the .zip file to write (parent dirs are created)."),
+        include_knowledge: external_exports.boolean().default(true).describe("Flows and agent definitions only: carry the knowledge collections they use, with their files."),
+        wait_seconds: waitSecondsSchema,
         overwrite: external_exports.boolean().default(false).describe("Replace output_path when it already exists (a symbolic link is still refused).")
       }
     },
-    async ({ kind, ids, output_path, overwrite }) => runTool(async () => {
+    async ({ kind, ids, output_path, include_knowledge, wait_seconds, overwrite }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
-      if (!isAbsolute4(output_path) || extname(output_path).toLowerCase() !== ".json") {
-        throw new Error("output_path must be an absolute path to a .json file.");
+      if (!isAbsolute4(output_path) || extname(output_path).toLowerCase() !== ".zip") {
+        throw new Error("output_path must be an absolute path to a .zip file.");
       }
       assertWritableExportPath(output_path, overwrite);
-      const result = await transfer.export(kind, ids);
-      const body = `${JSON.stringify(result.document, null, 2)}
-`;
+      const result = await transfer.export(kind, ids, include_knowledge, wait_seconds * 1e3);
       mkdirSync4(dirname3(output_path), { recursive: true });
-      writeExportFile(output_path, body, overwrite);
+      writeExportFile(output_path, result.archive, overwrite);
       return {
         output_path,
+        file_name: result.fileName,
         kind,
         ids,
-        bytes: body.length,
+        bytes: result.archive.length,
         excluded: result.excluded,
         next: "Recreate it elsewhere with import_entities(kind, file_path)."
       };
@@ -40804,18 +40957,19 @@ function registerFlowHistoryTools(server, context) {
   server.registerTool(
     "import_entities",
     {
-      title: "Import flows, tools or agents from a file",
-      description: "Import an EpicStaff export document (from export_entities or the editor's Export) into the active organization. inspect_only: true first reports what the import would ask about, creating nothing. Flows: by default every import creates new copies; preserve_uuids + replace_existing overwrite the flows with the same uuid in place (needs flow update permission). Secrets are not in export files \u2014 re-attach credentials after importing.",
+      title: "Import flows, tools, agents or collections from a file",
+      description: "Import an EpicStaff export (the .zip archive from export_entities or the editor's Export, or a .json export of an older version) into the active organization. A .zip of flows, agents or collections runs as a background job this waits for; knowledge collections import from a .zip only. inspect_only: true first reports what the import would ask about, creating nothing. Flows: by default every import creates new copies; preserve_uuids + replace_existing overwrite the flows with the same uuid in place (needs flow update permission). Secrets are not in export files \u2014 re-attach credentials after importing.",
       inputSchema: {
         kind: transferKindSchema,
-        file_path: external_exports.string().describe("Absolute path of the export .json file."),
+        file_path: external_exports.string().describe("Absolute path of the export file (.zip or .json)."),
         inspect_only: external_exports.boolean().default(false).describe("Dry run: report what would be imported, change nothing."),
         preserve_uuids: external_exports.boolean().default(false).describe("Flows only: keep the file's uuids."),
         replace_existing: external_exports.boolean().default(false).describe("Flows only: overwrite flows with the same uuid in place (requires preserve_uuids)."),
-        import_labels: external_exports.boolean().default(true).describe("Recreate the file's labels and tag the imports with them.")
+        import_labels: external_exports.boolean().default(true).describe("Recreate the file's labels and tag the imports with them."),
+        wait_seconds: waitSecondsSchema
       }
     },
-    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels: import_labels4 }) => runTool(async () => {
+    async ({ kind, file_path, inspect_only, preserve_uuids, replace_existing, import_labels: import_labels4, wait_seconds }) => runTool(async () => {
       await context.auth.ensureAuthenticated();
       await context.org.requireActiveOrg();
       if (!isAbsolute4(file_path)) throw new Error("file_path must be an absolute path.");
@@ -40829,14 +40983,15 @@ function registerFlowHistoryTools(server, context) {
       if (inspect_only) {
         return { inspected: await transfer.inspect(kind, file_path) };
       }
-      const result = await transfer.import(kind, file_path, {
-        preserveUuids: preserve_uuids,
-        replaceExisting: replace_existing,
-        importLabels: import_labels4
-      });
+      const result = await transfer.import(
+        kind,
+        file_path,
+        { preserveUuids: preserve_uuids, replaceExisting: replace_existing, importLabels: import_labels4 },
+        wait_seconds * 1e3
+      );
       return {
         imported: result,
-        next: "Check the created entities (list_graphs / list_tools / list_agents) and re-attach secrets."
+        next: "Check the created entities (list_graphs / list_tools / list_agents / list_source_collections) and re-attach secrets."
       };
     })
   );
@@ -40890,7 +41045,7 @@ function writeExportFile(outputPath, body, overwrite) {
   const flags = overwrite ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0) : "wx";
   let descriptor;
   try {
-    descriptor = openSync(outputPath, flags, 420);
+    descriptor = openSync2(outputPath, flags, 420);
   } catch (error2) {
     const code = error2.code;
     if (code === "EEXIST") throw existingFileError(outputPath);
@@ -40898,9 +41053,9 @@ function writeExportFile(outputPath, body, overwrite) {
     throw error2;
   }
   try {
-    writeFileSync4(descriptor, body, "utf8");
+    writeFileSync4(descriptor, body);
   } finally {
-    closeSync(descriptor);
+    closeSync2(descriptor);
   }
 }
 
@@ -42126,7 +42281,7 @@ function errorText(error2) {
 
 // src/api/python-code-run.ts
 var POLL_INITIAL_DELAY_MS = 1e3;
-var POLL_INTERVAL_MS = 2e3;
+var POLL_INTERVAL_MS2 = 2e3;
 var POLL_DEADLINE_GRACE_MS = 6e4;
 var MAX_NOT_FOUND_RETRIES = 3;
 var PythonCodeRunApi = class {
@@ -42146,7 +42301,7 @@ var PythonCodeRunApi = class {
 };
 var DEFAULT_TIMING = {
   initialDelayMs: POLL_INITIAL_DELAY_MS,
-  intervalMs: POLL_INTERVAL_MS,
+  intervalMs: POLL_INTERVAL_MS2,
   graceMs: POLL_DEADLINE_GRACE_MS,
   sleep: (milliseconds) => new Promise((resolve2) => setTimeout(resolve2, milliseconds)),
   now: () => Date.now()
@@ -42449,7 +42604,7 @@ function registerFilterPresetTools(server, context) {
 }
 
 // src/util/secret-file.ts
-import { closeSync as closeSync2, lstatSync as lstatSync2, openSync as openSync2, statSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { closeSync as closeSync3, lstatSync as lstatSync2, openSync as openSync3, statSync, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname4, isAbsolute as isAbsolute5 } from "node:path";
 function assertNewSecretFilePath(path6) {
   if (!isAbsolute5(path6)) {
@@ -42477,7 +42632,7 @@ function assertNewSecretFilePath(path6) {
 function writeNewSecretFile(path6, content) {
   let descriptor;
   try {
-    descriptor = openSync2(path6, "wx", 384);
+    descriptor = openSync3(path6, "wx", 384);
   } catch (error2) {
     const code = error2.code;
     if (code === "EEXIST") throw new Error(`${path6} already exists \u2014 a credential is only ever written to a new file.`);
@@ -42486,7 +42641,7 @@ function writeNewSecretFile(path6, content) {
   try {
     writeFileSync5(descriptor, content, "utf8");
   } finally {
-    closeSync2(descriptor);
+    closeSync3(descriptor);
   }
 }
 
@@ -44177,7 +44332,7 @@ function registerPluginTools(server, context) {
     "list_plugins",
     {
       title: "List plugins of the active organization",
-      description: "The plugins (apps) you may open in the active organization, with your permissions in each and whether it is ready or in maintenance. include_service_accounts: true adds the plugin backends acting in the organization and what each may do there (resource \u2192 actions, outbound hosts) \u2014 needs `audit: read`. Plugins add no flow node types.",
+      description: "The plugins (apps) you may open in the active organization, with your permissions in each and whether it is ready, in maintenance or unavailable (its host is not served by this EpicStaff). include_service_accounts: true adds the plugin backends acting in the organization and what each may do there (resource \u2192 actions, outbound hosts) \u2014 needs `audit: read`. Plugins add no flow node types.",
       inputSchema: {
         include_service_accounts: external_exports.boolean().default(false)
       }
@@ -44416,7 +44571,7 @@ var EPICSTAFF_INSTRUCTIONS = [
   "to their own state paths, not output_variable_path. Credentials come from env vars",
   "(api_key_env, bot_token_env) and are stored as org secrets on push \u2014 never in flow source;",
   "EPICSTAFF_* / ES_MCP_* (the server's own settings) are refused as credential sources.",
-  "llm_configs follow the backend bounds: temperature 0\u20132, max_tokens >= 500.",
+  "llm_configs follow the backend bounds: temperature 0\u20132, max_tokens >= 500; the backend checks every model setting against its catalog and refuses one the model does not take.",
   "Call describe_node_types for the full node catalog (fields + runtime caveats).",
   "Deleted flows, agents, surfaces, tools, collections, tables and secrets go to the recycle bin",
   "(list_recycle_bin / restore_from_recycle_bin); snapshot a flow before risky edits (create_graph_version).",
@@ -44443,7 +44598,7 @@ async function main() {
   const server = new McpServer(
     {
       name: "epicstaff",
-      version: "1.5.0"
+      version: "1.6.0"
     },
     { instructions: EPICSTAFF_INSTRUCTIONS }
   );

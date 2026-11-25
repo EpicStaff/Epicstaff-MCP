@@ -143,7 +143,7 @@ export function registerPluginTools(server: McpServer, context: AppContext): voi
       title: 'List plugins of the active organization',
       description:
         'The plugins (apps) you may open in the active organization, with your permissions in each and whether it ' +
-        'is ready or in maintenance. include_service_accounts: true adds the plugin backends acting in the ' +
+        'is ready, in maintenance or unavailable (its host is not served by this EpicStaff). include_service_accounts: true adds the plugin backends acting in the ' +
         'organization and what each may do there (resource → actions, outbound hosts) — needs `audit: read`. ' +
         'Plugins add no flow node types.',
       inputSchema: {

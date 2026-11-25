@@ -258,6 +258,35 @@ ${edgesYaml}
     ]);
   });
 
+  it('emits model settings as parameters, endpoint fields as connection, config columns at the top level', async () => {
+    writeFlow(
+      ``,
+      `    - { from: start, to: finish }`,
+      `llm_configs:
+  bare: { model: gpt-4o }
+  tuned:
+    model: my-deployment
+    provider: azure
+    max_tokens: 800
+    base_url: https://example.openai.azure.com
+    connection: { api_version: "2024-06-01" }
+    params: { top_p: 0.9, timeout: 30 }`,
+    );
+    const artifact = await compileFlow(flowDir);
+    expect(errorsOf(artifact.diagnostics)).toStrictEqual([]);
+    const payloadOf = (key: string): unknown => artifact.entities.find((plan) => plan.key === key)?.payload;
+    // Nothing set: no `parameters`, so the backend stores the model's defaults.
+    expect(payloadOf('llm_configs.bare')).toStrictEqual({ custom_name: 'bare', model: { $model: 'gpt-4o' } });
+    expect(payloadOf('llm_configs.tuned')).toStrictEqual({
+      custom_name: 'tuned',
+      provider: 'azure',
+      model_name: 'my-deployment',
+      timeout: 30,
+      parameters: { max_tokens: 800, top_p: 0.9 },
+      connection: { api_version: '2024-06-01', base_url: 'https://example.openai.azure.com' },
+    });
+  });
+
   it('turns api_key_env and bot_token_env into secret ensure plans — never a raw value', async () => {
     writeFlow(
       `    bot:

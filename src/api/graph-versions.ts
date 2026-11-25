@@ -31,11 +31,16 @@ export interface GraphVersionUpdateRequest {
 
 /** A node or edge the restore could not bring back (its dependency is gone). */
 export interface RestoreWarning {
-  type: 'node_skipped' | 'edge_dropped' | string;
+  type: 'node_skipped' | 'edge_dropped' | 'storage_grant_capped' | string;
   node_name?: string;
   node_type?: string;
   node_id?: number;
   missing_node_id?: number;
+  /** `storage_grant_capped`: the grant boxes a restore unticked on the node's code, and the Files permissions the user lacks. */
+  dropped_grants?: Array<'read' | 'write' | 'delete'>;
+  missing_permissions?: string[];
+  /** Absent on `storage_grant_capped`. */
+  reason?: string;
   [key: string]: unknown;
 }
 

@@ -203,6 +203,10 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
             id: config.id,
             custom_name: config.custom_name,
             model: config.model,
+            provider: config.provider,
+            model_name: config.model_name,
+            // Set when the model or settings no longer match the backend's catalog; the config still runs.
+            ...(config.needs_review ? { needs_review: config.review_reasons } : {}),
           })),
         };
       }),
@@ -227,31 +231,30 @@ export function registerReferenceTools(server: McpServer, context: AppContext): 
     async ({ search, provider, limit }) =>
       runTool(async () => {
         await context.auth.ensureAuthenticated();
-        const [providers, models] = await Promise.all([llm.listProviders(), llm.listModels()]);
+        const providers = await llm.listProviders();
         const providerName = new Map(providers.map((p) => [p.id, p.name]));
-
-        const searchLower = search?.toLowerCase();
-        const providerLower = provider?.toLowerCase();
         const cap = limit ?? 50;
 
-        const matches = models
+        // The backend filters (the catalog is too large to load): one query per matching provider.
+        const providerLower = provider?.toLowerCase();
+        const providerIds =
+          providerLower === undefined
+            ? [undefined]
+            : providers.filter((p) => p.name.toLowerCase().includes(providerLower)).map((p) => p.id);
+        const pages = await Promise.all(
+          providerIds.map((providerId) => llm.searchModels({ nameContains: search, providerId, limit: cap })),
+        );
+        const total = pages.reduce((sum, page) => sum + page.count, 0);
+        const models = pages
+          .flatMap((page) => page.results)
+          .slice(0, cap)
           .map((model) => ({
             id: model.id,
             name: model.name,
             provider: providerName.get(model.llm_provider) ?? String(model.llm_provider),
-          }))
-          .filter((model) => {
-            if (searchLower && !model.name.toLowerCase().includes(searchLower)) return false;
-            if (providerLower && !model.provider.toLowerCase().includes(providerLower)) return false;
-            return true;
-          });
+          }));
 
-        return {
-          total_matches: matches.length,
-          returned: Math.min(matches.length, cap),
-          truncated: matches.length > cap,
-          models: matches.slice(0, cap),
-        };
+        return { total_matches: total, returned: models.length, truncated: total > models.length, models };
       }),
   );
 

@@ -7,6 +7,7 @@
 import type { AuthorshipFields, NumberedNodeDto } from '../authorship.js';
 import type { NodeDtoMetadata } from '../graph.js';
 import type { CustomPythonCode, GetPythonCodeDto } from './python-node.js';
+import type { StorageGrantFields } from './storage-grants.js';
 
 export type WebhookProviderType = 'ngrok' | 'localhost';
 
@@ -48,7 +49,7 @@ export interface WebhookTriggerModel {
  */
 export type WebhookTriggerRef = number;
 
-export interface WebhookTriggerNodeDto extends AuthorshipFields, NumberedNodeDto {
+export interface WebhookTriggerNodeDto extends AuthorshipFields, NumberedNodeDto, StorageGrantFields {
   id: number;
   /** Stable node identity (EpicStaff 1.5+), immutable once created. */
   uuid?: string;
@@ -63,11 +64,9 @@ export interface WebhookTriggerNodeDto extends AuthorshipFields, NumberedNodeDto
   webhook_trigger: WebhookTriggerRef | null;
   /** Payload used by "Run with test payload"; a JSON object, `{}` when unset. */
   test_payload: Record<string, unknown>;
-  /** Whether the code gets the flow's file storage (`epicstaff_storage`). */
-  use_storage: boolean;
 }
 
-export interface WebhookTriggerNodeWrite {
+export interface WebhookTriggerNodeWrite extends Required<StorageGrantFields> {
   node_name: string;
   graph: number;
   python_code: CustomPythonCode;
@@ -77,6 +76,5 @@ export interface WebhookTriggerNodeWrite {
   webhook_trigger_path: string;
   webhook_trigger: WebhookTriggerRef | null;
   test_payload: Record<string, unknown>;
-  use_storage: boolean;
   metadata: NodeDtoMetadata;
 }

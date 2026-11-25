@@ -8,10 +8,10 @@
  * backend knows by id (or that lives outside the source entirely):
  *
  *  - `{$model}`       — LLM model referenced by NAME in flow source. The pusher
- *                       resolves it to a model id via the `llm-models/` list
- *                       (using `provider` / `base_url` to disambiguate or to
- *                       create a custom model). Sits in the `model` position of
- *                       a `CreateLlmConfigRequest` payload template.
+ *                       resolves it to the id of the model row with that exact
+ *                       name. Sits in the `model` position of a
+ *                       `CreateLlmConfigRequest` payload template; a config that
+ *                       names its provider sends `provider` + `model_name` instead.
  *  - `{$env}`         — value of an environment variable (API keys, bot tokens).
  *                       Secrets never live in flow source; the pusher reads the
  *                       variable at push time.
@@ -30,16 +30,9 @@
 
 export interface ModelRef {
   $model: string;
-  /** Optional disambiguation hint carried from the flow source. */
-  provider?: string;
-  base_url?: string;
 }
 
-/**
- * Detected by the `$model` marker key alone — emit may attach `provider` /
- * `base_url` hints alongside it, which the pusher can use to disambiguate
- * models sharing a name across providers.
- */
+/** Detected by the `$model` marker key alone. */
 export function isModelRef(value: unknown): value is ModelRef {
   return (
     typeof value === 'object' && value !== null && typeof (value as ModelRef).$model === 'string'
